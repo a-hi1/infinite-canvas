@@ -119,7 +119,7 @@ export function AppConfigModal() {
         }
         setLoadingChannelId(channel.id);
         try {
-            const models = await fetchChannelModels(channel);
+            const models = uniqueModels(await fetchChannelModels(channel));
             updateChannels(config.channels.map((item) => (item.id === channel.id ? { ...item, models } : item)));
             message.success(`${channel.name} 模型列表已更新`);
         } catch (error) {
@@ -137,7 +137,7 @@ export function AppConfigModal() {
         }
         setLoadingChannelId("all");
         try {
-            const entries = await Promise.all(runnable.map(async (channel) => [channel.id, await fetchChannelModels(channel)] as const));
+            const entries = await Promise.all(runnable.map(async (channel) => [channel.id, uniqueModels(await fetchChannelModels(channel))] as const));
             const modelMap = new Map(entries);
             updateChannels(config.channels.map((channel) => (modelMap.has(channel.id) ? { ...channel, models: modelMap.get(channel.id) || [] } : channel)));
             message.success("模型列表已更新");
@@ -284,7 +284,7 @@ export function AppConfigModal() {
                                                     <Input.Password value={channel.apiKey} onChange={(event) => updateChannel(channel.id, { apiKey: event.target.value })} />
                                                 </Form.Item>
                                                 <Form.Item label="模型列表" className="mb-0 md:col-span-2">
-                                                    <Select mode="tags" showSearch allowClear maxTagCount="responsive" placeholder="输入模型名，或点击拉取模型" value={channel.models} onChange={(models) => updateChannel(channel.id, { models })} />
+                                                    <Select mode="tags" showSearch allowClear maxTagCount="responsive" placeholder="输入模型名，或点击拉取模型" value={uniqueModels(channel.models)} onChange={(models) => updateChannel(channel.id, { models })} />
                                                 </Form.Item>
                                             </div>
                                         </section>

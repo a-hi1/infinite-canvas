@@ -155,7 +155,7 @@ async function buildDavidWuGptImage2Prompts() {
 }
 
 function defaultPrompt(id: string, title: string, prompt: string, coverUrl: string, tags: string[], preview: string): Omit<Prompt, "category" | "githubUrl"> {
-    return { id, title, coverUrl, prompt, tags, preview, createdAt: "", updatedAt: "" };
+    return { id, title, coverUrl, prompt, tags: Array.from(new Set(tags.filter(Boolean))), preview, createdAt: "", updatedAt: "" };
 }
 
 async function fetchText(baseUrl: string, file: string) {

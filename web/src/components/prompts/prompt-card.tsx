@@ -1,4 +1,4 @@
-import { Copy } from "lucide-react";
+import { Copy, ImageIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { Button, Card, Tag } from "antd";
 
@@ -21,6 +21,8 @@ export function PromptCard({
     actionType?: "text" | "primary";
     extraAction?: ReactNode;
 }) {
+    const tags = Array.from(new Set(item.tags.filter(Boolean)));
+
     return (
         <Card
             hoverable
@@ -28,7 +30,14 @@ export function PromptCard({
             styles={{ body: { padding: 0 } }}
             cover={
                 <button type="button" className="block w-full text-left" onClick={onOpen}>
-                    <img src={item.coverUrl} alt={item.title} className="aspect-[4/3] w-full object-cover" />
+                    {item.coverUrl ? (
+                        <img src={item.coverUrl} alt={item.title} className="aspect-[4/3] w-full object-cover" />
+                    ) : (
+                        <div className="flex aspect-[4/3] w-full flex-col items-center justify-center gap-2 bg-stone-100 text-stone-400 dark:bg-stone-900 dark:text-stone-500">
+                            <ImageIcon className="size-8" />
+                            <span className="text-xs">暂无预览图</span>
+                        </div>
+                    )}
                 </button>
             }
         >
@@ -40,7 +49,7 @@ export function PromptCard({
                     </div>
                     <p className="mt-2 line-clamp-3 text-xs leading-5 text-stone-600 dark:text-stone-400">{item.prompt}</p>
                     <div className="mt-3 flex flex-wrap gap-1.5">
-                        {item.tags.map((tag) => (
+                        {tags.map((tag) => (
                             <Tag key={tag} className="m-0 text-[11px]">
                                 {tag}
                             </Tag>

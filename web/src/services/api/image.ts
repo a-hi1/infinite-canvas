@@ -211,14 +211,23 @@ function readAxiosError(error: unknown, fallback: string) {
     if (axios.isCancel(error)) return "请求已取消";
     if (axios.isAxiosError<{ error?: { message?: string }; msg?: string; code?: number }>(error)) {
         const responseData = error.response?.data;
-        return responseData?.msg || responseData?.error?.message || readStatusError(error.response?.status, fallback);
+        if (responseData?.msg || responseData?.error?.message) return responseData?.msg || responseData?.error?.message || fallback;
+        if (!error.response) return readNetworkError(error.code, fallback);
+        return readStatusError(error.response.status, fallback);
     }
     if (error instanceof DOMException && error.name === "AbortError") return "请求已取消";
     return error instanceof Error ? error.message : fallback;
 }
 
+function readNetworkError(code: string | undefined, fallback: string) {
+    if (code === "ECONNABORTED" || code === "ETIMEDOUT") return `${fallback}：图片接口连接超时，请检查 Base URL、网络代理或服务商状态`;
+    return `${fallback}：无法连接到图片接口，请确认 Base URL 可从浏览器直连、服务商支持 /v1/images/generations，且没有被代理、防火墙或 CORS 策略拦截`;
+}
+
 function readStatusError(status: number | undefined, fallback: string) {
+    if (status === 400) return `${fallback}（400），请检查图片模型、尺寸、数量和参考图是否被当前渠道支持`;
     if (status === 401 || status === 403) return "鉴权失败，请检查 API Key、套餐权限或模型权限";
+    if (status === 404) return `${fallback}（404），当前渠道可能不支持 /images/generations 接口或所选图片模型，请确认模型与 Base URL 匹配`;
     if (status === 429) return "请求被限流或额度不足，请稍后重试";
     return status ? `${fallback}：${status}` : fallback;
 }
@@ -726,20 +735,26 @@ export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKe
         if (config.apiFormat === "gemini") {
             const response = await axios.get<GeminiPayload>(geminiApiUrl({ ...defaultGeminiConfig, ...config }), { headers: geminiHeaders({ ...defaultGeminiConfig, ...config }) });
             validateGeminiPayload(response.data);
-            return (response.data.models || [])
-                .map((model) => model.name?.replace(/^models\//, ""))
-                .filter((id): id is string => Boolean(id))
-                .sort((a, b) => a.localeCompare(b));
+            return Array.from(
+                new Set(
+                    (response.data.models || [])
+                        .map((model) => model.name?.replace(/^models\//, ""))
+                        .filter((id): id is string => Boolean(id)),
+                ),
+            ).sort((a, b) => a.localeCompare(b));
         }
         const response = await axios.get<{ data?: Array<{ id?: string }>; error?: { message?: string } }>(buildApiUrl(config.baseUrl, "/models"), {
             headers: {
                 Authorization: `Bearer ${config.apiKey}`,
             },
         });
-        return (response.data.data || [])
-            .map((model) => model.id)
-            .filter((id): id is string => Boolean(id))
-            .sort((a, b) => a.localeCompare(b));
+        return Array.from(
+            new Set(
+                (response.data.data || [])
+                    .map((model) => model.id)
+                    .filter((id): id is string => Boolean(id)),
+            ),
+        ).sort((a, b) => a.localeCompare(b));
     } catch (error) {
         throw new Error(readAxiosError(error, "读取模型失败"));
     }

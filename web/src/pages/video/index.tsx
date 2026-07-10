@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, LoaderCircle, Music2, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon } from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImageIcon, LoaderCircle, Music2, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Tag, Typography } from "antd";
 import localforage from "localforage";
@@ -16,7 +16,7 @@ import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
 import { useAssetStore } from "@/stores/use-asset-store";
-import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { modelOptionLabel, modelOptionName, resolveModelChannel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -60,7 +60,7 @@ type GenerationLog = {
     error?: string;
 };
 
-type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark">;
+type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "baseUrl" | "apiFormat"> & { channelId?: string; channelName?: string };
 
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
@@ -71,10 +71,8 @@ export default function VideoPage() {
     const { message } = App.useApp();
     const fileInputRef = useRef<HTMLInputElement>(null);
     const activeLogIdsRef = useRef<Set<string>>(new Set());
-    const config = useConfigStore((state) => state.config);
     const effectiveConfig = useEffectiveConfig();
     const updateConfig = useConfigStore((state) => state.updateConfig);
-    const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const addAsset = useAssetStore((state) => state.addAsset);
     const [prompt, setPrompt] = useState("");
@@ -95,6 +93,11 @@ export default function VideoPage() {
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
     const model = effectiveConfig.videoModel || effectiveConfig.model;
+    const videoRequestConfig = buildVideoConfig(effectiveConfig, model);
+    const videoRequestChannel = resolveModelChannel(videoRequestConfig, model);
+    const seedanceMode = isSeedanceVideoConfig(videoRequestConfig);
+    const videoReadinessWarning = getVideoReadinessWarning(videoRequestConfig, model);
+    const referenceModeHint = seedanceMode ? "当前模型支持参考图、参考视频和参考音频" : "当前 OpenAI 格式视频接口仅支持参考图；参考视频/音频需要 Seedance 2.0 / 火山 Agent Plan";
     const canGenerate = Boolean(prompt.trim());
 
     useEffect(() => {
@@ -193,9 +196,14 @@ export default function VideoPage() {
             message.error("请输入视频提示词");
             return null;
         }
-        if (!isAiConfigReady(effectiveConfig, model)) {
-            message.warning("请先完成配置");
+        const warning = getVideoReadinessWarning(videoRequestConfig, model);
+        if (warning) {
+            message.warning(warning);
             openConfigDialog(true);
+            return null;
+        }
+        if (!seedanceMode && (videoReferences.length || audioReferences.length)) {
+            message.error("当前模型/渠道不是 Seedance 2.0 或火山 Agent Plan，不能使用参考视频或参考音频，请切换视频模型或移除这些参考素材");
             return null;
         }
         const videoReferenceError = seedanceVideoReferenceError(videoReferences);
@@ -203,7 +211,7 @@ export default function VideoPage() {
             message.error(`${videoReferenceError}。${seedanceVideoReferenceHint}`);
             return null;
         }
-        return { text, config: buildVideoConfig(effectiveConfig, model), references: [...references], videoReferences: [...videoReferences], audioReferences: [...audioReferences] };
+        return { text, config: videoRequestConfig, references: [...references], videoReferences: [...videoReferences], audioReferences: [...audioReferences] };
     };
 
     const retryResult = () => {
@@ -289,10 +297,13 @@ export default function VideoPage() {
         setRunning(true);
         setStartedAt((value) => value || performance.now());
         setResults((value) => (value.length ? value : [{ id: log.id, status: "pending" }]));
-        const taskConfig = buildVideoConfig({ ...effectiveConfig, ...log.config }, log.task.model || log.model);
+        const taskConfig = buildVideoConfig(configWithLogConfig(effectiveConfig, log.config), log.task.model || log.model);
+        const pollingConfig = configOverride || taskConfig;
         try {
+            const warning = getVideoReadinessWarning(pollingConfig, log.task.model || log.model);
+            if (warning) throw new Error(`无法继续查询历史任务：${warning}`);
             for (let attempt = 0; attempt < 120; attempt += 1) {
-                const state = await pollVideoGenerationTask(configOverride || taskConfig, log.task);
+                const state = await pollVideoGenerationTask(pollingConfig, log.task);
                 if (state.status === "completed") {
                     const stored = await storeGeneratedVideo(state.result);
                     const nextVideo: GeneratedVideo = {
@@ -354,7 +365,12 @@ export default function VideoPage() {
                 <section className="grid gap-3 lg:min-h-0 lg:overflow-hidden xl:grid-cols-[420px_minmax(0,1fr)]">
                     <div className="thin-scrollbar flex flex-col rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:min-h-0 lg:overflow-y-auto">
                         <div className="flex items-start justify-between gap-3">
-                            <h1 className="text-2xl font-semibold text-stone-950 dark:text-stone-100">视频创作台</h1>
+                            <div className="min-w-0">
+                                <h1 className="text-2xl font-semibold text-stone-950 dark:text-stone-100">视频创作台</h1>
+                                <div className="mt-2 text-xs leading-5 text-stone-500 dark:text-stone-400">
+                                    {modelOptionLabel(effectiveConfig, model)} · {videoRequestChannel.name} · {seedanceMode ? "Seedance / Agent Plan" : "OpenAI /videos"}
+                                </div>
+                            </div>
                             <div className="flex shrink-0 gap-2 lg:hidden">
                                 <Button icon={<History className="size-4" />} onClick={() => setLogsOpen(true)}>
                                     记录
@@ -363,6 +379,10 @@ export default function VideoPage() {
                                     参数
                                 </Button>
                             </div>
+                        </div>
+
+                        <div className={`mt-4 rounded-lg border px-3 py-2 text-xs leading-5 ${videoReadinessWarning ? "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100" : "border-stone-200 bg-stone-50 text-stone-500 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-400"}`}>
+                            {videoReadinessWarning || referenceModeHint}
                         </div>
 
                         <div className="mt-6 space-y-5">
@@ -396,7 +416,13 @@ export default function VideoPage() {
                                 <div className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700">
                                     {references.map((item, index) => (
                                         <div key={item.id} className="group relative size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
-                                            <img src={item.dataUrl} alt={item.name} className="size-full object-cover" />
+                                            {item.dataUrl ? (
+                                                <img src={item.dataUrl} alt={item.name} className="size-full object-cover" />
+                                            ) : (
+                                                <div className="flex size-full items-center justify-center bg-stone-100 text-stone-400 dark:bg-stone-900 dark:text-stone-500">
+                                                    <ImageIcon className="size-5" />
+                                                </div>
+                                            )}
                                             <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{seedanceReferenceLabel("image", index)}</span>
                                             <ReferenceOrderButtons index={index} total={references.length} onMove={(offset) => setReferences((value) => moveListItem(value, index, offset))} />
                                             <button type="button" className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label="移除参考图">
@@ -418,7 +444,13 @@ export default function VideoPage() {
                                 <div className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700">
                                     {videoReferences.map((item, index) => (
                                         <div key={item.id} className="group relative h-20 w-32 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-black dark:border-stone-800">
-                                            <video src={item.url} className="size-full object-cover" muted preload="metadata" />
+                                            {item.url ? (
+                                                <video src={item.url} className="size-full object-cover" muted preload="metadata" />
+                                            ) : (
+                                                <div className="flex size-full items-center justify-center text-stone-400">
+                                                    <VideoIcon className="size-5" />
+                                                </div>
+                                            )}
                                             <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{seedanceReferenceLabel("video", index)}</span>
                                             <ReferenceOrderButtons index={index} total={videoReferences.length} onMove={(offset) => setVideoReferences((value) => moveListItem(value, index, offset))} />
                                             <button type="button" className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setVideoReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label="移除参考视频">
@@ -445,7 +477,7 @@ export default function VideoPage() {
                                                 <span className="shrink-0 rounded bg-stone-200 px-1 text-[10px] text-stone-700 dark:bg-stone-800 dark:text-stone-200">{seedanceReferenceLabel("audio", index)}</span>
                                                 <span className="truncate">{item.name}</span>
                                             </div>
-                                            <audio src={item.url} controls className="h-8 w-full" preload="metadata" />
+                                            {item.url ? <audio src={item.url} controls className="h-8 w-full" preload="metadata" /> : <div className="h-8 rounded bg-stone-200/70 text-center text-xs leading-8 text-stone-500 dark:bg-stone-800">音频预览不可用</div>}
                                             <ReferenceOrderButtons index={index} total={audioReferences.length} onMove={(offset) => setAudioReferences((value) => moveListItem(value, index, offset))} />
                                             <button type="button" className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setAudioReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label="移除参考音频">
                                                 <Trash2 className="size-3.5" />
@@ -509,7 +541,7 @@ export default function VideoPage() {
             <Drawer title="生成记录" placement="bottom" size="large" open={logsOpen} onClose={() => setLogsOpen(false)}>
                 <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} />
             </Drawer>
-            <Drawer title="参数" placement="bottom" height="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
+            <Drawer title="参数" placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
                     <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
                 </div>
@@ -525,6 +557,7 @@ export default function VideoPage() {
 
 function GenerationSettings({ config, model, updateConfig, openConfigDialog }: { config: AiConfig; model: string; updateConfig: UpdateAiConfig; openConfigDialog: (shouldPromptContinue?: boolean) => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const videoConfig = { ...config, model, videoModel: model };
 
     return (
         <>
@@ -533,7 +566,7 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
                 <ModelPicker config={config} value={model} onChange={(value) => updateConfig("videoModel", value)} capability="video" fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </label>
             <div className="col-span-2">
-                <VideoSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
+                <VideoSettingsPanel config={videoConfig} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
             </div>
         </>
     );
@@ -542,7 +575,7 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
 function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedVideo; onDownload: (video: GeneratedVideo) => void; onSaveAsset: (video: GeneratedVideo) => void }) {
     return (
         <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-            <video src={video.url} controls className="aspect-video w-full bg-black object-contain" />
+            {video.url ? <video src={video.url} controls className="aspect-video w-full bg-black object-contain" /> : <div className="flex aspect-video w-full items-center justify-center bg-black text-sm text-white/70">视频预览不可用</div>}
             <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-200 px-3 py-2.5 dark:border-stone-800">
                 <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
                     <span>
@@ -783,10 +816,15 @@ function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
         videoSeconds: log.config?.videoSeconds || log.seconds || "",
         videoGenerateAudio: log.config?.videoGenerateAudio || "true",
         videoWatermark: log.config?.videoWatermark || "false",
+        baseUrl: log.config?.baseUrl || "",
+        apiFormat: log.config?.apiFormat || "openai",
+        channelId: log.config?.channelId,
+        channelName: log.config?.channelName,
     };
 }
 
 function buildLog({ prompt, model, config, references, videoReferences, audioReferences, durationMs, status, task, video, error }: { prompt: string; model: string; config: AiConfig; references: ReferenceImage[]; videoReferences: ReferenceVideo[]; audioReferences: ReferenceAudio[]; durationMs: number; status: GenerationLog["status"]; task?: VideoGenerationTask; video?: GeneratedVideo; error?: string }): GenerationLog {
+    const channel = resolveModelChannel(config, model);
     const logConfig = {
         model: config.model,
         videoModel: config.videoModel,
@@ -795,6 +833,10 @@ function buildLog({ prompt, model, config, references, videoReferences, audioRef
         videoSeconds: config.videoSeconds,
         videoGenerateAudio: config.videoGenerateAudio,
         videoWatermark: config.videoWatermark,
+        baseUrl: channel.baseUrl,
+        apiFormat: channel.apiFormat,
+        channelId: channel.id,
+        channelName: channel.name,
     };
     return {
         id: nanoid(),
@@ -816,6 +858,37 @@ function buildLog({ prompt, model, config, references, videoReferences, audioRef
         video,
         error,
     };
+}
+
+function configWithLogConfig(config: AiConfig, logConfig: GenerationLogConfig): AiConfig {
+    if (!logConfig.baseUrl) return { ...config, ...logConfig };
+    const model = logConfig.videoModel || logConfig.model;
+    const rawModel = modelOptionName(model);
+    const currentChannel = logConfig.channelId ? config.channels.find((channel) => channel.id === logConfig.channelId) : resolveModelChannel(config, model);
+    return {
+        ...config,
+        ...logConfig,
+        channels: [
+            {
+                id: logConfig.channelId || "history",
+                name: logConfig.channelName || "历史任务渠道",
+                baseUrl: logConfig.baseUrl,
+                apiKey: currentChannel?.apiKey || config.apiKey,
+                apiFormat: logConfig.apiFormat,
+                models: rawModel ? [rawModel] : [],
+            },
+            ...config.channels.filter((channel) => channel.id !== logConfig.channelId),
+        ],
+    };
+}
+
+function getVideoReadinessWarning(config: AiConfig, model: string) {
+    const channel = resolveModelChannel(config, model);
+    if (!model.trim()) return "请先配置视频模型";
+    if (!channel.baseUrl.trim()) return "请先配置视频 Base URL";
+    if (!channel.apiKey.trim()) return "请先配置视频渠道 API Key";
+    if (channel.apiFormat === "gemini") return "Gemini 调用格式暂不支持视频生成，请改用 OpenAI 格式渠道";
+    return "";
 }
 
 function buildVideoConfig(config: AiConfig, model: string): AiConfig {

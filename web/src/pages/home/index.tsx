@@ -1,4 +1,4 @@
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, ImageIcon } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { App, Button, Image, Tag } from "antd";
 import { useNavigate } from "react-router-dom";
@@ -80,7 +80,8 @@ export default function IndexPage() {
                                 key={item.id}
                                 type="button"
                                 onClick={() => {
-                                    setPreviewIndex(index);
+                                    if (!item.coverUrl) return;
+                                    setPreviewIndex(promptShowcase.slice(0, index).filter((prompt) => Boolean(prompt.coverUrl)).length);
                                     setPreviewOpen(true);
                                 }}
                                 className={cn(
@@ -89,10 +90,17 @@ export default function IndexPage() {
                                     index === 3 && "md:col-span-2",
                                 )}
                             >
-                                <img src={item.coverUrl} alt={item.title} className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]" />
+                                {item.coverUrl ? (
+                                    <img src={item.coverUrl} alt={item.title} className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]" />
+                                ) : (
+                                    <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-stone-400 dark:text-stone-500">
+                                        <ImageIcon className="size-8" />
+                                        <span className="text-xs">暂无预览图</span>
+                                    </div>
+                                )}
                                 <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 via-black/35 to-transparent p-4 text-white">
                                     <div className="mb-2 flex flex-wrap gap-1.5">
-                                        {item.tags.slice(0, 2).map((tag) => (
+                                        {Array.from(new Set(item.tags.filter(Boolean))).slice(0, 2).map((tag) => (
                                             <Tag key={tag} variant="filled" className="m-0 bg-white/15 text-[11px] text-white backdrop-blur">
                                                 {tag}
                                             </Tag>
@@ -115,9 +123,11 @@ export default function IndexPage() {
                 }}
             >
                 <div className="hidden">
-                    {promptShowcase.map((item) => (
-                        <Image key={item.id} src={item.coverUrl} alt={item.title} />
-                    ))}
+                    {promptShowcase
+                        .filter((item) => Boolean(item.coverUrl))
+                        .map((item) => (
+                            <Image key={item.id} src={item.coverUrl} alt={item.title} />
+                        ))}
                 </div>
             </Image.PreviewGroup>
         </main>

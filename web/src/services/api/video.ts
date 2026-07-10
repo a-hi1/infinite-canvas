@@ -283,7 +283,9 @@ function readAxiosError(error: unknown, fallback: string) {
 }
 
 function statusMessage(status: number | undefined, fallback: string) {
+    if (status === 400) return `${fallback}（400），请检查视频模型、尺寸/时长参数和参考素材是否被当前渠道支持`;
     if (status === 401 || status === 403) return "鉴权失败，请检查 API Key、套餐权限或模型权限";
+    if (status === 404) return `${fallback}（404），当前渠道可能不支持该视频接口路径或所选模型，请确认视频模型与 Base URL 匹配`;
     if (status === 429) return "请求被限流或额度不足，请稍后重试";
     return status ? `${fallback}（${status}）` : fallback;
 }

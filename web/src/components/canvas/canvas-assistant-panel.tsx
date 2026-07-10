@@ -162,11 +162,18 @@ export function CanvasAssistantPanel({ nodes, selectedNodeIds, snapshot, session
     const [localActiveSessionId, setLocalActiveSessionId] = useState<string | null>(activeSessionId);
     const snapshotRef = useRef(snapshot);
     const pendingToolContextRef = useRef(new Map<string, PendingOnlineToolContext>());
+    const fallbackSessionsRef = useRef<CanvasAssistantSession[] | null>(null);
+    const syncingSessionsFromPropsRef = useRef(false);
+    const fallbackSessions = () => {
+        if (!fallbackSessionsRef.current) fallbackSessionsRef.current = [createSession()];
+        return fallbackSessionsRef.current;
+    };
 
     useEffect(() => {
-        if (!sessions.length) return;
-        setLocalSessions(sessions);
-        setLocalActiveSessionId(activeSessionId);
+        const nextSessions = sessions.length ? sessions : fallbackSessions();
+        syncingSessionsFromPropsRef.current = true;
+        setLocalSessions((current) => (current === nextSessions ? current : nextSessions));
+        setLocalActiveSessionId((current) => (current === activeSessionId ? current : activeSessionId));
     }, [activeSessionId, sessions]);
 
     useEffect(() => {
@@ -174,10 +181,15 @@ export function CanvasAssistantPanel({ nodes, selectedNodeIds, snapshot, session
     }, [snapshot]);
 
     useEffect(() => {
+        if (syncingSessionsFromPropsRef.current) {
+            syncingSessionsFromPropsRef.current = false;
+            return;
+        }
+        if (localSessions === sessions && localActiveSessionId === activeSessionId) return;
         onSessionsChange(localSessions, localActiveSessionId);
-    }, [localActiveSessionId, localSessions, onSessionsChange]);
+    }, [activeSessionId, localActiveSessionId, localSessions, onSessionsChange, sessions]);
 
-    const safeSessions = localSessions.length ? localSessions : [createSession()];
+    const safeSessions = localSessions.length ? localSessions : fallbackSessions();
     const activeSession = useMemo(() => safeSessions.find((session) => session.id === localActiveSessionId) || safeSessions[0] || null, [localActiveSessionId, safeSessions]);
     const historySessions = safeSessions.filter((session) => session.messages.length > 0);
     const messages = activeSession?.messages || [];
