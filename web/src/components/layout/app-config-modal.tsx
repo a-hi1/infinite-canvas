@@ -7,7 +7,7 @@ import { fetchChannelModels } from "@/services/api/image";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
-import { createModelChannel, defaultBaseUrlForApiFormat, filterModelsByCapability, modelOptionLabel, modelOptionsFromChannels, normalizeModelOptionValue, useConfigStore, type AiConfig, type ApiCallFormat, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { AI_PROXY_BASE_URL, createModelChannel, defaultBaseUrlForApiFormat, encodeChannelModel, filterModelsByCapability, isAiProxyBaseUrl, modelOptionLabel, modelOptionsFromChannels, normalizeModelOptionValue, useConfigStore, type AiConfig, type ApiCallFormat, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -79,7 +79,7 @@ export function AppConfigModal() {
     };
 
     const finishConfig = () => {
-        const ready = config.channels.some((channel) => channel.baseUrl.trim() && channel.apiKey.trim() && channel.models.length);
+        const ready = config.channels.some((channel) => channel.baseUrl.trim() && (channel.apiKey.trim() || isAiProxyBaseUrl(channel.baseUrl)) && channel.models.length);
         setConfigDialogOpen(false);
         if (!ready) return;
         message.success(shouldPromptContinue ? "配置已保存，请继续刚才的请求" : "配置已保存");
@@ -104,6 +104,19 @@ export function AppConfigModal() {
         updateChannels([...config.channels, createModelChannel({ name: `渠道 ${config.channels.length + 1}` })]);
     };
 
+    const addProxyChannel = () => {
+        const name = "服务器 AI 代理";
+        const proxyChannel = createModelChannel({ name, baseUrl: AI_PROXY_BASE_URL, apiFormat: "openai", models: ["gpt-image-2", "agnes-video-v2.0", "gpt-5.5", "gpt-4o-mini-tts"] });
+        const nextConfig = withChannels(config, [...config.channels, proxyChannel]);
+        const agnesModel = encodeChannelModel(proxyChannel.id, "agnes-video-v2.0");
+        saveConfig({
+            ...nextConfig,
+            videoModels: uniqueModels([...nextConfig.videoModels, agnesModel]),
+            videoModel: agnesModel,
+        });
+        message.success("已添加服务器代理渠道，并已把 agnes-video-v2.0 设为默认视频模型");
+    };
+
     const deleteChannel = (id: string) => {
         if (config.channels.length <= 1) {
             message.warning("至少保留一个渠道");
@@ -113,8 +126,8 @@ export function AppConfigModal() {
     };
 
     const refreshChannelModels = async (channel: ModelChannel) => {
-        if (!channel.baseUrl.trim() || !channel.apiKey.trim()) {
-            message.error("请先填写该渠道的 Base URL 和 API Key");
+        if (!channel.baseUrl.trim() || (!channel.apiKey.trim() && !isAiProxyBaseUrl(channel.baseUrl))) {
+            message.error("请先填写该渠道的 Base URL 和 API Key；服务器代理未启用访问令牌时 API Key 可留空");
             return;
         }
         setLoadingChannelId(channel.id);
@@ -130,9 +143,9 @@ export function AppConfigModal() {
     };
 
     const refreshAllModels = async () => {
-        const runnable = config.channels.filter((channel) => channel.baseUrl.trim() && channel.apiKey.trim());
+        const runnable = config.channels.filter((channel) => channel.baseUrl.trim() && (channel.apiKey.trim() || isAiProxyBaseUrl(channel.baseUrl)));
         if (!runnable.length) {
-            message.error("请先填写至少一个渠道的 Base URL 和 API Key");
+            message.error("请先填写至少一个渠道的 Base URL 和 API Key；服务器代理未启用访问令牌时 API Key 可留空");
             return;
         }
         setLoadingChannelId("all");
@@ -244,10 +257,11 @@ export function AppConfigModal() {
                                             </Button>
                                         </div>
                                     </div>
-                                    <div className="flex shrink-0 gap-2">
+                                    <div className="flex shrink-0 flex-wrap gap-2">
                                         <Button icon={<RefreshCw className="size-4" />} loading={Boolean(loadingChannelId)} onClick={() => void refreshAllModels()}>
                                             拉取全部
                                         </Button>
+                                        <Button onClick={addProxyChannel}>添加服务器代理</Button>
                                         <Button type="primary" icon={<Plus className="size-4" />} onClick={addChannel}>
                                             新增渠道
                                         </Button>
@@ -280,7 +294,7 @@ export function AppConfigModal() {
                                                 <Form.Item label="Base URL" className="mb-0">
                                                     <Input value={channel.baseUrl} onChange={(event) => updateChannel(channel.id, { baseUrl: event.target.value })} />
                                                 </Form.Item>
-                                                <Form.Item label="API Key" className="mb-0">
+                                                <Form.Item label="API Key / 代理访问令牌" extra={isAiProxyBaseUrl(channel.baseUrl) ? "使用服务器代理时，这里填写 AI_PROXY_ACCESS_TOKEN；若服务器未启用访问令牌可留空。" : undefined} className="mb-0">
                                                     <Input.Password value={channel.apiKey} onChange={(event) => updateChannel(channel.id, { apiKey: event.target.value })} />
                                                 </Form.Item>
                                                 <Form.Item label="模型列表" className="mb-0 md:col-span-2">

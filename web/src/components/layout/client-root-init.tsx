@@ -41,7 +41,7 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
         if (baseUrl) updateConfig("baseUrl", baseUrl);
         if (apiKey) updateConfig("apiKey", apiKey);
         openConfigDialog(false);
-        message.success("已导入本地直连配置");
+        message.success(baseUrl?.replace(/\/+$/, "") === "/ai-proxy" ? "已导入服务器代理配置" : "已导入本地直连配置");
     }, [config.channels, message, openConfigDialog, updateConfig]);
 
     return <>{children}</>;

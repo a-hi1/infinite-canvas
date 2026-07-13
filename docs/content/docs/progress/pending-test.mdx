@@ -17,3 +17,4 @@ description: 当前版本已实现但仍需人工验证的变更项
 - Vercel 部署：新增 `web` 和 `docs` 两个子项目的 Vercel 配置，需分别验证静态前端和文档站部署。
 - Docker 部署：运行镜像从 Node serve 改为 nginx 静态托管，需验证前端路由刷新回退。
 - 环境变量：移除过期的后端 `.env.example` 示例文件。
+- AI 接口安全代理：新增 `ai-proxy` Docker 服务和 Nginx `/ai-proxy/` 同源转发，真实上游 API Key 存放在服务器 `.env.proxy`，前端可通过“添加服务器代理”创建 Base URL 为 `/ai-proxy` 的渠道，并用代理访问令牌作为 API Key；代理未启用访问令牌时前端允许 API Key 留空。代理渠道默认包含 `agnes-video-v2.0`，Agnes Video 走 `/v1/videos` 创建任务、`/agnesapi?video_id=...` 轮询；Agnes 创建/轮询遇到 429 会做短退避重试。需验证图片生成、参考图编辑、模型列表、文本问答、音频生成、OpenAI/Seedance/Agnes 视频任务和 CORS/鉴权/限流行为。

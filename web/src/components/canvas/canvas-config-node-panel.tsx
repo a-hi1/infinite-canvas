@@ -3,6 +3,7 @@ import { Image as ImageIcon, LoaderCircle, MessageSquare, Music2, Play, Settings
 import { Button, Segmented } from "antd";
 
 import { ModelPicker } from "@/components/model-picker";
+import { AGNES_VIDEO_SIZE, agnesVideoModeHint, agnesVideoTextOnlyError, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
 import { defaultConfig, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { CreditSymbol, requestCreditCost } from "@/constant/credits";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -33,7 +34,8 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
     const chipStyle = { background: theme.node.fill, borderColor: theme.node.stroke, color: theme.node.text };
     const hasAnyInput = Boolean(inputSummary.textCount || inputSummary.imageCount || inputSummary.videoCount || inputSummary.audioCount);
     const hasComposerContent = Boolean((node.metadata?.composerContent ?? node.metadata?.prompt ?? "").trim());
-    const canGenerate = hasComposerContent || (mode === "audio" ? inputSummary.textCount > 0 : hasAnyInput);
+    const agnesBlocked = mode === "video" && isAgnesVideoConfig(config) && Boolean(inputSummary.imageCount || inputSummary.videoCount || inputSummary.audioCount);
+    const canGenerate = (hasComposerContent || (mode === "audio" ? inputSummary.textCount > 0 : hasAnyInput)) && !agnesBlocked;
 
     return (
         <div className="flex h-full w-full cursor-move flex-col px-3 pb-3 pt-7 text-sm" style={{ color: theme.node.text }} onWheel={(event) => event.stopPropagation()}>
@@ -97,9 +99,14 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                     组装提示词
                 </button>
             </div>
+            {mode === "video" && isAgnesVideoConfig(config) ? (
+                <div className={`mb-2 rounded-md border px-2 py-1.5 text-[11px] leading-4 ${agnesBlocked ? "border-amber-400/70 text-amber-500" : "opacity-60"}`} style={agnesBlocked ? undefined : { borderColor: theme.node.stroke, color: theme.node.muted }}>
+                    {agnesBlocked ? agnesVideoTextOnlyError : agnesVideoModeHint}
+                </div>
+            ) : null}
 
             <div className={`mb-2 grid min-w-0 cursor-default items-center gap-2 ${mode === "image" || mode === "video" || mode === "audio" ? "grid-cols-[minmax(0,1fr)_148px]" : "grid-cols-1"}`} onMouseDown={(event) => event.stopPropagation()}>
-                <ModelPicker className="canvas-compact-control h-10" config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability={mode} onMissingConfig={() => openConfigDialog(true)} fullWidth />
+                <ModelPicker className="canvas-compact-control h-10" config={config} value={config.model} onChange={(model) => onConfigChange(node.id, videoModelPatch(config, model, mode))} capability={mode} onMissingConfig={() => openConfigDialog(true)} fullWidth />
                 {mode === "video" ? (
                     <CanvasVideoSettingsPopover config={config} placement="topRight" buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
                 ) : mode === "image" ? (
@@ -165,6 +172,19 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
         audioSpeed: node.metadata?.audioSpeed || globalConfig.audioSpeed || defaultConfig.audioSpeed,
         audioInstructions: node.metadata?.audioInstructions || globalConfig.audioInstructions || defaultConfig.audioInstructions,
         count: String(node.metadata?.count || (mode === "image" ? globalConfig.canvasImageCount || globalConfig.count : globalConfig.count) || defaultConfig.count),
+    };
+}
+
+function videoModelPatch(config: AiConfig, model: string, mode: CanvasGenerationMode): Partial<CanvasNodeMetadata> {
+    if (mode !== "video") return { model };
+    const nextConfig = { ...config, model, videoModel: model };
+    if (!isAgnesVideoConfig(nextConfig)) return { model };
+    return {
+        model,
+        size: AGNES_VIDEO_SIZE,
+        seconds: String(normalizeAgnesDuration(config.videoSeconds)),
+        generateAudio: "false",
+        watermark: "false",
     };
 }
 

@@ -13,6 +13,7 @@ import { resolveImageUrl, uploadImage, type UploadedImage } from "@/services/ima
 import { resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
+import { AGNES_VIDEO_SIZE, agnesVideoRequestError, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { useAssetStore } from "@/stores/use-asset-store";
@@ -2146,6 +2147,8 @@ function InfiniteCanvasPage() {
                 }
 
                 if (mode === "video") {
+                    const agnesReferenceError = isAgnesVideoConfig(generationConfig) ? agnesVideoRequestError(generationConfig, generationContext.referenceImages, generationContext.referenceVideos, generationContext.referenceAudios) : "";
+                    if (agnesReferenceError) throw new Error(agnesReferenceError);
                     const spec = nodeSizeFromRatio(generationConfig.size, NODE_DEFAULT_SIZE[CanvasNodeType.Video].width, NODE_DEFAULT_SIZE[CanvasNodeType.Video].height) || NODE_DEFAULT_SIZE[CanvasNodeType.Video];
                     const isEmptyVideoNode = sourceNode?.type === CanvasNodeType.Video && !sourceNode.metadata?.content;
                     const videoId = isEmptyVideoNode ? nodeId : nanoid();
@@ -2324,6 +2327,8 @@ function InfiniteCanvasPage() {
                     return;
                 }
                 if (node.type === CanvasNodeType.Video) {
+                    const agnesReferenceError = isAgnesVideoConfig(generationConfig) ? agnesVideoRequestError(generationConfig, retryImages, context?.referenceVideos || [], context?.referenceAudios || []) : "";
+                    if (agnesReferenceError) throw new Error(agnesReferenceError);
                     const video = await storeGeneratedVideo(await requestVideoGeneration(generationConfig, prompt, retryImages, context?.referenceVideos || [], context?.referenceAudios || [], { signal: controller.signal }));
                     const videoSize = fitNodeSize(video.width || node.width, video.height || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
                     setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, width: videoSize.width, height: videoSize.height, position: { x: item.position.x + item.width / 2 - videoSize.width / 2, y: item.position.y + item.height / 2 - videoSize.height / 2 }, metadata: { ...item.metadata, ...videoMetadata(video), prompt, model: generationConfig.model, size: generationConfig.size, seconds: generationConfig.videoSeconds, vquality: generationConfig.vquality, generateAudio: generationConfig.videoGenerateAudio, watermark: generationConfig.videoWatermark } } : item)));
@@ -3160,7 +3165,7 @@ function getInputSummary(inputs: NodeGenerationInput[]) {
 
 function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | undefined, mode: CanvasNodeGenerationMode): AiConfig {
     const defaultModel = mode === "image" ? config.imageModel : mode === "video" ? config.videoModel : mode === "audio" ? config.audioModel : config.textModel;
-    return {
+    const merged = {
         ...config,
         model: node?.metadata?.model || defaultModel || (mode === "audio" ? defaultConfig.audioModel : config.model || defaultConfig.model),
         quality: node?.metadata?.quality || config.quality || defaultConfig.quality,
@@ -3174,6 +3179,14 @@ function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | undefine
         audioSpeed: node?.metadata?.audioSpeed || config.audioSpeed || defaultConfig.audioSpeed,
         audioInstructions: node?.metadata?.audioInstructions || config.audioInstructions || defaultConfig.audioInstructions,
         count: String(node?.metadata?.count || (mode === "image" ? config.canvasImageCount || config.count : config.count) || defaultConfig.count),
+    };
+    if (mode !== "video" || !isAgnesVideoConfig(merged)) return merged;
+    return {
+        ...merged,
+        size: AGNES_VIDEO_SIZE,
+        videoSeconds: String(normalizeAgnesDuration(merged.videoSeconds)),
+        videoGenerateAudio: "false",
+        videoWatermark: "false",
     };
 }
 

@@ -157,13 +157,10 @@ export default function ImagePage() {
         const batchStartedAt = performance.now();
         setStartedAt(batchStartedAt);
 
-        const tasks = Array.from({ length: generationCount }, (_, index) => runGenerationSlot(index, snapshot));
-
-        const result = await Promise.allSettled(tasks);
-        const successImages = result.filter((item): item is PromiseFulfilledResult<GeneratedImage> => item.status === "fulfilled").map((item) => item.value);
+        const batchResult = await runGenerationBatch(snapshot, generationCount);
+        const successImages = batchResult.images;
         const successCount = successImages.length;
         const failCount = generationCount - successCount;
-        const failed = result.find((item): item is PromiseRejectedResult => item.status === "rejected");
 
         try {
             const logImages = await Promise.all(
@@ -185,7 +182,7 @@ export default function ImagePage() {
                     images: logImages,
                 }),
             );
-            successCount ? message.success("图片已生成") : message.error(failed?.reason instanceof Error ? failed.reason.message : "生成失败");
+            successCount ? message.success("图片已生成") : message.error(batchResult.firstError || "生成失败");
         } finally {
             setRunning(false);
         }
@@ -278,6 +275,33 @@ export default function ImagePage() {
             return null;
         }
         return { text, config: { ...effectiveConfig, model, count: "1" }, references: [...references] };
+    };
+
+    const runGenerationBatch = async (snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }, count: number) => {
+        const batchStartedAt = performance.now();
+        try {
+            const generated = snapshot.references.length ? await requestEdit({ ...snapshot.config, count: String(count) }, snapshot.text, snapshot.references) : await requestGeneration({ ...snapshot.config, count: String(count) }, snapshot.text);
+            const images = await Promise.all(
+                generated.slice(0, count).map(async (image, index) => {
+                    const meta = await readImageMeta(image.dataUrl);
+                    const nextImage = { id: image.id, dataUrl: image.dataUrl, durationMs: performance.now() - batchStartedAt, width: meta.width, height: meta.height, bytes: getDataUrlByteSize(image.dataUrl) };
+                    setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
+                    return nextImage;
+                }),
+            );
+            if (images.length < count) {
+                const settled = await Promise.allSettled(Array.from({ length: count - images.length }, (_, offset) => runGenerationSlot(images.length + offset, snapshot)));
+                const fallbackImages = settled.filter((item): item is PromiseFulfilledResult<GeneratedImage> => item.status === "fulfilled").map((item) => item.value);
+                const failed = settled.find((item): item is PromiseRejectedResult => item.status === "rejected");
+                return { images: [...images, ...fallbackImages], firstError: images.length || fallbackImages.length ? "" : failed?.reason instanceof Error ? failed.reason.message : "接口返回图片数量不足" };
+            }
+            return { images, firstError: "" };
+        } catch (error) {
+            const firstError = error instanceof Error ? error.message : "生成失败";
+            const settled = await Promise.allSettled(Array.from({ length: count }, (_, index) => runGenerationSlot(index, snapshot)));
+            const images = settled.filter((item): item is PromiseFulfilledResult<GeneratedImage> => item.status === "fulfilled").map((item) => item.value);
+            return { images, firstError };
+        }
     };
 
     const runGenerationSlot = async (index: number, snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }) => {

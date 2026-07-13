@@ -1,6 +1,6 @@
 import axios from "axios";
 
-import { buildApiUrl, resolveModelRequestConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { buildApiUrl, isAiProxyBaseUrl, resolveModelRequestConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
@@ -243,7 +243,7 @@ function aiApiUrl(config: AiConfig, path: string) {
 
 function aiHeaders(config: AiConfig, contentType?: string) {
     return {
-        Authorization: `Bearer ${config.apiKey}`,
+        ...(config.apiKey.trim() ? { Authorization: `Bearer ${config.apiKey}` } : {}),
         ...(contentType ? { "Content-Type": contentType } : {}),
     };
 }
@@ -251,7 +251,8 @@ function aiHeaders(config: AiConfig, contentType?: string) {
 function geminiBaseUrl(config: Pick<AiConfig, "baseUrl">) {
     const normalizedBaseUrl = config.baseUrl.trim().replace(/\/+$/, "");
     const lowerBaseUrl = normalizedBaseUrl.toLowerCase();
-    return lowerBaseUrl.endsWith("/v1") || lowerBaseUrl.endsWith("/v1beta") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1beta`;
+    if (lowerBaseUrl.endsWith("/v1") || lowerBaseUrl.endsWith("/v1beta")) return normalizedBaseUrl;
+    return `${normalizedBaseUrl}/${isAiProxyBaseUrl(normalizedBaseUrl) ? "v1" : "v1beta"}`;
 }
 
 function geminiModelName(model: string) {
@@ -264,9 +265,9 @@ function geminiApiUrl(config: Pick<AiConfig, "baseUrl" | "model">, action?: "gen
     return `${baseUrl}/models/${encodeURIComponent(geminiModelName(config.model))}:${action}`;
 }
 
-function geminiHeaders(config: Pick<AiConfig, "apiKey">) {
+function geminiHeaders(config: Pick<AiConfig, "baseUrl" | "apiKey">) {
     return {
-        "x-goog-api-key": config.apiKey,
+        ...(config.apiKey.trim() ? { "x-goog-api-key": config.apiKey } : {}),
         "Content-Type": "application/json",
     };
 }
@@ -744,9 +745,7 @@ export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKe
             ).sort((a, b) => a.localeCompare(b));
         }
         const response = await axios.get<{ data?: Array<{ id?: string }>; error?: { message?: string } }>(buildApiUrl(config.baseUrl, "/models"), {
-            headers: {
-                Authorization: `Bearer ${config.apiKey}`,
-            },
+            headers: config.apiKey.trim() ? { Authorization: `Bearer ${config.apiKey}` } : undefined,
         });
         return Array.from(
             new Set(

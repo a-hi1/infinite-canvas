@@ -8,7 +8,8 @@ import { saveAs } from "file-saver";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
-import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSizeLabel } from "@/components/video-settings-panel";
+import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSettingsSummary } from "@/components/video-settings-panel";
+import { AGNES_VIDEO_SIZE, agnesVideoModeHint, agnesVideoRequestError, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
@@ -16,7 +17,7 @@ import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
 import { useAssetStore } from "@/stores/use-asset-store";
-import { modelOptionLabel, modelOptionName, resolveModelChannel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { isAiProxyBaseUrl, modelOptionLabel, modelOptionName, resolveModelChannel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -95,9 +96,11 @@ export default function VideoPage() {
     const model = effectiveConfig.videoModel || effectiveConfig.model;
     const videoRequestConfig = buildVideoConfig(effectiveConfig, model);
     const videoRequestChannel = resolveModelChannel(videoRequestConfig, model);
+    const agnesMode = isAgnesVideoConfig(videoRequestConfig);
     const seedanceMode = isSeedanceVideoConfig(videoRequestConfig);
+    const videoProviderLabel = agnesMode ? "Agnes Video" : seedanceMode ? "Seedance / Agent Plan" : "OpenAI /videos";
     const videoReadinessWarning = getVideoReadinessWarning(videoRequestConfig, model);
-    const referenceModeHint = seedanceMode ? "当前模型支持参考图、参考视频和参考音频" : "当前 OpenAI 格式视频接口仅支持参考图；参考视频/音频需要 Seedance 2.0 / 火山 Agent Plan";
+    const referenceModeHint = agnesMode ? agnesVideoModeHint : seedanceMode ? "当前模型支持参考图、参考视频和参考音频" : "当前 OpenAI 格式视频接口仅支持参考图；参考视频/音频需要 Seedance 2.0 / 火山 Agent Plan";
     const canGenerate = Boolean(prompt.trim());
 
     useEffect(() => {
@@ -202,11 +205,16 @@ export default function VideoPage() {
             openConfigDialog(true);
             return null;
         }
-        if (!seedanceMode && (videoReferences.length || audioReferences.length)) {
+        const agnesReferenceError = agnesMode ? agnesVideoRequestError(videoRequestConfig, references, videoReferences, audioReferences) : "";
+        if (agnesReferenceError) {
+            message.error(agnesReferenceError);
+            return null;
+        }
+        if (!seedanceMode && !agnesMode && (videoReferences.length || audioReferences.length)) {
             message.error("当前模型/渠道不是 Seedance 2.0 或火山 Agent Plan，不能使用参考视频或参考音频，请切换视频模型或移除这些参考素材");
             return null;
         }
-        const videoReferenceError = seedanceVideoReferenceError(videoReferences);
+        const videoReferenceError = seedanceMode ? seedanceVideoReferenceError(videoReferences) : "";
         if (videoReferenceError) {
             message.error(`${videoReferenceError}。${seedanceVideoReferenceHint}`);
             return null;
@@ -323,7 +331,7 @@ export default function VideoPage() {
                 }
                 if (state.status === "failed") throw new Error(state.error);
                 if (attempt === 119) throw new Error("视频生成超时，请稍后重试");
-                await delay(log.task.provider === "seedance" ? 5000 : 2500);
+                await delay(log.task.provider === "seedance" || log.task.provider === "agnes" ? 5000 : 2500);
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "生成失败";
@@ -368,7 +376,7 @@ export default function VideoPage() {
                             <div className="min-w-0">
                                 <h1 className="text-2xl font-semibold text-stone-950 dark:text-stone-100">视频创作台</h1>
                                 <div className="mt-2 text-xs leading-5 text-stone-500 dark:text-stone-400">
-                                    {modelOptionLabel(effectiveConfig, model)} · {videoRequestChannel.name} · {seedanceMode ? "Seedance / Agent Plan" : "OpenAI /videos"}
+                                    {modelOptionLabel(effectiveConfig, model)} · {videoRequestChannel.name} · {videoProviderLabel}
                                 </div>
                             </div>
                             <div className="flex shrink-0 gap-2 lg:hidden">
@@ -490,7 +498,7 @@ export default function VideoPage() {
 
                             <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm dark:border-stone-800 dark:bg-stone-900 sm:hidden">
                                 <span className="truncate text-stone-500 dark:text-stone-400">
-                                    {modelOptionLabel(effectiveConfig, model)} · {normalizeResolution(effectiveConfig.vquality)}p · {videoSizeLabel(effectiveConfig.size)} · {normalizeVideoSeconds(effectiveConfig.videoSeconds)}s
+                                    {modelOptionLabel(effectiveConfig, model)} · {videoSettingsSummary(videoRequestConfig)}
                                 </span>
                                 <Button size="small" type="text" icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
                                     调整
@@ -886,13 +894,26 @@ function getVideoReadinessWarning(config: AiConfig, model: string) {
     const channel = resolveModelChannel(config, model);
     if (!model.trim()) return "请先配置视频模型";
     if (!channel.baseUrl.trim()) return "请先配置视频 Base URL";
-    if (!channel.apiKey.trim()) return "请先配置视频渠道 API Key";
+    if (!channel.apiKey.trim() && !isAiProxyBaseUrl(channel.baseUrl)) return "请先配置视频渠道 API Key";
     if (channel.apiFormat === "gemini") return "Gemini 调用格式暂不支持视频生成，请改用 OpenAI 格式渠道";
     return "";
 }
 
 function buildVideoConfig(config: AiConfig, model: string): AiConfig {
-    const seedance = isSeedanceVideoConfig({ ...config, model });
+    const partial = { ...config, model, videoModel: model };
+    if (isAgnesVideoConfig(partial)) {
+        return {
+            ...config,
+            model,
+            videoModel: model,
+            size: AGNES_VIDEO_SIZE,
+            videoSeconds: String(normalizeAgnesDuration(config.videoSeconds)),
+            vquality: normalizeResolution(config.vquality),
+            videoGenerateAudio: "false",
+            videoWatermark: "false",
+        };
+    }
+    const seedance = isSeedanceVideoConfig(partial);
     return {
         ...config,
         model,

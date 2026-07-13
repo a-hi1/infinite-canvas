@@ -4,4 +4,22 @@ services:
     container_name: infinite-canvas
     ports:
       - "3000:3000"
+    depends_on:
+      - ai-proxy
+    restart: unless-stopped
+
+  ai-proxy:
+    image: infinite-canvas-ai-proxy:local
+    build:
+      context: ./ai-proxy
+      dockerfile: Dockerfile
+    environment:
+      AI_PROXY_BASE_URL: ${AI_PROXY_BASE_URL:-}
+      AI_PROXY_API_KEY: ${AI_PROXY_API_KEY:-}
+      AI_PROXY_ACCESS_TOKEN: ${AI_PROXY_ACCESS_TOKEN:-}
+      AI_PROXY_ALLOWED_ORIGINS: ${AI_PROXY_ALLOWED_ORIGINS:-*}
+      AI_PROXY_MAX_BODY_BYTES: ${AI_PROXY_MAX_BODY_BYTES:-83886080}
+      AI_PROXY_TIMEOUT_MS: ${AI_PROXY_TIMEOUT_MS:-300000}
+      AI_PROXY_RATE_LIMIT_WINDOW_MS: ${AI_PROXY_RATE_LIMIT_WINDOW_MS:-60000}
+      AI_PROXY_RATE_LIMIT_MAX: ${AI_PROXY_RATE_LIMIT_MAX:-120}
     restart: unless-stopped

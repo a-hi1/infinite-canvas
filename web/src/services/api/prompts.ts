@@ -67,9 +67,17 @@ async function getPrompts() {
     const cached = await promptCacheStore.getItem<{ items?: Prompt[]; fetchedAt?: number }>(promptCacheKey);
     if (cached?.items?.length && cached.fetchedAt && Date.now() - cached.fetchedAt < cacheTtlMs) return cached.items;
     if (loadingPrompts) return loadingPrompts;
-    loadingPrompts = loadPrompts().finally(() => {
-        loadingPrompts = null;
-    });
+    loadingPrompts = loadPrompts()
+        .then(async (items) => {
+            if (items.length) {
+                await promptCacheStore.setItem(promptCacheKey, { items, fetchedAt: Date.now() });
+                return items;
+            }
+            return cached?.items?.length ? cached.items : items;
+        })
+        .finally(() => {
+            loadingPrompts = null;
+        });
     return loadingPrompts;
 }
 
@@ -84,9 +92,7 @@ async function loadPrompts() {
             }
         }),
     );
-    const items = settled.flat();
-    await promptCacheStore.setItem(promptCacheKey, { items, fetchedAt: Date.now() });
-    return items;
+    return settled.flat();
 }
 
 function filterPrompts(items: Prompt[], options: { keyword: string; category: string; tags: string[] }) {

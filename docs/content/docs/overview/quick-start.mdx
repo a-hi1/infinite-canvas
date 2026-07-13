@@ -9,7 +9,7 @@ description: 用最少步骤把无限画布跑起来
 
 ## Vercel 部署
 
-在 Vercel 中导入仓库即可，根目录 `vercel.json` 会构建 `web/`。当前版本的 AI 请求由浏览器前台直连用户自己的 OpenAI 兼容地址，不需要额外配置服务端。
+在 Vercel 中导入仓库即可，根目录 `vercel.json` 会构建 `web/`。默认 AI 请求由浏览器前台直连用户自己的 OpenAI 兼容地址；如果需要隐藏共享上游 Key，请使用 Docker 部署里的 `/ai-proxy` 同源代理。
 
 ## 本地启动
 
@@ -38,11 +38,11 @@ docker run --rm -p 3000:3000 infinite-canvas
 
 ## 首次使用建议
 
-- 先打开右上角配置弹窗，填入自己的 `Base URL`、`API Key` 和模型名。
+- 先打开右上角配置弹窗，填入自己的 `Base URL`、`API Key` 和模型名；自部署代理模式可点击“添加服务器代理”。
 - 如果需要提示词仓库内容，打开 `/prompts` 会由浏览器前端直连拉取并缓存到 IndexedDB。
 - 如果需要跨设备同步画布、素材和生成记录，可在配置弹窗中填写 WebDAV。
 
 ## 说明
 
 - 当前画布项目和“我的素材”主要保存在浏览器本地，WebDAV 同步需要用户自行配置。
-- AI API Key 保存在浏览器本地，并由前端直接请求 OpenAI 兼容接口。
+- 默认情况下 AI API Key 保存在浏览器本地，并由前端直接请求 OpenAI 兼容接口；自部署 `/ai-proxy` 模式可把真实上游 Key 放在服务器 `.env.proxy`。

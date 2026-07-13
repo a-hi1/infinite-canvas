@@ -2,6 +2,7 @@ import { type ReactNode } from "react";
 import { Switch } from "antd";
 
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
+import { AGNES_VIDEO_HEIGHT, AGNES_VIDEO_SIZE, AGNES_VIDEO_WIDTH, agnesDurationOptions, agnesVideoModeHint, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
 import { boolConfig, isSeedanceFastModel, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceDurationOptions, seedancePixelLabel, seedanceRatioOptions, seedanceResolutionOptions } from "@/lib/seedance-video";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
@@ -31,6 +32,9 @@ type VideoSettingsPanelProps = {
 };
 
 export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: VideoSettingsPanelProps) {
+    if (isAgnesVideoConfig(config)) {
+        return <AgnesVideoSettingsPanel config={config} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} className={className} />;
+    }
     if (isSeedanceVideoConfig(config)) {
         return <SeedanceVideoSettingsPanel config={config} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} className={className} />;
     }
@@ -100,6 +104,39 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     );
 }
 
+function AgnesVideoSettingsPanel({ config, onConfigChange, theme, showTitle, className }: VideoSettingsPanelProps) {
+    const duration = normalizeAgnesDuration(config.videoSeconds);
+
+    return (
+        <ImageSettingsTheme theme={theme}>
+            <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
+                {showTitle ? <div className="text-lg font-semibold">Agnes 视频设置</div> : null}
+                <SettingGroup title="模式" color={theme.node.muted}>
+                    <div className="rounded-xl border p-3 text-xs leading-5" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                        {agnesVideoModeHint}
+                    </div>
+                </SettingGroup>
+                <SettingGroup title="尺寸" color={theme.node.muted}>
+                    <button type="button" className="flex h-[78px] w-full cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border bg-transparent text-sm transition hover:opacity-80" style={{ borderColor: theme.node.text, color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()} onClick={() => onConfigChange("size", AGNES_VIDEO_SIZE)}>
+                        <SizePreview width={AGNES_VIDEO_WIDTH} height={AGNES_VIDEO_HEIGHT} color={theme.node.text} />
+                        <span>Agnes 横屏</span>
+                        <span className="text-[11px] leading-none opacity-55">{AGNES_VIDEO_SIZE}</span>
+                    </button>
+                </SettingGroup>
+                <SettingGroup title="秒数" color={theme.node.muted}>
+                    <div className="grid grid-cols-2 gap-2.5">
+                        {agnesDurationOptions.map((value) => (
+                            <OptionPill key={value} selected={duration === value} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
+                                {value}s
+                            </OptionPill>
+                        ))}
+                    </div>
+                </SettingGroup>
+            </div>
+        </ImageSettingsTheme>
+    );
+}
+
 function SeedanceVideoSettingsPanel({ config, onConfigChange, theme, showTitle, className }: VideoSettingsPanelProps) {
     const model = modelOptionName(config.model || config.videoModel);
     const resolution = normalizeSeedanceResolution(config.vquality, model);
@@ -162,6 +199,11 @@ function SeedanceVideoSettingsPanel({ config, onConfigChange, theme, showTitle, 
             </div>
         </ImageSettingsTheme>
     );
+}
+
+export function videoSettingsSummary(config: Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "baseUrl">) {
+    if (isAgnesVideoConfig(config)) return `Agnes · ${AGNES_VIDEO_SIZE} · ${normalizeAgnesDuration(config.videoSeconds)}s`;
+    return `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
 }
 
 export function videoResolutionLabel(value: string) {

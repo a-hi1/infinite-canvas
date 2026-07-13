@@ -47,6 +47,18 @@ cd docs
 docker compose -f docker-compose.local.yml up -d --build
 ```
 
+## AI 代理配置
+
+如果希望公网部署时不在浏览器 Network 中暴露共享上游 API Key，可以使用本地源码 compose 中的 `ai-proxy` 服务：
+
+```bash
+cp .env.proxy.example .env.proxy
+# 编辑 .env.proxy，填入 AI_PROXY_BASE_URL、AI_PROXY_API_KEY 和 AI_PROXY_ACCESS_TOKEN
+docker compose -f docker-compose.local.yml up -d --build
+```
+
+启动后主应用会把同源 `/ai-proxy/` 转发到代理容器。前端配置里点击“添加服务器代理”，保持 Base URL 为 `/ai-proxy`，API Key 填 `.env.proxy` 中的 `AI_PROXY_ACCESS_TOKEN`；如果代理未启用访问令牌，也可以留空。真实上游 Key 只放在服务器 `.env.proxy`，不要写入源码或提交到 Git。
+
 ## 数据说明
 
-当前主应用镜像只启动 Next.js。画布、我的素材、生成记录和 AI API Key 默认保存在浏览器本地；第三方提示词由浏览器前端直连拉取，不需要额外挂载数据目录。
+当前主应用镜像使用 nginx 托管 Vite 静态产物。画布、我的素材、生成记录和默认 AI 渠道配置保存在浏览器本地；使用 AI 代理时，真实上游 API Key 保存在服务器 `.env.proxy`。第三方提示词由浏览器前端直连拉取，不需要额外挂载数据目录。
