@@ -5,9 +5,10 @@ import { saveAs } from "file-saver";
 
 import { useCopyText } from "@/hooks/use-copy-text";
 import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
+import { uploadMediaFile } from "@/services/file-storage";
 import { uploadImage } from "@/services/image-storage";
 import { cn } from "@/lib/utils";
-import { useAssetStore, type Asset, type AssetKind, type ImageAsset } from "@/stores/use-asset-store";
+import { useAssetStore, type Asset, type AssetKind, type ImageAsset, type VideoAsset } from "@/stores/use-asset-store";
 import { exportAssets, readAssetPackage } from "./asset-transfer";
 
 type AssetFormValues = {
@@ -21,6 +22,7 @@ type AssetFormValues = {
 };
 
 type ImageDraft = ImageAsset["data"] | null;
+type VideoDraft = VideoAsset["data"] | null;
 
 const kindOptions = [
     { label: "全部", value: "all" },
@@ -51,6 +53,7 @@ export default function AssetsPage() {
     const [deletingAsset, setDeletingAsset] = useState<Asset | null>(null);
     const [formKind, setFormKind] = useState<AssetKind>("text");
     const [imageDraft, setImageDraft] = useState<ImageDraft>(null);
+    const [videoDraft, setVideoDraft] = useState<VideoDraft>(null);
     const coverUrl = Form.useWatch("coverUrl", form) || "";
     const title = Form.useWatch("title", form) || "";
     const tags = Form.useWatch("tags", form) || [];
@@ -79,6 +82,7 @@ export default function AssetsPage() {
     const openCreate = () => {
         setEditingAsset(null);
         setImageDraft(null);
+        setVideoDraft(null);
         setFormKind("text");
         form.setFieldsValue({ kind: "text", title: "", coverUrl: "", tags: [], source: "手动添加", note: "", content: "" });
         setIsAssetOpen(true);
@@ -88,6 +92,7 @@ export default function AssetsPage() {
         setEditingAsset(asset);
         setFormKind(asset.kind);
         setImageDraft(asset.kind === "image" ? asset.data : null);
+        setVideoDraft(asset.kind === "video" ? asset.data : null);
         form.setFieldsValue({
             kind: asset.kind,
             title: asset.title,
@@ -114,6 +119,13 @@ export default function AssetsPage() {
         if (values.kind === "text") {
             const asset = { ...base, kind: "text" as const, data: { content: (values.content || "").trim() } };
             editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
+        } else if (values.kind === "video") {
+            if (!videoDraft) {
+                message.error("请选择视频文件");
+                return;
+            }
+            const asset = { ...base, kind: "video" as const, data: videoDraft };
+            editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
         } else {
             if (!imageDraft) {
                 message.error("请选择图片文件");
@@ -129,17 +141,51 @@ export default function AssetsPage() {
 
     const readCoverFile = async (file?: File) => {
         if (!file) return;
+        if (!file.type.startsWith("image/")) {
+            message.warning("封面请选择图片文件");
+            return;
+        }
         const dataUrl = await readFileAsDataUrl(file);
         form.setFieldValue("coverUrl", dataUrl);
     };
 
     const readImageFile = async (file?: File) => {
-        if (!file || !file.type.startsWith("image/")) return;
+        if (!file) return;
+        if (!file.type.startsWith("image/") && !isLikelyImageFile(file)) {
+            message.warning("请选择图片文件");
+            return;
+        }
         const image = await uploadImage(file);
-        const draft = { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType };
+        const draft = { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType || file.type || "image/png" };
         setImageDraft(draft);
+        setVideoDraft(null);
+        setFormKind("image");
+        form.setFieldValue("kind", "image");
         if (!form.getFieldValue("coverUrl")) form.setFieldValue("coverUrl", draft.dataUrl);
-        if (!form.getFieldValue("title")) form.setFieldValue("title", file.name);
+        if (!form.getFieldValue("title")) form.setFieldValue("title", fileNameWithoutExtension(file.name));
+    };
+
+    const readVideoFile = async (file?: File) => {
+        if (!file) return;
+        if (!file.type.startsWith("video/") && !isLikelyVideoFile(file)) {
+            message.warning("请选择视频文件");
+            return;
+        }
+        const video = await uploadMediaFile(file, "video-asset");
+        const draft = {
+            url: video.url,
+            storageKey: video.storageKey,
+            width: video.width || 1280,
+            height: video.height || 720,
+            bytes: video.bytes,
+            mimeType: video.mimeType || file.type || "video/mp4",
+        };
+        setVideoDraft(draft);
+        setImageDraft(null);
+        setFormKind("video");
+        form.setFieldValue("kind", "video");
+        if (!form.getFieldValue("title")) form.setFieldValue("title", fileNameWithoutExtension(file.name));
+        if (!form.getFieldValue("coverUrl")) form.setFieldValue("coverUrl", "");
     };
 
     const copyAssetText = async (asset: Asset) => {
@@ -160,23 +206,85 @@ export default function AssetsPage() {
         await exportAssets(validAssets);
     };
 
-    const importAssetZip = async (file?: File) => {
-        if (!file) return;
-        try {
-            const importedAssets = await readAssetPackage(file);
-            importedAssets.forEach((asset) => {
-                const payload = { ...asset } as Record<string, unknown>;
-                delete payload.id;
-                delete payload.createdAt;
-                delete payload.updatedAt;
-                addAsset(payload as Parameters<typeof addAsset>[0]);
-            });
-            message.success(`已导入 ${importedAssets.length} 个素材`);
-        } catch {
-            message.error("导入失败，请选择有效的素材压缩包");
-        } finally {
-            if (assetInputRef.current) assetInputRef.current.value = "";
+    const importAssetFiles = async (files?: FileList | null) => {
+        const selectedFiles = Array.from(files || []);
+        if (!selectedFiles.length) return;
+        let importedCount = 0;
+        let packageCount = 0;
+        let failedCount = 0;
+
+        for (const file of selectedFiles) {
+            try {
+                if (isAssetPackageFile(file)) {
+                    const importedAssets = await readAssetPackage(file);
+                    importedAssets.forEach((asset) => {
+                        const payload = { ...asset } as Record<string, unknown>;
+                        delete payload.id;
+                        delete payload.createdAt;
+                        delete payload.updatedAt;
+                        addAsset(payload as Parameters<typeof addAsset>[0]);
+                    });
+                    packageCount += importedAssets.length;
+                    importedCount += 1;
+                    continue;
+                }
+
+                if (file.type.startsWith("image/") || isLikelyImageFile(file)) {
+                    const image = await uploadImage(file);
+                    addAsset({
+                        kind: "image",
+                        title: fileNameWithoutExtension(file.name) || "本地图片",
+                        coverUrl: image.url,
+                        tags: [],
+                        source: "本地导入",
+                        data: {
+                            dataUrl: image.url,
+                            storageKey: image.storageKey,
+                            width: image.width,
+                            height: image.height,
+                            bytes: image.bytes,
+                            mimeType: image.mimeType || file.type || "image/png",
+                        },
+                        metadata: { source: "local-import", fileName: file.name },
+                    });
+                    importedCount += 1;
+                    continue;
+                }
+
+                if (file.type.startsWith("video/") || isLikelyVideoFile(file)) {
+                    const video = await uploadMediaFile(file, "video-asset");
+                    addAsset({
+                        kind: "video",
+                        title: fileNameWithoutExtension(file.name) || "本地视频",
+                        coverUrl: "",
+                        tags: [],
+                        source: "本地导入",
+                        data: {
+                            url: video.url,
+                            storageKey: video.storageKey,
+                            width: video.width || 1280,
+                            height: video.height || 720,
+                            bytes: video.bytes,
+                            mimeType: video.mimeType || file.type || "video/mp4",
+                        },
+                        metadata: { source: "local-import", fileName: file.name },
+                    });
+                    importedCount += 1;
+                    continue;
+                }
+
+                failedCount += 1;
+            } catch {
+                failedCount += 1;
+            }
         }
+
+        if (importedCount) {
+            const packageHint = packageCount ? `（含压缩包内 ${packageCount} 项）` : "";
+            message.success(`已导入 ${importedCount} 个文件${packageHint}`);
+        }
+        if (failedCount) message.warning(`有 ${failedCount} 个文件未能识别，请选择图片、视频或素材压缩包`);
+        if (assetInputRef.current) assetInputRef.current.value = "";
     };
 
     const confirmDelete = () => {
@@ -192,7 +300,7 @@ export default function AssetsPage() {
                 <div className="pb-8">
                     <div className="mx-auto max-w-5xl text-center">
                         <h1 className="text-4xl font-semibold tracking-tight text-stone-950 dark:text-stone-100">我的素材</h1>
-                        <p className="mt-3 text-sm text-stone-500 dark:text-stone-400">收藏常用文本和图片，按类型、标题和标签快速查找。</p>
+                        <p className="mt-3 text-sm text-stone-500 dark:text-stone-400">收藏常用文本、图片和视频，支持直接导入本机文件或素材压缩包。</p>
                     </div>
 
                     <div className="mx-auto mt-8 w-full max-w-2xl">
@@ -251,7 +359,7 @@ export default function AssetsPage() {
                                     className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-stone-300"
                                     onClick={() => assetInputRef.current?.click()}
                                 >
-                                    导入素材
+                                    导入本地文件
                                 </button>
                                 <button
                                     type="button"
@@ -308,8 +416,19 @@ export default function AssetsPage() {
                                 options={[
                                     { label: "文本", value: "text" },
                                     { label: "图片", value: "image" },
+                                    { label: "视频", value: "video" },
                                 ]}
-                                onChange={(value) => setFormKind(value)}
+                                onChange={(value) => {
+                                    setFormKind(value);
+                                    if (value === "text") {
+                                        setImageDraft(null);
+                                        setVideoDraft(null);
+                                    } else if (value === "image") {
+                                        setVideoDraft(null);
+                                    } else if (value === "video") {
+                                        setImageDraft(null);
+                                    }
+                                }}
                             />
                         </Form.Item>
                         <Form.Item name="title" label="标题" rules={[{ required: true, message: "请输入标题" }]}>
@@ -328,7 +447,7 @@ export default function AssetsPage() {
                         </Form.Item>
                         <div className="grid gap-4 sm:grid-cols-2">
                             <Form.Item name="source" label="来源">
-                                <Input placeholder="手动添加 / 画布 / 提示词库" />
+                                <Input placeholder="手动添加 / 画布 / 提示词库 / 本地导入" />
                             </Form.Item>
                             <Form.Item name="note" label="备注">
                                 <Input placeholder="可选" />
@@ -337,6 +456,23 @@ export default function AssetsPage() {
                         {formKind === "text" ? (
                             <Form.Item name="content" label="文本内容" rules={[{ required: true, message: "请输入文本内容" }]}>
                                 <Input.TextArea rows={8} placeholder="保存提示词、说明文案、参考描述等文本素材" />
+                            </Form.Item>
+                        ) : formKind === "video" ? (
+                            <Form.Item label="视频内容" required>
+                                <div className="rounded-lg border border-dashed border-stone-300 p-4 dark:border-stone-700">
+                                    <Button icon={<Upload className="size-4" />} onClick={() => imageInputRef.current?.click()}>
+                                        选择视频文件
+                                    </Button>
+                                    {videoDraft ? (
+                                        <Typography.Text type="secondary" className="ml-3 text-xs">
+                                            {videoDraft.width}x{videoDraft.height} · {formatBytes(videoDraft.bytes)} · {videoDraft.mimeType}
+                                        </Typography.Text>
+                                    ) : (
+                                        <Typography.Text type="secondary" className="ml-3 text-xs">
+                                            未选择视频
+                                        </Typography.Text>
+                                    )}
+                                </div>
                             </Form.Item>
                         ) : (
                             <Form.Item label="图片内容" required>
@@ -360,7 +496,9 @@ export default function AssetsPage() {
                     <div className="rounded-xl border border-stone-200 bg-stone-50 p-4 dark:border-stone-800 dark:bg-stone-950">
                         <Typography.Text strong>预览</Typography.Text>
                         <div className="mt-3 overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-                            {coverUrl || imageDraft?.dataUrl ? (
+                            {formKind === "video" && videoDraft?.url ? (
+                                <video src={videoDraft.url} controls className="aspect-[4/3] w-full bg-black object-contain" />
+                            ) : coverUrl || imageDraft?.dataUrl ? (
                                 <img src={coverUrl || imageDraft?.dataUrl} alt="" className="aspect-[4/3] w-full object-cover" />
                             ) : (
                                 <div className="flex aspect-[4/3] items-center justify-center bg-stone-100 p-5 text-center text-sm text-stone-500 dark:bg-stone-900">{content || "暂无封面"}</div>
@@ -397,10 +535,12 @@ export default function AssetsPage() {
                 <input
                     ref={imageInputRef}
                     type="file"
-                    accept="image/*"
+                    accept={formKind === "video" ? "video/*,.mp4,.webm,.mov,.m4v" : "image/*"}
                     className="hidden"
                     onChange={(event) => {
-                        void readImageFile(event.target.files?.[0]);
+                        const file = event.target.files?.[0];
+                        if (formKind === "video") void readVideoFile(file);
+                        else void readImageFile(file);
                         event.target.value = "";
                     }}
                 />
@@ -408,7 +548,14 @@ export default function AssetsPage() {
 
             <AssetDrawer asset={previewAsset} onClose={() => setPreviewAsset(null)} onCopy={copyAssetText} onDownload={downloadImage} />
 
-            <input ref={assetInputRef} type="file" accept="application/zip,.zip" className="hidden" onChange={(event) => void importAssetZip(event.target.files?.[0])} />
+            <input
+                ref={assetInputRef}
+                type="file"
+                multiple
+                accept="image/*,video/*,.zip,application/zip,.png,.jpg,.jpeg,.webp,.gif,.mp4,.webm,.mov,.m4v"
+                className="hidden"
+                onChange={(event) => void importAssetFiles(event.target.files)}
+            />
 
             <Modal title="删除素材" open={Boolean(deletingAsset)} onCancel={() => setDeletingAsset(null)} onOk={confirmDelete} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
                 确定删除「{deletingAsset?.title}」吗？删除后会从我的素材中移除。
@@ -427,7 +574,9 @@ function AssetCard({ asset, onOpen, onEdit, onCopy, onDownload, onDelete }: { as
             styles={{ body: { padding: 0 } }}
             cover={
                 <button type="button" className="block w-full text-left" onClick={onOpen}>
-                    {cover ? (
+                    {asset.kind === "video" && asset.data.url ? (
+                        <video src={asset.data.url} muted playsInline preload="metadata" className="aspect-[4/3] w-full bg-black object-cover" />
+                    ) : cover ? (
                         <img src={cover} alt={asset.title} className="aspect-[4/3] w-full object-cover" />
                     ) : (
                         <div className="flex aspect-[4/3] items-center justify-center bg-stone-100 p-5 text-center text-sm leading-6 text-stone-600 dark:bg-stone-900 dark:text-stone-300">{asset.kind === "text" ? asset.data.content : "暂无封面"}</div>
@@ -463,11 +612,9 @@ function AssetCard({ asset, onOpen, onEdit, onCopy, onDownload, onDelete }: { as
                 <Button size="small" onClick={onOpen}>
                     查看
                 </Button>
-                {asset.kind !== "video" ? (
-                    <Button size="small" icon={<PencilLine className="size-3.5" />} onClick={onEdit}>
-                        编辑
-                    </Button>
-                ) : null}
+                <Button size="small" icon={<PencilLine className="size-3.5" />} onClick={onEdit}>
+                    编辑
+                </Button>
                 {asset.kind === "text" ? (
                     <Button size="small" icon={<Copy className="size-3.5" />} onClick={() => void onCopy(asset)}>
                         复制
@@ -492,7 +639,9 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
         <Drawer title="素材详情" open={Boolean(asset)} size="large" onClose={onClose}>
             {asset ? (
                 <div className="space-y-5">
-                    {cover ? (
+                    {asset.kind === "video" && asset.data.url ? (
+                        <video src={asset.data.url} controls className="w-full rounded-lg bg-black" />
+                    ) : cover ? (
                         <Image src={cover} alt={asset.title} className="rounded-lg" />
                     ) : (
                         <div className="rounded-lg border border-stone-200 bg-stone-50 p-5 text-sm leading-6 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">{asset.kind === "text" ? asset.data.content : "暂无封面"}</div>
@@ -553,4 +702,21 @@ function assetSummary(asset: Asset) {
 
 function assetSearchText(asset: Asset) {
     return [asset.title, asset.source || "", asset.note || "", (asset.tags || []).join(" "), asset.kind === "text" ? asset.data.content : asset.data.mimeType].join(" ").toLowerCase();
+}
+
+function fileNameWithoutExtension(name: string) {
+    return name.replace(/\.[^.]+$/, "").trim() || name;
+}
+
+function isAssetPackageFile(file: File) {
+    const name = file.name.toLowerCase();
+    return file.type === "application/zip" || file.type === "application/x-zip-compressed" || name.endsWith(".zip");
+}
+
+function isLikelyImageFile(file: File) {
+    return /\.(png|jpe?g|webp|gif|bmp|svg|avif|heic|heif)$/i.test(file.name);
+}
+
+function isLikelyVideoFile(file: File) {
+    return /\.(mp4|webm|mov|m4v|avi|mkv)$/i.test(file.name);
 }

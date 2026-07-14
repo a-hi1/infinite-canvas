@@ -6,7 +6,7 @@
 
 `infinite-canvas` 是一个面向图片与视觉创作流程的开源 AI 工作台。核心应用是浏览器端 Vite + React 静态前端，提供无限画布、AI 图片/视频/音频生成、提示词库、素材库、画布助手、本地 Canvas Agent 与 Codex 插件集成。
 
-当前项目更适合个人、本地或自部署使用，不是完整 SaaS 平台。默认没有项目自带的业务后端、账号系统或服务端数据库。
+当前项目更适合个人、本地或自部署使用，不是完整 SaaS 平台。默认没有项目自带的账号系统或服务端数据库；自部署时可选启用 `ai-proxy` 隐藏共享上游 API Key。
 
 ## 仓库组成
 
@@ -16,8 +16,9 @@
 | `docs/` | 文档站，Next.js + Fumadocs + MDX。 |
 | `canvas-agent/` | 本地 Canvas Agent，Node.js + Express + MCP SDK，用于连接浏览器画布与 Codex / Claude Code。 |
 | `plugins/infinite-canvas/` | Codex app 插件，封装 MCP 配置和画布操作 Skill。 |
-| `Dockerfile`、`nginx.conf` | 主 Web 应用 Docker 构建与 Nginx 静态托管配置。 |
-| `docker-compose.local.yml` | 本地源码构建部署用 compose，目前端口映射为 `3001:3000`。 |
+| `Dockerfile`、`nginx.conf` | 主 Web 应用 Docker 构建与 Nginx 静态托管配置，并同源转发 `/ai-proxy/`。 |
+| `docker-compose.local.yml` | 本地源码构建部署用 compose，目前端口映射为 `3001:3000`，并包含可选 `ai-proxy` 服务。 |
+| `ai-proxy/` | Node 22 HTTP AI 安全代理，用服务器 `.env.proxy` 注入真实上游 Key。 |
 
 ## 主应用架构
 
@@ -31,7 +32,9 @@
 - AI API 请求：`web/src/services/api/`。
 - 本地图片/文件存储：`web/src/services/image-storage.ts`、`web/src/services/file-storage.ts`。
 
-主应用常规使用时由浏览器前端直接请求用户配置的 AI Base URL。AI API Key、Base URL、画布项目、素材和生成记录默认保存在浏览器本地。
+主应用默认仍可由浏览器前端直接请求用户配置的 AI Base URL。AI API Key、Base URL、画布项目、素材和生成记录默认保存在浏览器本地。自部署公网共享同一个 Key 时，应优先配置同源 `/ai-proxy`：真实上游 Key 放服务器 `.env.proxy`，前端只保存代理访问令牌或留空。
+
+默认渠道预填为中转站 `https://www.codex2api.com`（名称“默认中转站”），API Key 不写死，由用户自行填写；同时仍支持新增自定义渠道和“服务器 AI 代理”渠道。不要把真实中转站 Key 写进源码或默认配置。
 
 ## 常用命令
 
@@ -102,10 +105,23 @@ sudo docker compose -f docker-compose.local.yml logs -f
 
 ## Git / 远程仓库工作流
 
-当前自用部署仓库：
+当前自用部署 / 推送仓库：
 
 ```text
 https://github.com/a-hi1/infinite-canvas.git
+```
+
+本地 remote 常见配置：
+
+- `a-hi1` → `https://github.com/a-hi1/infinite-canvas.git`（当前自用推送与部署来源）
+- `origin` → 可能仍指向上游 `https://github.com/basketikun/infinite-canvas.git`
+
+新会话接手时，先读取最新本地修改和远程信息，不要假设旧记忆正确：
+
+```bash
+git remote -v
+git status
+git log -5 --oneline
 ```
 
 本地开发推荐流程：
@@ -114,7 +130,7 @@ https://github.com/a-hi1/infinite-canvas.git
 git status
 git add <具体文件>
 git commit -m "说明"
-git push
+git push a-hi1 main
 ```
 
 服务器部署流程：
@@ -154,15 +170,34 @@ sudo docker compose -f docker-compose.local.yml up -d --build
 
 当前前端直连 AI 服务时，浏览器 Network 能看到 `Authorization: Bearer ...`。这对个人自用尚可，但不适合公网多人共享同一个 Key。
 
-后续计划在 `docs/content/docs/progress/todo.mdx` 中已记录：增加服务端 AI 接口安全代理。目标：
+已增加首版 `ai-proxy`：
 
-- 前端只请求同源代理接口。
-- API Key 存在服务器环境变量或安全配置中。
-- 代理只允许必要接口白名单，如 `/v1/images/generations`、`/v1/images/edits`、`/v1/responses`、`/v1/videos`、`/v1/models`。
-- 配套访问鉴权、限流和日志脱敏。
-- 避免在浏览器 Network 中暴露共享 Key，并缓解 CORS 问题。
+- Docker 源码部署使用 `docker-compose.local.yml`，包含 `app` 与 `ai-proxy`；主 Nginx 通过 `/ai-proxy/` 同源转发到代理容器。
+- 真实上游地址和 Key 写在服务器 `.env.proxy`（参考 `.env.proxy.example`），不要提交真实 `.env.proxy`。
+- 前端配置弹窗可点击“添加服务器代理”，Base URL 为 `/ai-proxy`，API Key 填 `AI_PROXY_ACCESS_TOKEN`；如果代理未启用访问令牌，前端允许留空。
+- 代理做接口白名单、访问令牌、基础限流和日志脱敏；已覆盖图片、编辑、模型、文本、音频、OpenAI 视频、Seedance/Agent Plan 和 Agnes Video 相关路径。
+- `/ai-proxy/media` 可用于转发部分上游临时媒体 URL，避免浏览器 CORS 拦截；当前白名单包含 Agnes 媒体域名，以及 `imgen.x.ai` / `cdn.x.ai`。
+- 前端 `uploadImage` / `imageToDataUrl` 在远程 `http(s)` 图片直连失败时，会回退到 `/ai-proxy/media`，用于画布生成结果落盘和参考图复用。
+
+后续仍需完善多用户鉴权、额度控制、分渠道上游配置和更细粒度白名单；公开多人使用前不要只依赖一个共享代理令牌。
 
 不要记录、保存或复述任何用户真实 API Key。若用户在对话中误贴 Key，只提醒其重置，不要写入文件或记忆。
+
+### 远程图片 CORS / 重新生成
+
+部分图片渠道（例如 xAI）返回的是临时远程 URL，而不是 `b64_json`。浏览器会因 CORS 无法直接 `fetch` 该 URL，导致：
+
+- 图片可用 `<img>` 显示，但无法写入本地 IndexedDB。
+- 若把该远程图强行当作编辑参考图，再次生成/图生图会失败。
+
+当前处理方式：
+
+1. 优先直连下载；失败后尝试同源 `/ai-proxy/media` 转发。
+2. 若下载仍失败，则保留远程 URL，保证首次展示和“按提示词重新生成”可用。
+3. 画布再次生成时，只有本地可读图片（`blob:` / `data:` / `image:` storageKey）才会走编辑接口；远程不可读图会自动退回文生图。
+4. 显式图生图 / 蒙版编辑若依赖不可读远程图，会给出明确错误，提示重新上传本地图或改用 `b64_json` 渠道。
+
+补充：用户若是前端直连中转站 API Key，不依赖本地 `ai-proxy` 时，应主要依赖上述前端降级，而不是要求本机代理一定能访问 `imgen.x.ai`。
 
 ### 图片工作台成功率问题
 
@@ -171,6 +206,7 @@ sudo docker compose -f docker-compose.local.yml up -d --build
 - 图片工作台按生成张数并发发起多个 `/v1/images/generations` 请求，容易触发 429 或中转服务限流。
 - 图片工作台带参考图时会走 `/v1/images/edits`，部分中转服务未必支持。
 - 图片工作台和画布使用的模型、尺寸、质量、数量可能不一致。
+- 部分渠道返回远程图片 URL，浏览器直连下载会被 CORS 拦截。
 
 建议后续实现：
 
@@ -200,4 +236,5 @@ sudo docker compose -f docker-compose.local.yml up -d --build
 - 详细功能文档放入 `docs/content/docs/`。
 - 后续待办写入 `docs/content/docs/progress/todo.mdx`。
 - 已实现但仍需用户确认测试的事项写入 `docs/content/docs/progress/pending-test.mdx`。
+- 涉及项目方向、部署、限制、已知问题或长期工作流变化时，同步更新本文件和 `AGENTS.md`，保证新会话能快速接手。
 - 文档正文保持中文，不写过期日期。

@@ -683,9 +683,20 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     if (requestSize) {
         formData.set("size", requestSize);
     }
-    const files = await Promise.all(references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
+    const files = await Promise.all(
+        references.map(async (image) => {
+            const dataUrl = await imageToDataUrl(image);
+            if (!dataUrl?.startsWith("data:")) {
+                throw new Error("参考图是远程地址且无法在浏览器中读取（常见于 xAI 临时图片 URL 的 CORS 限制）。请重新上传本地图片，或改用返回 base64 的渠道后再做图生图/编辑");
+            }
+            return dataUrlToFile({ ...image, dataUrl });
+        }),
+    );
     files.forEach((file) => formData.append("image", file));
-    if (mask) formData.set("mask", dataUrlToFile(mask));
+    if (mask) {
+        if (!mask.dataUrl.startsWith("data:")) throw new Error("蒙版图片无法读取，请重新上传本地图片");
+        formData.set("mask", dataUrlToFile(mask));
+    }
 
     try {
         const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), formData, { headers: aiHeaders(requestConfig), signal: options?.signal });

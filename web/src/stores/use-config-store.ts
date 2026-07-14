@@ -59,27 +59,32 @@ const CHANNEL_MODEL_SEPARATOR = "::";
 export const AI_PROXY_BASE_URL = "/ai-proxy";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+// Built-in relay for self-deploy / first-run convenience. API Key stays empty; users fill their own.
+export const DEFAULT_RELAY_BASE_URL = "https://www.codex2api.com";
+const DEFAULT_CHANNEL_ID = "default";
+const DEFAULT_CHANNEL_NAME = "默认中转站";
+const DEFAULT_RELAY_MODELS = ["gpt-image-2", "grok-imagine-video", "gpt-5.5", "gpt-4o-mini-tts"] as const;
 
 export const defaultConfig: AiConfig = {
     channelMode: "local",
-    baseUrl: OPENAI_BASE_URL,
+    baseUrl: DEFAULT_RELAY_BASE_URL,
     apiKey: "",
     apiFormat: "openai",
     channels: [
         {
-            id: "default",
-            name: "默认渠道",
-            baseUrl: OPENAI_BASE_URL,
+            id: DEFAULT_CHANNEL_ID,
+            name: DEFAULT_CHANNEL_NAME,
+            baseUrl: DEFAULT_RELAY_BASE_URL,
             apiKey: "",
             apiFormat: "openai",
-            models: ["gpt-image-2", "grok-imagine-video", "gpt-5.5", "gpt-4o-mini-tts"],
+            models: [...DEFAULT_RELAY_MODELS],
         },
     ],
-    model: "default::gpt-image-2",
-    imageModel: "default::gpt-image-2",
-    videoModel: "default::grok-imagine-video",
-    textModel: "default::gpt-5.5",
-    audioModel: "default::gpt-4o-mini-tts",
+    model: `${DEFAULT_CHANNEL_ID}::gpt-image-2`,
+    imageModel: `${DEFAULT_CHANNEL_ID}::gpt-image-2`,
+    videoModel: `${DEFAULT_CHANNEL_ID}::grok-imagine-video`,
+    textModel: `${DEFAULT_CHANNEL_ID}::gpt-5.5`,
+    audioModel: `${DEFAULT_CHANNEL_ID}::gpt-4o-mini-tts`,
     audioVoice: "alloy",
     audioFormat: "mp3",
     audioSpeed: "1",
@@ -89,11 +94,11 @@ export const defaultConfig: AiConfig = {
     videoGenerateAudio: "true",
     videoWatermark: "false",
     systemPrompt: "",
-    models: ["default::gpt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
-    imageModels: ["default::gpt-image-2"],
-    videoModels: ["default::grok-imagine-video"],
-    textModels: ["default::gpt-5.5"],
-    audioModels: ["default::gpt-4o-mini-tts"],
+    models: [`${DEFAULT_CHANNEL_ID}::gpt-image-2`, `${DEFAULT_CHANNEL_ID}::grok-imagine-video`, `${DEFAULT_CHANNEL_ID}::gpt-5.5`, `${DEFAULT_CHANNEL_ID}::gpt-4o-mini-tts`],
+    imageModels: [`${DEFAULT_CHANNEL_ID}::gpt-image-2`],
+    videoModels: [`${DEFAULT_CHANNEL_ID}::grok-imagine-video`],
+    textModels: [`${DEFAULT_CHANNEL_ID}::gpt-5.5`],
+    audioModels: [`${DEFAULT_CHANNEL_ID}::gpt-4o-mini-tts`],
     quality: "auto",
     size: "1:1",
     count: "1",
@@ -250,13 +255,14 @@ export function useEffectiveConfig() {
 
 export function createModelChannel(channel?: Partial<ModelChannel>): ModelChannel {
     const apiFormat = normalizeApiFormat(channel?.apiFormat);
+    const isDefaultChannel = channel?.id?.trim() === DEFAULT_CHANNEL_ID;
     return {
         id: channel?.id?.trim() || nanoid(),
-        name: channel?.name?.trim() || "新渠道",
-        baseUrl: channel?.baseUrl?.trim() || defaultBaseUrlForApiFormat(apiFormat),
+        name: channel?.name?.trim() || (isDefaultChannel ? DEFAULT_CHANNEL_NAME : "新渠道"),
+        baseUrl: channel?.baseUrl?.trim() || (isDefaultChannel ? DEFAULT_RELAY_BASE_URL : defaultBaseUrlForApiFormat(apiFormat)),
         apiKey: channel?.apiKey || "",
         apiFormat,
-        models: uniqueRawModels(channel?.models || []),
+        models: uniqueRawModels(channel?.models || (isDefaultChannel ? [...DEFAULT_RELAY_MODELS] : [])),
     };
 }
 
@@ -305,7 +311,7 @@ export function resolveModelChannel(config: AiConfig, value: string) {
     const decoded = decodeChannelModel(value);
     const model = decoded?.model || value;
     const matched = decoded ? config.channels.find((channel) => channel.id === decoded.channelId) : config.channels.find((channel) => channel.models.includes(model));
-    return matched || config.channels[0] || createModelChannel({ id: "default", name: "默认渠道", baseUrl: config.baseUrl, apiKey: config.apiKey, apiFormat: config.apiFormat, models: config.models.map(modelOptionName) });
+    return matched || config.channels[0] || createModelChannel({ id: DEFAULT_CHANNEL_ID, name: DEFAULT_CHANNEL_NAME, baseUrl: config.baseUrl || DEFAULT_RELAY_BASE_URL, apiKey: config.apiKey, apiFormat: config.apiFormat, models: config.models.map(modelOptionName) });
 }
 
 export function resolveModelRequestConfig(config: AiConfig, value: string) {
@@ -324,17 +330,17 @@ function normalizeChannels(config: AiConfig) {
     const channels = persistedChannels.map((channel, index) =>
         createModelChannel({
             ...channel,
-            id: channel.id || (index === 0 ? "default" : `channel-${index + 1}`),
-            name: channel.name || (index === 0 ? "默认渠道" : `渠道 ${index + 1}`),
+            id: channel.id || (index === 0 ? DEFAULT_CHANNEL_ID : `channel-${index + 1}`),
+            name: channel.name || (index === 0 ? DEFAULT_CHANNEL_NAME : `渠道 ${index + 1}`),
             models: uniqueRawModels(channel.models || []),
         }),
     );
     if (!channels.length) {
         channels.push(
             createModelChannel({
-                id: "default",
-                name: "默认渠道",
-                baseUrl: config.baseUrl || defaultConfig.baseUrl,
+                id: DEFAULT_CHANNEL_ID,
+                name: DEFAULT_CHANNEL_NAME,
+                baseUrl: config.baseUrl || DEFAULT_RELAY_BASE_URL,
                 apiKey: config.apiKey || "",
                 apiFormat: config.apiFormat || defaultConfig.apiFormat,
                 models: uniqueRawModels([
@@ -344,15 +350,33 @@ function normalizeChannels(config: AiConfig) {
                     config.videoModel,
                     config.textModel,
                     config.audioModel,
+                    ...DEFAULT_RELAY_MODELS,
                 ]),
             }),
         );
     }
-    return channels.map((channel) => ({ ...channel, models: uniqueRawModels(channel.models) }));
+    return channels.map((channel) => {
+        // Soft-migrate the built-in default channel from OpenAI official URL to the project relay.
+        // Only rewrite when it still looks like the untouched stock default, never overwrite user customizations.
+        if (channel.id === DEFAULT_CHANNEL_ID) {
+            const baseUrl = channel.baseUrl.trim().replace(/\/+$/, "").toLowerCase();
+            const isStockOpenAiDefault = !baseUrl || baseUrl === OPENAI_BASE_URL.toLowerCase() || baseUrl === `${OPENAI_BASE_URL.toLowerCase()}/v1`;
+            const nameLooksStock = !channel.name.trim() || channel.name.trim() === "默认渠道" || channel.name.trim() === DEFAULT_CHANNEL_NAME;
+            if (isStockOpenAiDefault && nameLooksStock) {
+                return {
+                    ...channel,
+                    name: DEFAULT_CHANNEL_NAME,
+                    baseUrl: DEFAULT_RELAY_BASE_URL,
+                    models: uniqueRawModels(channel.models.length ? channel.models : [...DEFAULT_RELAY_MODELS]),
+                };
+            }
+        }
+        return { ...channel, models: uniqueRawModels(channel.models) };
+    });
 }
 
 export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
-    return apiFormat === "gemini" ? GEMINI_BASE_URL : OPENAI_BASE_URL;
+    return apiFormat === "gemini" ? GEMINI_BASE_URL : DEFAULT_RELAY_BASE_URL;
 }
 
 function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
@@ -377,7 +401,13 @@ export function buildApiUrl(baseUrl: string, path: string) {
 
 export function isAiProxyBaseUrl(baseUrl: string) {
     const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "").toLowerCase();
-    return normalizedBaseUrl === AI_PROXY_BASE_URL || normalizedBaseUrl.startsWith(`${AI_PROXY_BASE_URL}/`);
+    if (normalizedBaseUrl === AI_PROXY_BASE_URL || normalizedBaseUrl.startsWith(`${AI_PROXY_BASE_URL}/`)) return true;
+    try {
+        const path = new URL(normalizedBaseUrl).pathname.replace(/\/+$/, "");
+        return path === AI_PROXY_BASE_URL || path.startsWith(`${AI_PROXY_BASE_URL}/`);
+    } catch {
+        return false;
+    }
 }
 
 function normalizeArkPlanBaseUrl(baseUrl: string) {

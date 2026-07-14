@@ -42,7 +42,9 @@ export function readFileAsDataUrl(file: File) {
 export function readImageMeta(dataUrl: string) {
     return new Promise<{ width: number; height: number; mimeType: string }>((resolve) => {
         const image = new Image();
-        const done = () => resolve({ width: image.naturalWidth || 1024, height: image.naturalHeight || 1024, mimeType: dataUrl.match(/^data:([^;]+)/)?.[1] || "image/png" });
+        // Do not set crossOrigin for remote provider URLs.
+        // Hosts like imgen.x.ai often allow plain <img> display but reject CORS reads.
+        const done = () => resolve({ width: image.naturalWidth || 1024, height: image.naturalHeight || 1024, mimeType: dataUrl.match(/^data:([^;]+)/)?.[1] || guessImageMimeType(dataUrl) });
         image.onload = done;
         image.onerror = done;
         setTimeout(done, 3000);
@@ -51,6 +53,9 @@ export function readImageMeta(dataUrl: string) {
 }
 
 export function dataUrlToFile(image: ReferenceImage) {
+    if (!image.dataUrl.startsWith("data:")) {
+        throw new Error("当前参考图是远程地址且无法在浏览器中读取，请重新上传本地图片，或使用返回 base64 的渠道");
+    }
     const [header, content] = image.dataUrl.split(",", 2);
     const mimeType = header.match(/data:(.*?);base64/)?.[1] || image.type || "image/png";
     const binary = atob(content || "");
@@ -59,4 +64,12 @@ export function dataUrlToFile(image: ReferenceImage) {
         bytes[index] = binary.charCodeAt(index);
     }
     return new File([bytes], image.name || "reference.png", { type: mimeType });
+}
+
+function guessImageMimeType(url: string) {
+    const lower = url.toLowerCase();
+    if (lower.includes(".jpg") || lower.includes(".jpeg")) return "image/jpeg";
+    if (lower.includes(".webp")) return "image/webp";
+    if (lower.includes(".gif")) return "image/gif";
+    return "image/png";
 }

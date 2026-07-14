@@ -2001,11 +2001,14 @@ function InfiniteCanvasPage() {
                     const isConfigNode = sourceNode?.type === CanvasNodeType.Config;
                     const isImageNode = sourceNode?.type === CanvasNodeType.Image;
                     const isEmptyImageNode = isImageNode && !sourceNode?.metadata?.content;
+                    // Only treat the current image as an edit reference when it is locally readable.
+                    // Remote provider URLs (e.g. imgen.x.ai) can display via <img> but often cannot be fetched due to CORS,
+                    // so forcing /images/edits would make "regenerate" fail after a successful first generation.
                     const sourceReference =
-                        isImageNode && sourceNode?.metadata?.content
+                        isImageNode && sourceNode?.metadata?.content && isLocallyReadableImage(sourceNode.metadata.content, sourceNode.metadata.storageKey)
                             ? [{ id: sourceNode.id, name: `${sourceNode.title || sourceNode.id}.png`, type: sourceNode.metadata.mimeType || "image/png", dataUrl: sourceNode.metadata.content, storageKey: sourceNode.metadata.storageKey }]
                             : [];
-                    const referenceImages = sourceReference.length ? sourceReference : generationContext.referenceImages;
+                    const referenceImages = sourceReference.length ? sourceReference : generationContext.referenceImages.filter((image) => isLocallyReadableImage(image.dataUrl, image.storageKey));
                     const generationType = referenceImages.length ? ("edit" as const) : ("generation" as const);
                     const generationMetadata = buildImageGenerationMetadata(generationType, generationConfig, count, referenceImages);
                     const parentConfig = NODE_DEFAULT_SIZE[isConfigNode ? CanvasNodeType.Config : isImageNode ? CanvasNodeType.Image : CanvasNodeType.Text];
@@ -2317,15 +2320,21 @@ function InfiniteCanvasPage() {
                 return;
             }
             const generationType = savedImageMetadata?.generationType;
-            const useReferenceImages = generationType ? generationType === "edit" : Boolean(context?.referenceImages.length);
+            const wantsReferenceImages = generationType ? generationType === "edit" : Boolean(context?.referenceImages.length);
             const retryReferenceImages =
-                hasSavedImageMetadata && savedImageMetadata ? await resolveMetadataReferences(savedImageMetadata) : useReferenceImages ? (context?.referenceImages.length ? context.referenceImages : sourceNodeReferenceImages(batchRoot || sourceNode)) : [];
-            if (useReferenceImages && !retryReferenceImages) {
+                hasSavedImageMetadata && savedImageMetadata ? await resolveMetadataReferences(savedImageMetadata) : wantsReferenceImages ? (context?.referenceImages.length ? context.referenceImages : sourceNodeReferenceImages(batchRoot || sourceNode)) : [];
+            if (wantsReferenceImages && !retryReferenceImages) {
                 message.error("参考图片已丢失，无法继续重试");
                 setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: "参考图片已丢失，无法继续重试" } } : item)));
                 return;
             }
-            const retryImages = retryReferenceImages || [];
+            const retryImages = (retryReferenceImages || []).filter((image) => isLocallyReadableImage(image.dataUrl, image.storageKey));
+            // Remote provider URLs can display, but browsers often cannot fetch them due to CORS.
+            // In that case fall back to text-to-image so "regenerate" still works without ai-proxy.
+            const useReferenceImages = Boolean(wantsReferenceImages && retryImages.length);
+            if (wantsReferenceImages && !useReferenceImages) {
+                message.warning("原参考图是远程地址且无法读取，已改为按提示词重新文生图");
+            }
 
             setRunningNodeId(node.id);
             setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined } } : item)));
@@ -2361,7 +2370,7 @@ function InfiniteCanvasPage() {
                 const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
                 const imageSize = fitNodeSize(uploadedImage.width, uploadedImage.height, imageConfig.width, imageConfig.height);
                 const generationMetadata = savedImageMetadata?.generationType
-                    ? { generationType: savedImageMetadata.generationType, model: generationConfig.model, size: generationConfig.size, quality: generationConfig.quality, count: savedImageMetadata.count || 1, references: savedImageMetadata.references }
+                    ? { generationType: useReferenceImages ? savedImageMetadata.generationType : "generation", model: generationConfig.model, size: generationConfig.size, quality: generationConfig.quality, count: savedImageMetadata.count || 1, references: useReferenceImages ? savedImageMetadata.references : [] }
                     : buildImageGenerationMetadata(useReferenceImages ? "edit" : "generation", generationConfig, 1, retryImages);
                 setNodes((prev) =>
                     prev.map((item) =>
@@ -3249,6 +3258,7 @@ function findRetrySourceNode(nodeId: string, nodes: CanvasNodeData[], connection
 
 function sourceNodeReferenceImages(node: CanvasNodeData | null) {
     if (!node || node.type !== CanvasNodeType.Image || !node.metadata?.content) return [];
+    if (!isLocallyReadableImage(node.metadata.content, node.metadata.storageKey)) return [];
     return [
         {
             id: node.id,
@@ -3258,6 +3268,12 @@ function sourceNodeReferenceImages(node: CanvasNodeData | null) {
             storageKey: node.metadata.storageKey,
         },
     ];
+}
+
+function isLocallyReadableImage(content?: string, storageKey?: string) {
+    if (storageKey) return true;
+    if (!content) return false;
+    return content.startsWith("data:") || content.startsWith("blob:") || content.startsWith("image:");
 }
 
 function isAudioFile(file: File) {

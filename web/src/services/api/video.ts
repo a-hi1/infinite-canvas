@@ -117,8 +117,21 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     if (normalizeVideoSize(config.size)) body.append("size", normalizeVideoSize(config.size)!);
     body.append("resolution_name", normalizeVideoResolution(config.vquality));
     body.append("preset", "normal");
-    const files = await Promise.all(references.slice(0, 7).map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
-    files.forEach((file) => body.append("input_reference[]", file));
+    // OpenAI / 多数中转站使用单数 input_reference 作为首帧/参考图；同名字段多次 append 兼容多图中转。
+    // 远程 CORS 图拿不到二进制时不要强行 append，否则 dataUrlToFile 会失败或发出空字段请求。
+    const files = (
+        await Promise.all(
+            references.slice(0, 7).map(async (image) => {
+                const dataUrl = await resolveReferenceBinaryDataUrl(image);
+                if (!dataUrl) return null;
+                return dataUrlToFile({ ...image, dataUrl });
+            }),
+        )
+    ).filter((file): file is File => Boolean(file));
+    if (references.length && !files.length) {
+        throw new Error("参考图是远程地址且浏览器无法读取（常见于 imgen.x.ai CORS）。请改用本地上传的参考图，或使用支持公网图片 URL 的 Grok /videos/generations 渠道");
+    }
+    files.forEach((file) => body.append("input_reference", file));
     try {
         const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), body, { headers: aiHeaders(config), signal: options?.signal })).data);
         if (!created.id) throw new Error("视频接口没有返回任务 ID");
@@ -144,15 +157,24 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
 }
 
 async function createGrokTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
-    try {
-        const created = unwrapGrokVideoResponse((await axios.post<ApiGrokVideoResponse>(grokCreateApiUrl(config), await buildGrokPayload(config, model, prompt, references), { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data);
-        const id = created.request_id || created.id;
-        if (!id) throw new Error("Grok 视频接口没有返回 request_id");
-        return { id, provider: "grok", model };
-    } catch (error) {
-        if (!isUnsupportedGrokGenerationEndpoint(error)) throw new Error(readAxiosError(error, "Grok 视频任务创建失败"));
-        return createOpenAIVideoTask(config, model, prompt, references, options);
+    const payloads = await buildGrokPayloadCandidates(config, model, prompt, references);
+    let lastError: unknown;
+    for (const payload of payloads) {
+        try {
+            const created = unwrapGrokVideoResponse((await axios.post<ApiGrokVideoResponse>(grokCreateApiUrl(config), payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data);
+            const id = created.request_id || created.id;
+            if (!id) throw new Error("Grok 视频接口没有返回 request_id");
+            return { id, provider: "grok", model };
+        } catch (error) {
+            lastError = error;
+            // 只在字段兼容候选之间切换；鉴权/限流/404 等直接结束。
+            if (!isRetryableGrokPayloadError(error)) break;
+        }
     }
+
+    // codex2api 等中转常见：有 /videos/generations，但没有 OpenAI /videos。
+    // 对 Grok 路径不再回退 /videos，避免连续 400 后再多一次 404 噪音。
+    throw new Error(formatGrokCreateError(lastError, references, payloads.length));
 }
 
 async function pollGrokTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
@@ -294,25 +316,113 @@ function grokCreateApiUrl(config: AiConfig) {
     return aiApiUrl(config, "/videos/generations");
 }
 
-async function buildGrokPayload(config: AiConfig, model: string, prompt: string, references: ReferenceImage[]) {
-    const payload: Record<string, unknown> = {
-        model: modelOptionName(model),
+async function buildGrokPayloadCandidates(config: AiConfig, model: string, prompt: string, references: ReferenceImage[]) {
+    const modelName = modelOptionName(model);
+    const duration = normalizeGrokDuration(config.videoSeconds);
+    const aspectRatio = normalizeGrokAspectRatio(config.size);
+    const resolution = normalizeGrokResolution(config.vquality);
+    const imageInputs = await Promise.all(references.slice(0, 7).map(resolveGrokImageInput));
+
+    const basePayload: Record<string, unknown> = {
+        model: modelName,
         prompt,
-        duration: normalizeGrokDuration(config.videoSeconds),
-        aspect_ratio: normalizeGrokAspectRatio(config.size),
-        resolution: normalizeGrokResolution(config.vquality),
+        duration,
+        aspect_ratio: aspectRatio,
+        resolution,
     };
-    const referenceImages = await Promise.all(references.slice(0, 7).map(resolveGrokReferenceImage));
-    if (referenceImages.length) payload.reference_images = referenceImages;
-    return payload;
+    if (!imageInputs.length) {
+        // 部分中转同时认 seconds
+        return [basePayload, { ...basePayload, seconds: String(duration) }];
+    }
+
+    const candidates: Array<Record<string, unknown>> = [];
+    const pushUnique = (payload: Record<string, unknown>) => {
+        const key = JSON.stringify(payload);
+        if (candidates.some((item) => JSON.stringify(item) === key)) return;
+        candidates.push(payload);
+    };
+
+    // 控制候选数量：先最小官方字段，再补 duration/比例；避免 5 次 400 刷屏。
+    if (imageInputs.length === 1) {
+        // 最小 image-to-video（很多中转对 resolution/aspect_ratio 更挑）
+        pushUnique({ model: modelName, prompt, image: imageInputs[0] });
+        pushUnique({ model: modelName, prompt, duration, image: imageInputs[0] });
+        pushUnique({ ...basePayload, image: imageInputs[0] });
+    } else {
+        const labeledPrompt = buildGrokReferencePrompt(prompt, imageInputs.length);
+        pushUnique({ model: modelName, prompt: labeledPrompt, reference_images: imageInputs });
+        pushUnique({ model: modelName, prompt: labeledPrompt, duration, reference_images: imageInputs });
+        pushUnique({ ...basePayload, prompt: labeledPrompt, reference_images: imageInputs });
+    }
+
+    return candidates;
 }
 
-async function resolveGrokReferenceImage(image: ReferenceImage) {
-    const url = image.url || image.dataUrl;
-    if (isPublicMediaUrl(url) || url.startsWith("data:")) return { url };
+function buildGrokReferencePrompt(prompt: string, imageCount: number) {
+    if (imageCount <= 1) return prompt;
+    if (/<IMAGE_\d+>|@Image\d+/i.test(prompt)) return prompt;
+    const labels = Array.from({ length: imageCount }, (_, index) => `<IMAGE_${index + 1}>`).join("、");
+    return `${prompt.trim()}\n\n请结合参考图 ${labels} 保持主体与风格一致。`;
+}
+
+async function resolveGrokImageInput(image: ReferenceImage): Promise<{ url: string }> {
+    const url = await resolveGrokReferenceImageUrl(image);
+    return { url };
+}
+
+async function resolveGrokReferenceImageUrl(image: ReferenceImage) {
+    // 1) 本地/blob 优先转 data URI，让中转站不依赖外网拉 imgen.x.ai
+    const binary = await resolveReferenceBinaryDataUrl(image);
+    if (binary) return binary;
+
+    // 2) 已是 data URI
+    const directUrl = (image.url || image.dataUrl || "").trim();
+    if (directUrl.startsWith("data:")) return directUrl;
+
+    // 3) 公网 URL 直接透传（浏览器 CORS 读不了时，交给上游服务端拉取）
+    if (isPublicMediaUrl(directUrl)) return directUrl;
+
+    const fallback = await imageToDataUrl(image);
+    if (fallback && (fallback.startsWith("data:") || isPublicMediaUrl(fallback))) return fallback;
+    throw new Error("参考图读取失败，请改用本地上传的图片（远程 imgen.x.ai 图常因 CORS 无法在浏览器读取）");
+}
+
+async function resolveReferenceBinaryDataUrl(image: ReferenceImage) {
+    const directUrl = (image.url || image.dataUrl || "").trim();
+    if (directUrl.startsWith("data:")) return directUrl;
+    if (image.storageKey || directUrl.startsWith("blob:")) {
+        try {
+            const dataUrl = await imageToDataUrl(image);
+            return dataUrl.startsWith("data:") ? dataUrl : "";
+        } catch {
+            return "";
+        }
+    }
+    // 远程 https 默认不在这里强转；CORS 失败很常见，留给调用方决定是否透传 URL。
+    return "";
+}
+
+function formatGrokCreateError(error: unknown, references: ReferenceImage[], attemptCount: number) {
+    const detail = readAxiosError(error, "Grok 视频任务创建失败");
+    const hasRemoteOnlyReference = references.some((image) => {
+        const url = (image.url || image.dataUrl || "").trim();
+        return isPublicMediaUrl(url) && !image.storageKey && !url.startsWith("data:") && !url.startsWith("blob:");
+    });
+    const tips = [
+        detail,
+        attemptCount > 1 ? `已尝试 ${attemptCount} 种请求格式` : "",
+        hasRemoteOnlyReference ? "当前参考图是远程地址（如 imgen.x.ai）。若中转站无法访问该地址，请改用本地上传的参考图" : "",
+        "请打开 Network 查看 /v1/videos/generations 的 Response 原文；若仍失败，把 Response JSON（可打码 Key）发我",
+    ].filter(Boolean);
+    return tips.join("。");
+}
+
+async function resolveReferenceDataUrl(image: ReferenceImage) {
+    const directUrl = image.url || image.dataUrl;
+    if (isPublicMediaUrl(directUrl) || directUrl.startsWith("data:")) return directUrl;
     const dataUrl = await imageToDataUrl(image);
     if (!dataUrl) throw new Error("参考图读取失败，请换一张图片或重新上传");
-    return { url: dataUrl };
+    return dataUrl;
 }
 
 function agnesApiUrl(config: AiConfig, path: string) {
@@ -552,18 +662,49 @@ function unwrapEnvelope<T>(payload: ApiEnvelope<T>, emptyMessage: string): T {
 
 function readAxiosError(error: unknown, fallback: string) {
     if (axios.isCancel(error)) return "请求已取消";
-    if (axios.isAxiosError<{ error?: { message?: string } | string; msg?: string; message?: string; code?: number }>(error)) {
-        const responseData = error.response?.data;
-        return responseData?.msg || (typeof responseData?.error === "string" ? responseData.error : responseData?.error?.message) || responseData?.message || statusMessage(error.response?.status, fallback);
+    if (axios.isAxiosError(error)) {
+        const responseData = error.response?.data as unknown;
+        const detail = readErrorPayload(responseData);
+        if (detail) return detail;
+        return statusMessage(error.response?.status, fallback);
     }
     if (error instanceof DOMException && error.name === "AbortError") return "请求已取消";
     return error instanceof Error ? error.message : fallback;
 }
 
-function isUnsupportedGrokGenerationEndpoint(error: unknown) {
+function readErrorPayload(payload: unknown): string {
+    if (!payload) return "";
+    if (typeof payload === "string") {
+        const text = payload.trim();
+        if (!text) return "";
+        try {
+            return readErrorPayload(JSON.parse(text));
+        } catch {
+            return text.slice(0, 300);
+        }
+    }
+    if (typeof payload !== "object") return "";
+    const record = payload as Record<string, unknown>;
+    if (typeof record.msg === "string" && record.msg.trim()) return record.msg.trim();
+    if (typeof record.message === "string" && record.message.trim()) return record.message.trim();
+    if (typeof record.error === "string" && record.error.trim()) return record.error.trim();
+    if (record.error && typeof record.error === "object") {
+        const nested = record.error as Record<string, unknown>;
+        if (typeof nested.message === "string" && nested.message.trim()) return nested.message.trim();
+        if (typeof nested.msg === "string" && nested.msg.trim()) return nested.msg.trim();
+    }
+    if (typeof record.detail === "string" && record.detail.trim()) return record.detail.trim();
+    try {
+        return JSON.stringify(record).slice(0, 300);
+    } catch {
+        return "";
+    }
+}
+
+function isRetryableGrokPayloadError(error: unknown) {
     if (!axios.isAxiosError(error)) return false;
     const status = error.response?.status;
-    return status === 404 || status === 405;
+    return status === 400 || status === 422;
 }
 
 function statusMessage(status: number | undefined, fallback: string) {

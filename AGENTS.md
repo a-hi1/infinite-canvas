@@ -75,6 +75,9 @@
 - `docs/content/docs/progress/pending-test.mdx` 用来记录这个版本实际做了哪些可测试变更；`CHANGELOG.md` 的 `Unreleased` 只保留对这些变更的版本级归纳，避免逐条照搬实现细节。
 - 每次 todo 事项完成后，先从 `docs/content/docs/progress/todo.mdx` 移到 `docs/content/docs/progress/pending-test.mdx`，不要直接写进正式功能说明；用户确认测试通过后再更新 `docs/content/docs/overview/features.mdx`。
 - 每次任务完成前，都要根据实际变更检查并更新 `docs/content/docs/progress/todo.mdx` 和 `docs/content/docs/progress/pending-test.mdx`；如果功能或待办没有变化，也要确认无需修改。
+- 每次涉及项目方向、部署方式、关键限制、已知问题或长期工作流变化时，同步更新 `CLAUDE.md`；不要只改代码而让后续会话读到过期上下文。
+- 用户要求“完全跟进整个项目”时，优先把长期有效的项目事实写进 `CLAUDE.md` / `AGENTS.md` / progress 文档或记忆；不要依赖单次对话上下文。
+- 新会话开始时，先读取最新本地仓库状态：`git remote -v`、`git status`、最近提交，以及 `CLAUDE.md` / progress 文档；当前自用仓库是 `https://github.com/a-hi1/infinite-canvas.git`，不要默认按旧 origin 假设。
 - 接口响应规则写到 `docs/content/docs/backend/api-response.mdx`。
 - 数据库结构写到 `docs/content/docs/backend/backend-database.mdx`。
 - 文档不要写过期日期；除非用户明确要求记录具体时间。
@@ -90,5 +93,5 @@
 ## 项目注意事项
 
 - 当前画布项目和“我的素材”主要保存在浏览器本地，不要在文档中误写成已支持云同步。
-- 当前 AI API Key 存在浏览器本地，并由前端直接请求 OpenAI 兼容接口；涉及安全说明时要写清楚。
-- Docker 静态资源路径目前仍是待办项，文档中不要过度承诺生产部署已经完全验证。
+- 默认 AI 渠道配置仍保存在浏览器本地，并可由前端直接请求 OpenAI 兼容接口；自部署共享 Key 时应优先使用同源 `/ai-proxy`，真实上游 Key 只放服务器 `.env.proxy`，涉及安全说明时要写清楚。
+- Docker 静态资源路径和 `/ai-proxy` 转发仍需用户实际部署验证，文档中不要过度承诺生产部署已经完全验证。

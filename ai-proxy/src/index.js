@@ -75,6 +75,9 @@ const server = http.createServer(async (req, res) => {
                 body: body.length ? body : undefined,
                 signal: controller.signal,
             });
+        } catch (error) {
+            if (isMediaRequest) throw mediaFetchError(targetUrl, error);
+            throw error;
         } finally {
             clearTimeout(timer);
         }
@@ -241,7 +244,16 @@ function buildMediaTargetUrl(incomingUrl) {
 function isAllowedMediaTarget(target) {
     if (target.protocol !== "https:" && target.protocol !== "http:") return false;
     const hostname = target.hostname.toLowerCase();
-    return hostname === "platform-outputs.agnes-ai.space" || hostname.endsWith(".agnes-ai.space") || hostname === "apihub.agnes-ai.com" || hostname.endsWith(".agnes-ai.com");
+    return (
+        hostname === "platform-outputs.agnes-ai.space" ||
+        hostname.endsWith(".agnes-ai.space") ||
+        hostname === "apihub.agnes-ai.com" ||
+        hostname.endsWith(".agnes-ai.com") ||
+        hostname === "imgen.x.ai" ||
+        hostname.endsWith(".imgen.x.ai") ||
+        hostname === "cdn.x.ai" ||
+        hostname.endsWith(".cdn.x.ai")
+    );
 }
 
 function buildMediaForwardHeaders(req) {
@@ -308,6 +320,24 @@ function httpError(status, publicMessage) {
     error.status = status;
     error.publicMessage = publicMessage;
     return error;
+}
+
+function mediaFetchError(targetUrl, error) {
+    const host = (() => {
+        try {
+            return new URL(targetUrl).hostname;
+        } catch {
+            return "远程媒体";
+        }
+    })();
+    const causeCode = error?.cause?.code || error?.code || "";
+    if (causeCode === "UND_ERR_CONNECT_TIMEOUT" || /timeout/i.test(String(error?.message || ""))) {
+        return httpError(502, `AI 代理无法连接 ${host}（连接超时）。请检查服务器到该媒体域名的网络出口`);
+    }
+    if (causeCode === "ENOTFOUND" || causeCode === "EAI_AGAIN") {
+        return httpError(502, `AI 代理无法解析 ${host}。请检查服务器 DNS`);
+    }
+    return httpError(502, `AI 代理下载 ${host} 媒体失败`);
 }
 
 function logRequest(req, path, status, durationMs, error) {
