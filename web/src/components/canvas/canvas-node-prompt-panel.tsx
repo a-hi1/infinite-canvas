@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
-import { ArrowUp, LoaderCircle, Square } from "lucide-react";
-import { Button } from "antd";
+import { useEffect, useRef, useState } from "react";
+import { App, Button, Tooltip } from "antd";
+import { ArrowUp, LoaderCircle, Square, WandSparkles } from "lucide-react";
 
 import { ModelPicker } from "@/components/model-picker";
-import { defaultConfig, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { CreditSymbol, requestCreditCost } from "@/constant/credits";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { optimizeGenerationPrompt, type PromptOptimizeMode } from "@/lib/prompt-optimize";
+import { defaultConfig, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasPromptLibrary } from "./canvas-prompt-library";
@@ -29,7 +30,9 @@ type CanvasNodePromptPanelProps = {
 };
 
 export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onGenerate, onStop, mentionReferences = [], onImageSettingsOpenChange }: CanvasNodePromptPanelProps) {
+    const { message } = App.useApp();
     const globalConfig = useEffectiveConfig();
+    const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const mode = defaultMode(node.type);
@@ -38,11 +41,23 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const hasImageContent = node.type === CanvasNodeType.Image && Boolean(node.metadata?.content);
     const isEditingExistingContent = hasTextContent || hasImageContent;
     const [prompt, setPrompt] = useState(isEditingExistingContent ? "" : node.metadata?.prompt || "");
+    const [optimizingPrompt, setOptimizingPrompt] = useState(false);
+    const optimizeAbortRef = useRef<AbortController | null>(null);
     const credits = requestCreditCost({ channelMode: config.channelMode, model: config.model, count: mode === "image" ? config.count : 1 });
+    const textModel = (globalConfig.textModel || globalConfig.model || "").trim();
+    const optimizeMode = promptOptimizeMode(mode);
+    const canOptimize = Boolean(prompt.trim()) && !optimizingPrompt && !isRunning;
 
     useEffect(() => {
         setPrompt(isEditingExistingContent ? "" : node.metadata?.prompt || "");
     }, [isEditingExistingContent, node.id]);
+
+    useEffect(() => {
+        return () => {
+            optimizeAbortRef.current?.abort();
+            optimizeAbortRef.current = null;
+        };
+    }, []);
 
     const updatePrompt = (value: string) => {
         setPrompt(value);
@@ -51,39 +66,95 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
 
     const submit = () => {
         const text = prompt.trim();
-        if (!text || isRunning) return;
+        if (!text || isRunning || optimizingPrompt) return;
         onGenerate(node.id, mode, text);
         setPrompt("");
     };
 
+    const optimizePrompt = async () => {
+        const text = prompt.trim();
+        if (!text || optimizingPrompt || isRunning) return;
+        if (!isAiConfigReady(globalConfig, textModel)) {
+            message.warning("请先配置可用的文本模型，用于优化提示词");
+            openConfigDialog(true);
+            return;
+        }
+
+        optimizeAbortRef.current?.abort();
+        const controller = new AbortController();
+        optimizeAbortRef.current = controller;
+        setOptimizingPrompt(true);
+        try {
+            const optimized = await optimizeGenerationPrompt(globalConfig, text, optimizeMode, {
+                signal: controller.signal,
+                onDelta: (value) => updatePrompt(value),
+            });
+            updatePrompt(optimized);
+            message.success("提示词已优化");
+        } catch (error) {
+            if (controller.signal.aborted) return;
+            message.error(error instanceof Error ? error.message : "提示词优化失败");
+        } finally {
+            if (optimizeAbortRef.current === controller) optimizeAbortRef.current = null;
+            setOptimizingPrompt(false);
+        }
+    };
+
     return (
         <div
-            className="rounded-2xl border p-3 shadow-2xl backdrop-blur"
+            className="w-[min(560px,calc(100vw-32px))] rounded-2xl border p-3 shadow-2xl backdrop-blur"
             style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
             onWheel={(event) => event.stopPropagation()}
         >
+            <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="text-xs font-medium opacity-70">{modeLabel(mode)}提示词</div>
+                <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+                    <CanvasPromptLibrary onSelect={updatePrompt} optimizeMode={optimizeMode} />
+                    <Tooltip title={optimizeTooltip(optimizeMode)}>
+                        <Button
+                            type="default"
+                            size="small"
+                            className="!h-8 !rounded-full !px-2.5"
+                            icon={<WandSparkles className="size-3.5" />}
+                            loading={optimizingPrompt}
+                            disabled={!canOptimize}
+                            onClick={() => void optimizePrompt()}
+                        >
+                            AI 优化
+                        </Button>
+                    </Tooltip>
+                </div>
+            </div>
+
             <CanvasResourceMentionTextarea
                 value={prompt}
                 references={mentionReferences}
                 onChange={updatePrompt}
                 onSubmit={submit}
-                className="thin-scrollbar h-24 w-full resize-none rounded-xl border px-3 py-2 text-sm leading-5 outline-none"
+                disabled={optimizingPrompt}
+                className="canvas-prompt-scrollbar h-28 w-full resize-none rounded-xl border px-3 py-2 text-sm leading-5 outline-none"
                 style={{ background: theme.node.fill, borderColor: theme.node.stroke, color: theme.node.text }}
                 placeholder={promptPlaceholder(mode, hasImageContent, hasTextContent)}
             />
 
-            <div className="mt-2 flex min-w-0 items-center justify-between gap-2">
-                <div className="flex min-w-0 items-center gap-2">
-                    <CanvasPromptLibrary onSelect={updatePrompt} />
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
                     {mode === "image" ? (
                         <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="image" onMissingConfig={() => openConfigDialog(true)} />
+                            <ModelPicker
+                                className="!h-10 !min-w-[10.5rem] !max-w-[220px]"
+                                config={config}
+                                value={config.model}
+                                onChange={(model) => onConfigChange(node.id, { model })}
+                                capability="image"
+                                onMissingConfig={() => openConfigDialog(true)}
+                            />
                             <CanvasImageSettingsPopover
                                 config={config}
                                 placement="topLeft"
-                                buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3"
+                                buttonClassName="!h-10 !max-w-[190px] !justify-start !rounded-full !px-3"
                                 onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
                                 onMissingConfig={() => openConfigDialog(true)}
                                 onOpenChange={onImageSettingsOpenChange}
@@ -91,23 +162,44 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                         </>
                     ) : mode === "video" ? (
                         <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="video" onMissingConfig={() => openConfigDialog(true)} />
-                            <CanvasVideoSettingsPopover config={config} buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
+                            <ModelPicker
+                                className="!h-10 !min-w-[10.5rem] !max-w-[220px]"
+                                config={config}
+                                value={config.model}
+                                onChange={(model) => onConfigChange(node.id, { model })}
+                                capability="video"
+                                onMissingConfig={() => openConfigDialog(true)}
+                            />
+                            <CanvasVideoSettingsPopover config={config} buttonClassName="!h-10 !max-w-[190px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
                         </>
                     ) : mode === "audio" ? (
                         <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="audio" onMissingConfig={() => openConfigDialog(true)} />
-                            <CanvasAudioSettingsPopover config={config} buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
+                            <ModelPicker
+                                className="!h-10 !min-w-[10.5rem] !max-w-[220px]"
+                                config={config}
+                                value={config.model}
+                                onChange={(model) => onConfigChange(node.id, { model })}
+                                capability="audio"
+                                onMissingConfig={() => openConfigDialog(true)}
+                            />
+                            <CanvasAudioSettingsPopover config={config} buttonClassName="!h-10 !max-w-[190px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
                         </>
                     ) : (
-                        <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="text" onMissingConfig={() => openConfigDialog(true)} />
+                        <ModelPicker
+                            className="!h-10 !min-w-[10.5rem] !max-w-[220px]"
+                            config={config}
+                            value={config.model}
+                            onChange={(model) => onConfigChange(node.id, { model })}
+                            capability="text"
+                            onMissingConfig={() => openConfigDialog(true)}
+                        />
                     )}
                 </div>
                 <Button
                     type="primary"
-                    className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
+                    className="!h-10 !min-w-[4.5rem] shrink-0 !rounded-full !px-3.5"
                     danger={isRunning}
-                    disabled={!isRunning && !prompt.trim()}
+                    disabled={(!isRunning && !prompt.trim()) || optimizingPrompt}
                     onClick={() => (isRunning ? onStop(node.id) : submit())}
                     aria-label={isRunning ? "停止生成" : "生成"}
                 >
@@ -136,6 +228,27 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
 
 function defaultMode(type: CanvasNodeData["type"]): CanvasNodeGenerationMode {
     return type === CanvasNodeType.Text ? "text" : type === CanvasNodeType.Video ? "video" : type === CanvasNodeType.Audio ? "audio" : "image";
+}
+
+function promptOptimizeMode(mode: CanvasNodeGenerationMode): PromptOptimizeMode {
+    if (mode === "video") return "video";
+    if (mode === "audio") return "audio";
+    if (mode === "text") return "text";
+    return "image";
+}
+
+function modeLabel(mode: CanvasNodeGenerationMode) {
+    if (mode === "video") return "视频";
+    if (mode === "audio") return "音频";
+    if (mode === "text") return "文本";
+    return "图片";
+}
+
+function optimizeTooltip(mode: PromptOptimizeMode) {
+    if (mode === "video") return "使用文本模型优化视频提示词（动作、运镜、节奏）";
+    if (mode === "audio") return "使用文本模型优化音频提示词（语气、节奏、旁白）";
+    if (mode === "text") return "使用文本模型优化文本提示词（目标、结构、语气）";
+    return "使用文本模型优化图片提示词（主体、构图、风格）";
 }
 
 function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: CanvasNodeGenerationMode): AiConfig {

@@ -591,7 +591,7 @@ export function CanvasAssistantPanel({ nodes, selectedNodeIds, snapshot, session
                         onAddFiles={addImagesToCanvas}
                         left={
                             <>
-                                <CanvasPromptLibrary onSelect={setPrompt} />
+                                <CanvasPromptLibrary onSelect={setPrompt} optimizeMode="text" />
                                 <AgentTextModelPicker config={effectiveConfig} value={effectiveConfig.textModel} onChange={(model) => updateConfig("textModel", model)} />
                             </>
                         }

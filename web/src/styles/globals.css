@@ -290,6 +290,100 @@
         opacity: 1;
     }
 
+    /* 画布节点文本框 / 提示词输入：滚动条加粗，方便点击拖动 */
+    .canvas-prompt-scrollbar {
+        scrollbar-color: rgba(28, 25, 23, 0.72) rgba(28, 25, 23, 0.08);
+        scrollbar-width: auto;
+    }
+
+    .canvas-prompt-scrollbar::-webkit-scrollbar {
+        height: 10px;
+        width: 10px;
+    }
+
+    .canvas-prompt-scrollbar::-webkit-scrollbar-track {
+        background: rgba(28, 25, 23, 0.08);
+        border-radius: 999px;
+    }
+
+    .canvas-prompt-scrollbar::-webkit-scrollbar-thumb {
+        background: rgba(28, 25, 23, 0.72);
+        border-radius: 999px;
+        border: 2px solid transparent;
+        background-clip: content-box;
+        min-height: 28px;
+    }
+
+    .canvas-prompt-scrollbar::-webkit-scrollbar-thumb:hover {
+        background: rgba(28, 25, 23, 0.9);
+        background-clip: content-box;
+    }
+
+    .dark .canvas-prompt-scrollbar {
+        scrollbar-color: rgba(245, 245, 244, 0.7) rgba(245, 245, 244, 0.12);
+    }
+
+    .dark .canvas-prompt-scrollbar::-webkit-scrollbar-track {
+        background: rgba(245, 245, 244, 0.12);
+    }
+
+    .dark .canvas-prompt-scrollbar::-webkit-scrollbar-thumb {
+        background: rgba(245, 245, 244, 0.7);
+        background-clip: content-box;
+    }
+
+    .dark .canvas-prompt-scrollbar::-webkit-scrollbar-thumb:hover {
+        background: rgba(245, 245, 244, 0.88);
+        background-clip: content-box;
+    }
+
+    /* 提示词卡片底部操作条：深色滚动条加粗，方便点击拖动 */
+    .prompt-action-scroll {
+        scrollbar-color: rgba(28, 25, 23, 0.78) rgba(28, 25, 23, 0.08);
+        scrollbar-width: auto;
+        padding-bottom: 6px;
+    }
+
+    .prompt-action-scroll::-webkit-scrollbar {
+        height: 10px;
+    }
+
+    .prompt-action-scroll::-webkit-scrollbar-track {
+        background: rgba(28, 25, 23, 0.08);
+        border-radius: 999px;
+    }
+
+    .prompt-action-scroll::-webkit-scrollbar-thumb {
+        background: rgba(28, 25, 23, 0.78);
+        border-radius: 999px;
+        border: 2px solid transparent;
+        background-clip: content-box;
+        min-width: 36px;
+    }
+
+    .prompt-action-scroll::-webkit-scrollbar-thumb:hover {
+        background: rgba(28, 25, 23, 0.92);
+        background-clip: content-box;
+    }
+
+    .dark .prompt-action-scroll {
+        scrollbar-color: rgba(245, 245, 244, 0.7) rgba(245, 245, 244, 0.12);
+    }
+
+    .dark .prompt-action-scroll::-webkit-scrollbar-track {
+        background: rgba(245, 245, 244, 0.12);
+    }
+
+    .dark .prompt-action-scroll::-webkit-scrollbar-thumb {
+        background: rgba(245, 245, 244, 0.7);
+        background-clip: content-box;
+    }
+
+    .dark .prompt-action-scroll::-webkit-scrollbar-thumb:hover {
+        background: rgba(245, 245, 244, 0.88);
+        background-clip: content-box;
+    }
+
     .canvas-control-select.ant-select .ant-select-selector,
     .canvas-control-number.ant-input-number {
         border-color: rgba(120, 113, 108, 0.32) !important;

@@ -1,55 +1,211 @@
-import { Copy, FolderPlus, ImageIcon } from "lucide-react";
+import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
+import { Copy, FolderPlus, ImageIcon, ImagePlus, Star, VideoIcon, WandSparkles, X } from "lucide-react";
 import { Button, Modal, Space, Tag } from "antd";
 
-import { formatPromptDate, type Prompt } from "@/services/api/prompts";
+import { getCategoryLabel, getPromptQualityLabel, getPromptSummary, type Prompt } from "@/services/api/prompts";
 
-export function PromptDetailDialog({ prompt, onClose, onCopy, onSaveAsset }: { prompt: Prompt | null; onClose: () => void; onCopy: (prompt: string) => void; onSaveAsset?: (prompt: Prompt) => void }) {
-    const tags = prompt ? Array.from(new Set(prompt.tags.filter(Boolean))) : [];
+export function PromptDetailDialog({
+    prompt,
+    onClose,
+    onCopy,
+    onSaveAsset,
+    onUseImage,
+    onUseVideo,
+    onOptimizeAndUseImage,
+    onToggleFavorite,
+    favorited = false,
+    onSaveToMine,
+    onOptimizeMine,
+}: {
+    prompt: Prompt | null;
+    onClose: () => void;
+    onCopy: (prompt: string) => void;
+    onSaveAsset?: (prompt: Prompt) => void;
+    onUseImage?: (prompt: Prompt) => void;
+    onUseVideo?: (prompt: Prompt) => void;
+    onOptimizeAndUseImage?: (prompt: Prompt) => void;
+    onToggleFavorite?: (prompt: Prompt) => void;
+    favorited?: boolean;
+    onSaveToMine?: (prompt: Prompt) => void;
+    onOptimizeMine?: (prompt: Prompt) => void;
+}) {
+    const [previewOpen, setPreviewOpen] = useState(false);
+    const tags = prompt ? Array.from(new Set(prompt.tags.filter(Boolean))).slice(0, 8) : [];
+    const summary = prompt ? getPromptSummary(prompt) : "";
+    const quality = prompt ? getPromptQualityLabel(prompt.qualityScore || 0) : "";
+    const sourceLabel = prompt ? getCategoryLabel(prompt.category) : "";
+    const coverUrl = (prompt?.coverUrl || "").trim();
+
+    useEffect(() => {
+        setPreviewOpen(false);
+    }, [prompt?.id]);
+
+    useEffect(() => {
+        if (!previewOpen) return;
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = "hidden";
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape") setPreviewOpen(false);
+        };
+        window.addEventListener("keydown", onKeyDown);
+        return () => {
+            document.body.style.overflow = previousOverflow;
+            window.removeEventListener("keydown", onKeyDown);
+        };
+    }, [previewOpen]);
+
+    const openPreview = () => {
+        if (!coverUrl) return;
+        setPreviewOpen(true);
+    };
 
     return (
         <>
             <Modal title={prompt?.title} open={Boolean(prompt)} onCancel={onClose} footer={null} width={860}>
                 {prompt ? (
-                    <>
-                        <div className="grid gap-5 md:grid-cols-[300px_minmax(0,1fr)]">
-                            <div className="space-y-3">
-                                {prompt.coverUrl ? (
-                                    <img src={prompt.coverUrl} alt={prompt.title} className="aspect-[4/3] w-full rounded-lg object-cover" />
-                                ) : (
-                                    <div className="flex aspect-[4/3] w-full flex-col items-center justify-center gap-2 rounded-lg bg-stone-100 text-stone-400 dark:bg-stone-900 dark:text-stone-500">
-                                        <ImageIcon className="size-8" />
-                                        <span className="text-xs">暂无预览图</span>
-                                    </div>
-                                )}
-                                {prompt.preview ? <pre className="max-h-60 overflow-auto whitespace-pre-wrap rounded-lg bg-stone-100 p-3 text-xs leading-5 text-stone-600 dark:bg-stone-900 dark:text-stone-300">{prompt.preview}</pre> : null}
-                            </div>
-                            <div className="min-w-0">
-                                <div className="flex flex-wrap gap-1.5">
-                                    {tags.map((tag) => (
-                                        <Tag key={tag} className="m-0">
-                                            {tag}
-                                        </Tag>
-                                    ))}
+                    <div className="grid gap-5 md:grid-cols-[300px_minmax(0,1fr)]">
+                        <div className="space-y-3">
+                            {coverUrl ? (
+                                <button
+                                    type="button"
+                                    onClick={openPreview}
+                                    className="relative block w-full overflow-hidden rounded-lg border-0 bg-transparent p-0 text-left"
+                                    style={{ cursor: "zoom-in" }}
+                                    title="点击放大"
+                                >
+                                    <img src={coverUrl} alt={prompt.title} className="aspect-4/3 w-full object-cover" draggable={false} />
+                                </button>
+                            ) : (
+                                <div className="flex aspect-4/3 w-full flex-col items-center justify-center gap-2 rounded-lg bg-stone-100 text-stone-400 dark:bg-stone-900 dark:text-stone-500">
+                                    <ImageIcon className="size-8" />
+                                    <span className="text-xs">暂无预览图</span>
                                 </div>
-                                <p className="mt-4 whitespace-pre-wrap text-sm leading-7 text-stone-800 dark:text-stone-300">{prompt.prompt}</p>
-                                <div className="mt-4 text-xs text-stone-500 dark:text-stone-400">
-                                    创建：{formatPromptDate(prompt.createdAt)} · 更新：{formatPromptDate(prompt.updatedAt)}
-                                </div>
-                                <Space wrap className="mt-5">
-                                    <Button type="primary" icon={<Copy className="size-4" />} onClick={() => onCopy(prompt.prompt)}>
-                                        复制提示词
-                                    </Button>
-                                    {onSaveAsset ? (
-                                        <Button icon={<FolderPlus className="size-4" />} onClick={() => onSaveAsset(prompt)}>
-                                            加入我的素材
-                                        </Button>
-                                    ) : null}
-                                </Space>
+                            )}
+                            <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-xs leading-5 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">
+                                <div className="mb-1 font-medium text-stone-800 dark:text-stone-100">用途摘要</div>
+                                <div>{summary}</div>
                             </div>
                         </div>
-                    </>
+                        <div className="min-w-0">
+                            <div className="flex flex-wrap gap-1.5">
+                                <Tag color="blue" className="m-0">
+                                    {sourceLabel}
+                                </Tag>
+                                <Tag color="processing" className="m-0">
+                                    {quality}
+                                </Tag>
+                                {prompt.topic ? (
+                                    <Tag className="m-0" color="geekblue">
+                                        {prompt.topic}
+                                    </Tag>
+                                ) : null}
+                                {tags.map((tag) => (
+                                    <Tag key={tag} className="m-0">
+                                        {tag}
+                                    </Tag>
+                                ))}
+                            </div>
+                            <p className="mt-4 whitespace-pre-wrap text-sm leading-7 text-stone-800 dark:text-stone-300">{prompt.prompt}</p>
+                            <div className="mt-4 text-xs text-stone-500 dark:text-stone-400">
+                                质量分 {prompt.qualityScore || 0} · {prompt.hasCover ? "有预览图" : "无预览图"} · 适合先{prompt.hasCover ? "看图理解再生成" : "用 AI 优化后生成"}
+                            </div>
+                            <Space wrap className="mt-5">
+                                <Button type="primary" icon={<ImagePlus className="size-4" />} onClick={() => onUseImage?.(prompt)}>
+                                    用于生图
+                                </Button>
+                                <Button icon={<VideoIcon className="size-4" />} onClick={() => onUseVideo?.(prompt)}>
+                                    用于视频
+                                </Button>
+                                <Button icon={<WandSparkles className="size-4" />} onClick={() => onOptimizeAndUseImage?.(prompt)}>
+                                    优化后生图
+                                </Button>
+                                {onOptimizeMine ? (
+                                    <Button icon={<WandSparkles className="size-4" />} onClick={() => onOptimizeMine(prompt)}>
+                                        优化并另存
+                                    </Button>
+                                ) : null}
+                                {onToggleFavorite ? (
+                                    <Button icon={<Star className="size-4" />} type={favorited ? "primary" : "default"} onClick={() => onToggleFavorite(prompt)}>
+                                        {favorited ? "已收藏" : "收藏"}
+                                    </Button>
+                                ) : null}
+                                {onSaveToMine ? <Button onClick={() => onSaveToMine(prompt)}>存到我的提示词</Button> : null}
+                                <Button icon={<Copy className="size-4" />} onClick={() => onCopy(prompt.prompt)}>
+                                    复制提示词
+                                </Button>
+                                {onSaveAsset ? (
+                                    <Button icon={<FolderPlus className="size-4" />} onClick={() => onSaveAsset(prompt)}>
+                                        加入我的素材
+                                    </Button>
+                                ) : null}
+                            </Space>
+                        </div>
+                    </div>
                 ) : null}
             </Modal>
+
+            {previewOpen && coverUrl && typeof document !== "undefined"
+                ? createPortal(
+                      <div
+                          role="dialog"
+                          aria-modal="true"
+                          aria-label="预览图放大"
+                          onClick={() => setPreviewOpen(false)}
+                          style={{
+                              position: "fixed",
+                              inset: 0,
+                              zIndex: 10000,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              padding: 16,
+                              background: "rgba(0,0,0,0.85)",
+                          }}
+                      >
+                          <button
+                              type="button"
+                              onClick={(event) => {
+                                  event.stopPropagation();
+                                  setPreviewOpen(false);
+                              }}
+                              aria-label="关闭预览"
+                              style={{
+                                  position: "absolute",
+                                  top: 16,
+                                  right: 16,
+                                  zIndex: 1,
+                                  width: 44,
+                                  height: 44,
+                                  borderRadius: 999,
+                                  border: 0,
+                                  background: "rgba(255,255,255,0.2)",
+                                  color: "#fff",
+                                  cursor: "pointer",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                              }}
+                          >
+                              <X className="size-5" />
+                          </button>
+                          <img
+                              src={coverUrl}
+                              alt={prompt?.title || "预览图"}
+                              onClick={(event) => event.stopPropagation()}
+                              draggable={false}
+                              style={{
+                                  maxHeight: "90vh",
+                                  maxWidth: "92vw",
+                                  borderRadius: 12,
+                                  objectFit: "contain",
+                                  boxShadow: "0 20px 60px rgba(0,0,0,0.45)",
+                              }}
+                          />
+                      </div>,
+                      document.body,
+                  )
+                : null}
         </>
     );
 }

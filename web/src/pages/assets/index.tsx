@@ -1,5 +1,6 @@
-import { Copy, Download, PencilLine, Search, Trash2, Upload } from "lucide-react";
+import { Copy, Download, ImagePlus, PencilLine, Search, Trash2, Upload, VideoIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { App, Button, Card, Drawer, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Spin, Tag, Typography } from "antd";
 import { saveAs } from "file-saver";
 
@@ -33,6 +34,7 @@ const kindOptions = [
 
 export default function AssetsPage() {
     const { message } = App.useApp();
+    const navigate = useNavigate();
     const copyText = useCopyText();
     const [form] = Form.useForm<AssetFormValues>();
     const coverInputRef = useRef<HTMLInputElement>(null);
@@ -294,13 +296,35 @@ export default function AssetsPage() {
         setDeletingAsset(null);
     };
 
+    const useAssetInWorkbench = (asset: Asset, target: "image" | "video") => {
+        if (asset.kind === "text") {
+            const params = new URLSearchParams({ prompt: asset.data.content || "" });
+            navigate(`/${target}?${params.toString()}`);
+            return;
+        }
+        if (asset.kind === "image" && target === "image") {
+            message.info("图片素材可在生图工作台通过“查看我的素材”插入为参考图");
+            navigate("/image");
+            return;
+        }
+        if (asset.kind === "image" && target === "video") {
+            message.info("图片素材可在视频工作台通过“查看我的素材”插入为参考图");
+            navigate("/video");
+            return;
+        }
+        if (asset.kind === "video") {
+            message.info("视频素材可在视频工作台通过“查看我的素材”插入");
+            navigate("/video");
+        }
+    };
+
     return (
         <div className="flex h-full flex-col overflow-hidden bg-background text-stone-900 dark:text-stone-100">
             <main className="min-h-0 flex-1 overflow-y-auto bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] px-6 py-8 [background-size:16px_16px] dark:bg-[radial-gradient(rgba(245,245,244,.14)_1px,transparent_1px)]">
                 <div className="pb-8">
                     <div className="mx-auto max-w-5xl text-center">
                         <h1 className="text-4xl font-semibold tracking-tight text-stone-950 dark:text-stone-100">我的素材</h1>
-                        <p className="mt-3 text-sm text-stone-500 dark:text-stone-400">收藏常用文本、图片和视频，支持直接导入本机文件或素材压缩包。</p>
+                        <p className="mt-3 text-sm text-stone-500 dark:text-stone-400">长期保存文本、图片、视频；文本可一键带去生图/视频，媒体可在工作台作为参考插入。</p>
                     </div>
 
                     <div className="mx-auto mt-8 w-full max-w-2xl">
@@ -384,7 +408,17 @@ export default function AssetsPage() {
                         <>
                             <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                                 {visibleAssets.map((asset) => (
-                                    <AssetCard key={asset.id} asset={asset} onOpen={() => setPreviewAsset(asset)} onEdit={() => openEdit(asset)} onCopy={copyAssetText} onDownload={downloadImage} onDelete={() => setDeletingAsset(asset)} />
+                                    <AssetCard
+                                        key={asset.id}
+                                        asset={asset}
+                                        onOpen={() => setPreviewAsset(asset)}
+                                        onEdit={() => openEdit(asset)}
+                                        onCopy={copyAssetText}
+                                        onDownload={downloadImage}
+                                        onUseImage={() => useAssetInWorkbench(asset, "image")}
+                                        onUseVideo={() => useAssetInWorkbench(asset, "video")}
+                                        onDelete={() => setDeletingAsset(asset)}
+                                    />
                                 ))}
                             </div>
 
@@ -564,7 +598,25 @@ export default function AssetsPage() {
     );
 }
 
-function AssetCard({ asset, onOpen, onEdit, onCopy, onDownload, onDelete }: { asset: Asset; onOpen: () => void; onEdit: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void; onDelete: () => void }) {
+function AssetCard({
+    asset,
+    onOpen,
+    onEdit,
+    onCopy,
+    onDownload,
+    onUseImage,
+    onUseVideo,
+    onDelete,
+}: {
+    asset: Asset;
+    onOpen: () => void;
+    onEdit: () => void;
+    onCopy: (asset: Asset) => void;
+    onDownload: (asset: Asset) => void;
+    onUseImage: () => void;
+    onUseVideo: () => void;
+    onDelete: () => void;
+}) {
     const cover = asset.coverUrl || (asset.kind === "image" ? asset.data.dataUrl : "");
     const summary = assetSummary(asset);
     return (
@@ -608,23 +660,32 @@ function AssetCard({ asset, onOpen, onEdit, onCopy, onDownload, onDelete }: { as
                     </div>
                 </div>
             </button>
-            <div className="flex items-center gap-2 px-4 pb-4">
-                <Button size="small" onClick={onOpen}>
-                    查看
-                </Button>
+            <div className="flex flex-wrap items-center gap-2 px-4 pb-4">
+                {asset.kind === "text" ? (
+                    <>
+                        <Button size="small" type="primary" icon={<ImagePlus className="size-3.5" />} onClick={onUseImage}>
+                            生图
+                        </Button>
+                        <Button size="small" icon={<VideoIcon className="size-3.5" />} onClick={onUseVideo}>
+                            视频
+                        </Button>
+                        <Button size="small" icon={<Copy className="size-3.5" />} onClick={() => void onCopy(asset)}>
+                            复制
+                        </Button>
+                    </>
+                ) : (
+                    <>
+                        <Button size="small" type="primary" onClick={onUseImage}>
+                            去工作台
+                        </Button>
+                        <Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(asset)}>
+                            下载
+                        </Button>
+                    </>
+                )}
                 <Button size="small" icon={<PencilLine className="size-3.5" />} onClick={onEdit}>
                     编辑
                 </Button>
-                {asset.kind === "text" ? (
-                    <Button size="small" icon={<Copy className="size-3.5" />} onClick={() => void onCopy(asset)}>
-                        复制
-                    </Button>
-                ) : null}
-                {asset.kind === "image" || asset.kind === "video" ? (
-                    <Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(asset)}>
-                        下载
-                    </Button>
-                ) : null}
                 <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={onDelete}>
                     删除
                 </Button>

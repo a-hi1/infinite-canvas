@@ -31,7 +31,8 @@ export function AppProviders({ children }: { children: ReactNode }) {
     return (
         <ConfigProvider locale={zhCN} theme={getAntThemeConfig(dark)}>
             <ProConfigProvider dark={dark}>
-                <App>
+                {/* top 下移到顶栏下方，避免挡住“我的素材”等导航点击 */}
+                <App message={{ top: 72, duration: 2.2 }} notification={{ placement: "bottomRight" }}>
                     <QueryClientProvider client={queryClient}>
                         <ClientRootInit>{children}</ClientRootInit>
                     </QueryClientProvider>

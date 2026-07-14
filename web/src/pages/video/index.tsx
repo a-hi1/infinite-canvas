@@ -1,5 +1,6 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImageIcon, LoaderCircle, Music2, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon, WandSparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Tag, Typography } from "antd";
 import localforage from "localforage";
 import { nanoid } from "nanoid";
@@ -72,6 +73,7 @@ const logStore = localforage.createInstance({ name: "infinite-canvas", storeName
 
 export default function VideoPage() {
     const { message } = App.useApp();
+    const [searchParams, setSearchParams] = useSearchParams();
     const fileInputRef = useRef<HTMLInputElement>(null);
     const activeLogIdsRef = useRef<Set<string>>(new Set());
     const effectiveConfig = useEffectiveConfig();
@@ -99,6 +101,34 @@ export default function VideoPage() {
 
     const model = effectiveConfig.videoModel || effectiveConfig.model;
     const textModel = effectiveConfig.textModel || effectiveConfig.model;
+
+    useEffect(() => {
+        const incoming = searchParams.get("prompt")?.trim() || "";
+        if (!incoming) return;
+        setPrompt(incoming);
+        const shouldOptimize = searchParams.get("optimize") === "1";
+        setSearchParams({}, { replace: true });
+        if (!shouldOptimize) return;
+        void (async () => {
+            if (!isAiConfigReady(effectiveConfig, textModel)) {
+                message.warning("已填入提示词。请先配置文本模型后再点 AI 优化");
+                openConfigDialog(true);
+                return;
+            }
+            setOptimizingPrompt(true);
+            try {
+                const optimized = await optimizeGenerationPrompt(effectiveConfig, incoming, "video", {
+                    onDelta: (value) => setPrompt(value),
+                });
+                setPrompt(optimized);
+                message.success("提示词已优化，可直接生成");
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : "提示词优化失败");
+            } finally {
+                setOptimizingPrompt(false);
+            }
+        })();
+    }, [effectiveConfig, isAiConfigReady, message, openConfigDialog, searchParams, setSearchParams, textModel]);
     const videoRequestConfig = buildVideoConfig(effectiveConfig, model);
     const videoRequestChannel = resolveModelChannel(videoRequestConfig, model);
     const agnesMode = isAgnesVideoConfig(videoRequestConfig);
@@ -589,7 +619,7 @@ export default function VideoPage() {
                     <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
                 </div>
             </Drawer>
-            <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} />
+            <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} optimizeMode="video" />
             <AssetPickerModal open={assetPickerOpen} defaultTab="my-assets" onInsert={(payload) => void insertPickedAsset(payload)} onClose={() => setAssetPickerOpen(false)} />
             <Modal title="删除生成记录" open={deleteConfirmOpen} onCancel={() => setDeleteConfirmOpen(false)} onOk={deleteSelectedLogs} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
                 确定删除选中的 {selectedLogIds.length} 条生成记录吗？

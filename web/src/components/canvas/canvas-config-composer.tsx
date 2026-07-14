@@ -1,15 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, MouseEvent, PointerEvent } from "react";
-import { Button, Image } from "antd";
-import { FileText, Image as ImageIcon, Music2, Video, X } from "lucide-react";
+import { App, Button, Image, Tooltip } from "antd";
+import { FileText, Image as ImageIcon, Music2, Video, WandSparkles, X } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
+import { optimizeGenerationPrompt, type PromptOptimizeMode } from "@/lib/prompt-optimize";
+import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
+import type { CanvasGenerationMode } from "@/types/canvas";
 import type { NodeGenerationInput } from "./canvas-node-generation";
 
 type CanvasConfigComposerProps = {
     value: string;
     inputs: NodeGenerationInput[];
+    mode?: CanvasGenerationMode;
     onChange: (value: string) => void;
     onClose: () => void;
 };
@@ -24,13 +28,19 @@ type MentionState = {
 
 export const CONFIG_REFERENCE_PATTERN = /@\[node:([^\]]+)\]/g;
 
-export function CanvasConfigComposer({ value, inputs, onChange, onClose }: CanvasConfigComposerProps) {
+export function CanvasConfigComposer({ value, inputs, mode = "image", onChange, onClose }: CanvasConfigComposerProps) {
+    const { message } = App.useApp();
+    const globalConfig = useEffectiveConfig();
+    const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
+    const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const editorRef = useRef<HTMLDivElement>(null);
     const composingRef = useRef(false);
+    const optimizeAbortRef = useRef<AbortController | null>(null);
     const [mention, setMention] = useState<MentionState | null>(null);
     const [activeIndex, setActiveIndex] = useState(0);
     const [imagePreview, setImagePreview] = useState<string | null>(null);
+    const [optimizingPrompt, setOptimizingPrompt] = useState(false);
     const tokens = useMemo(() => parseComposerTokens(value), [value]);
     const referenceById = useMemo(() => new Map(inputs.map((input) => [input.nodeId, input])), [inputs]);
     const candidates = useMemo(() => {
@@ -39,9 +49,13 @@ export function CanvasConfigComposer({ value, inputs, onChange, onClose }: Canva
         if (!query) return inputs;
         return inputs.filter((input) => `${resourceLabel(input, inputs)} ${input.title} ${input.text || ""}`.toLowerCase().includes(query));
     }, [inputs, mention]);
+    const textModel = (globalConfig.textModel || globalConfig.model || "").trim();
+    const optimizeMode = composerOptimizeMode(mode);
+    const canOptimize = Boolean(value.trim()) && !optimizingPrompt;
 
     useEffect(() => {
-        if (document.activeElement === editorRef.current) return;
+        // 优化流式回填时即使仍有焦点也要刷新编辑器；正常输入中则跳过，避免打断光标。
+        if (!optimizingPrompt && document.activeElement === editorRef.current) return;
         const editor = editorRef.current;
         if (!editor) return;
         editor.textContent = "";
@@ -53,7 +67,7 @@ export function CanvasConfigComposer({ value, inputs, onChange, onClose }: Canva
             const input = referenceById.get(token.nodeId);
             if (input) editor.append(createReferenceChip(input, inputs, theme, setImagePreview));
         });
-    }, [inputs, referenceById, theme, tokens]);
+    }, [inputs, optimizingPrompt, referenceById, theme, tokens]);
 
     const syncFromEditor = () => {
         const editor = editorRef.current;
@@ -104,10 +118,52 @@ export function CanvasConfigComposer({ value, inputs, onChange, onClose }: Canva
 
     const stopCanvasInteraction = (event: PointerEvent | MouseEvent) => event.stopPropagation();
 
+    useEffect(() => {
+        return () => {
+            optimizeAbortRef.current?.abort();
+            optimizeAbortRef.current = null;
+        };
+    }, []);
+
+    const optimizePrompt = async () => {
+        const source = value.trim();
+        if (!source || optimizingPrompt) return;
+        if (!isAiConfigReady(globalConfig, textModel)) {
+            message.warning("请先配置可用的文本模型，用于优化提示词");
+            openConfigDialog(true);
+            return;
+        }
+
+        const { prompt: optimizeSource, restore } = prepareComposerPromptForOptimize(source);
+        if (!optimizeSource.trim()) {
+            message.warning("请先输入可优化的提示词文本");
+            return;
+        }
+
+        optimizeAbortRef.current?.abort();
+        const controller = new AbortController();
+        optimizeAbortRef.current = controller;
+        setOptimizingPrompt(true);
+        try {
+            const optimized = await optimizeGenerationPrompt(globalConfig, optimizeSource, optimizeMode, {
+                signal: controller.signal,
+                onDelta: (text) => onChange(restore(text)),
+            });
+            onChange(restore(optimized));
+            message.success("提示词已优化");
+        } catch (error) {
+            if (controller.signal.aborted) return;
+            message.error(error instanceof Error ? error.message : "提示词优化失败");
+        } finally {
+            if (optimizeAbortRef.current === controller) optimizeAbortRef.current = null;
+            setOptimizingPrompt(false);
+        }
+    };
+
     return (
         <div
             data-canvas-no-zoom
-            className="rounded-2xl border p-3 shadow-2xl backdrop-blur"
+            className="w-[min(560px,calc(100vw-32px))] rounded-2xl border p-3 shadow-2xl backdrop-blur"
             style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
             onMouseDown={stopCanvasInteraction}
             onPointerDown={stopCanvasInteraction}
@@ -118,15 +174,30 @@ export function CanvasConfigComposer({ value, inputs, onChange, onClose }: Canva
                     <div className="shrink-0 text-xs font-semibold">组装提示词</div>
                     <div className="truncate text-[11px] opacity-55">@ 引用已连接素材，发送前按当前连接重新编号</div>
                 </div>
-                <Button size="small" type="text" className="!h-7 !w-7 !min-w-7 !p-0" icon={<X className="size-3.5" />} onClick={onClose} />
+                <div className="flex shrink-0 items-center gap-1.5">
+                    <Tooltip title="使用文本模型优化组装提示词，并尽量保留已引用素材">
+                        <Button
+                            type="default"
+                            size="small"
+                            className="!h-8 !rounded-full !px-2.5"
+                            icon={<WandSparkles className="size-3.5" />}
+                            loading={optimizingPrompt}
+                            disabled={!canOptimize}
+                            onClick={() => void optimizePrompt()}
+                        >
+                            AI 优化
+                        </Button>
+                    </Tooltip>
+                    <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !p-0" icon={<X className="size-3.5" />} onClick={onClose} />
+                </div>
             </div>
-            <div className="relative rounded-xl border" style={{ background: theme.node.fill, borderColor: theme.node.stroke }}>
+            <div className="relative rounded-xl border" style={{ background: theme.node.fill, borderColor: theme.node.stroke, opacity: optimizingPrompt ? 0.72 : 1 }}>
                 {!value.trim() ? <div className="pointer-events-none absolute left-3 top-2 text-sm leading-7" style={{ color: theme.node.placeholder }}>输入提示词，按 @ 引用连接的图片或文本</div> : null}
                 <div
                     ref={editorRef}
-                    contentEditable
+                    contentEditable={!optimizingPrompt}
                     suppressContentEditableWarning
-                    className="thin-scrollbar min-h-28 w-full overflow-y-auto whitespace-pre-wrap break-words px-3 py-2 text-sm leading-7 outline-none"
+                    className="canvas-prompt-scrollbar min-h-28 w-full overflow-y-auto whitespace-pre-wrap break-words px-3 py-2 text-sm leading-7 outline-none"
                     style={{ color: theme.node.text }}
                     onInput={() => {
                         if (!composingRef.current) syncFromEditor();
@@ -140,6 +211,10 @@ export function CanvasConfigComposer({ value, inputs, onChange, onClose }: Canva
                     }}
                     onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
                         event.stopPropagation();
+                        if (optimizingPrompt) {
+                            event.preventDefault();
+                            return;
+                        }
                         if (mention && candidates.length) {
                             if (event.key === "ArrowDown") {
                                 event.preventDefault();
@@ -177,6 +252,35 @@ export function CanvasConfigComposer({ value, inputs, onChange, onClose }: Canva
         </div>
     );
 
+}
+
+function composerOptimizeMode(mode: CanvasGenerationMode): PromptOptimizeMode {
+    if (mode === "video") return "video";
+    if (mode === "audio") return "audio";
+    if (mode === "text") return "text";
+    return "image";
+}
+
+function prepareComposerPromptForOptimize(value: string) {
+    const placeholders: string[] = [];
+    const prompt = value.replace(CONFIG_REFERENCE_PATTERN, (token) => {
+        const index = placeholders.length;
+        placeholders.push(token);
+        return `[[REF${index}]]`;
+    });
+
+    return {
+        prompt,
+        restore: (text: string) => {
+            let restored = text;
+            placeholders.forEach((token, index) => {
+                restored = restored.replace(new RegExp(`\\[\\[REF${index}\\]\\]`, "g"), token);
+            });
+            const missing = placeholders.filter((token) => !restored.includes(token));
+            if (missing.length) restored = `${restored.trim()}\n${missing.join(" ")}`.trim();
+            return restored;
+        },
+    };
 }
 
 function MentionMenu({ inputs, allInputs, activeIndex, theme, onSelect }: { inputs: NodeGenerationInput[]; allInputs: NodeGenerationInput[]; activeIndex: number; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; onSelect: (input: NodeGenerationInput) => void }) {
