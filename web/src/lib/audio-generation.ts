@@ -1,4 +1,4 @@
-export const audioVoiceOptions = [
+export const openAiAudioVoiceOptions = [
     { value: "alloy", label: "Alloy" },
     { value: "ash", label: "Ash" },
     { value: "ballad", label: "Ballad" },
@@ -14,6 +14,20 @@ export const audioVoiceOptions = [
     { value: "cedar", label: "Cedar" },
 ];
 
+export const minimaxAudioVoiceOptions = [
+    { value: "male-qn-qingse", label: "MiniMax 青涩男声" },
+    { value: "male-qn-jingying", label: "MiniMax 精英男声" },
+    { value: "male-qn-badao", label: "MiniMax 霸道男声" },
+    { value: "female-shaonv", label: "MiniMax 少女音" },
+    { value: "female-yujie", label: "MiniMax 御姐音" },
+    { value: "female-chengshu", label: "MiniMax 成熟女声" },
+    { value: "audiobook_male_1", label: "MiniMax 有声书男声" },
+    { value: "audiobook_female_1", label: "MiniMax 有声书女声" },
+    { value: "English_expressive_narrator", label: "MiniMax English Narrator" },
+];
+
+export const audioVoiceOptions = [...openAiAudioVoiceOptions, ...minimaxAudioVoiceOptions];
+
 export const audioFormatOptions = [
     { value: "mp3", label: "MP3" },
     { value: "wav", label: "WAV" },
@@ -27,8 +41,21 @@ export function normalizeAudioVoiceValue(value: string) {
     return audioVoiceOptions.some((item) => item.value === value) ? value : "alloy";
 }
 
+export function normalizeOpenAiAudioVoiceValue(value: string) {
+    return openAiAudioVoiceOptions.some((item) => item.value === value) ? value : "alloy";
+}
+
+export function normalizeMiniMaxAudioVoiceValue(value: string) {
+    return minimaxAudioVoiceOptions.some((item) => item.value === value) ? value : "male-qn-qingse";
+}
+
 export function normalizeAudioFormatValue(value: string) {
     return audioFormatOptions.some((item) => item.value === value) ? value : "mp3";
+}
+
+export function normalizeMiniMaxAudioFormatValue(value: string) {
+    const format = normalizeAudioFormatValue(value);
+    return ["mp3", "wav", "flac", "pcm"].includes(format) ? format : "mp3";
 }
 
 export function normalizeAudioSpeedValue(value: string) {

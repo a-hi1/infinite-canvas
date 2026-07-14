@@ -24,6 +24,7 @@ const endpointRules = [
     /^\/agnesapi$/,
     /^\/media$/,
     /^\/v1\/audio\/speech$/,
+    /^\/v1\/t2a_v2$/,
     /^\/api\/plan\/v3\/contents\/generations\/tasks(?:\/[^/]+)?$/,
     /^\/api\/v3\/contents\/generations\/tasks(?:\/[^/]+)?$/,
     /^\/v1beta\/models(?:\/[^:]+:(?:generateContent|streamGenerateContent))?$/,
