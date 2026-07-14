@@ -36,32 +36,70 @@ type AssetStore = {
 };
 
 const ASSET_STORE_KEY = "infinite-canvas:asset_store";
+const ASSET_HYDRATION_TIMEOUT_MS = 8000;
 
 const assetStorage: PersistStorage<AssetStore> = {
     getItem: async (name) => {
         const value = await localForageStorage.getItem(name);
         if (!value) return null;
-        const parsed = JSON.parse(value) as StorageValue<AssetStore>;
-        parsed.state.assets = await Promise.all(
-            parsed.state.assets.map(async (asset) => {
-                if (asset.kind === "video" && asset.data.storageKey) return { ...asset, data: { ...asset.data, url: await resolveMediaUrl(asset.data.storageKey, asset.data.url) } };
-                if (asset.kind !== "image") return asset;
-                if (asset.data.storageKey)
-                    return {
-                        ...asset,
-                        coverUrl: asset.coverUrl.startsWith("blob:") ? await resolveImageUrl(asset.data.storageKey, asset.coverUrl) : asset.coverUrl,
-                        data: { ...asset.data, dataUrl: await resolveImageUrl(asset.data.storageKey, asset.data.dataUrl) },
-                    };
-                if (!asset.data.dataUrl.startsWith("data:image/")) return asset;
-                const image = await uploadImage(asset.data.dataUrl);
-                return { ...asset, coverUrl: asset.coverUrl.startsWith("data:image/") ? image.url : asset.coverUrl, data: { ...asset.data, dataUrl: image.url, storageKey: image.storageKey, bytes: image.bytes, mimeType: image.mimeType } };
-            }),
-        );
+        let parsed: StorageValue<AssetStore>;
+        try {
+            parsed = JSON.parse(value) as StorageValue<AssetStore>;
+        } catch {
+            return null;
+        }
+        parsed.state.assets = await Promise.all((parsed.state.assets || []).map(hydratePersistedAsset));
         return parsed;
     },
     setItem: (name, value) => localForageStorage.setItem(name, JSON.stringify(value)),
     removeItem: (name) => localForageStorage.removeItem(name),
 };
+
+async function hydratePersistedAsset(asset: Asset): Promise<Asset> {
+    try {
+        if (asset.kind === "video") return hydratePersistedVideoAsset(asset);
+        if (asset.kind === "image") return hydratePersistedImageAsset(asset);
+        return asset;
+    } catch {
+        return stripStaleBlobUrls(asset);
+    }
+}
+
+async function hydratePersistedVideoAsset(asset: VideoAsset): Promise<VideoAsset> {
+    if (!asset.data.storageKey) return asset;
+    const url = await withAssetHydrationTimeout(resolveMediaUrl(asset.data.storageKey, ""));
+    return { ...asset, coverUrl: safeStoredUrl(asset.coverUrl), data: { ...asset.data, url: url || safeStoredUrl(asset.data.url) } };
+}
+
+async function hydratePersistedImageAsset(asset: ImageAsset): Promise<ImageAsset> {
+    if (asset.data.storageKey) {
+        const dataUrl = await withAssetHydrationTimeout(resolveImageUrl(asset.data.storageKey, ""));
+        const coverUrl = asset.coverUrl.startsWith("blob:") ? dataUrl : asset.coverUrl;
+        return { ...asset, coverUrl: safeStoredUrl(coverUrl), data: { ...asset.data, dataUrl: dataUrl || safeStoredUrl(asset.data.dataUrl) } };
+    }
+    if (!asset.data.dataUrl.startsWith("data:image/")) return asset;
+    const image = await withAssetHydrationTimeout(uploadImage(asset.data.dataUrl));
+    return { ...asset, coverUrl: asset.coverUrl.startsWith("data:image/") ? image.url : asset.coverUrl, data: { ...asset.data, dataUrl: image.url, storageKey: image.storageKey, bytes: image.bytes, mimeType: image.mimeType } };
+}
+
+function stripStaleBlobUrls(asset: Asset): Asset {
+    if (asset.kind === "image") return { ...asset, coverUrl: safeStoredUrl(asset.coverUrl), data: { ...asset.data, dataUrl: safeStoredUrl(asset.data.dataUrl) } };
+    if (asset.kind === "video") return { ...asset, coverUrl: safeStoredUrl(asset.coverUrl), data: { ...asset.data, url: safeStoredUrl(asset.data.url) } };
+    return asset;
+}
+
+function withAssetHydrationTimeout<T>(promise: Promise<T>) {
+    return Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+            window.setTimeout(() => reject(new Error("素材恢复超时")), ASSET_HYDRATION_TIMEOUT_MS);
+        }),
+    ]);
+}
+
+function safeStoredUrl(value = "") {
+    return value.startsWith("blob:") ? "" : value;
+}
 
 export const useAssetStore = create<AssetStore>()(
     persist(

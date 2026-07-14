@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Empty, Input, Modal, Pagination, Tag } from "antd";
+import { Empty, Input, Modal, Pagination, Spin, Tag } from "antd";
 import { Search } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -56,6 +56,7 @@ function PickerCard({ title, kind, cover, onClick }: { title: string; kind: stri
 
 function MyAssetsTab({ onInsert }: { onInsert: (payload: InsertAssetPayload) => void }) {
     const assets = useAssetStore((state) => state.assets);
+    const hydrated = useAssetStore((state) => state.hydrated);
     const [keyword, setKeyword] = useState("");
     const [kindFilter, setKindFilter] = useState("all");
     const [page, setPage] = useState(1);
@@ -89,8 +90,9 @@ function MyAssetsTab({ onInsert }: { onInsert: (payload: InsertAssetPayload) => 
                 <Input
                     className="w-56"
                     size="small"
+                    disabled={!hydrated}
                     prefix={<Search className="size-3.5 text-stone-400" />}
-                    placeholder="搜索素材"
+                    placeholder={hydrated ? "搜索素材" : "正在加载素材..."}
                     value={keyword}
                     allowClear
                     onChange={(e) => {
@@ -105,6 +107,7 @@ function MyAssetsTab({ onInsert }: { onInsert: (payload: InsertAssetPayload) => 
                             checked={kindFilter === opt.value}
                             className={cn("prompt-filter-tag", kindFilter === opt.value && "is-active")}
                             onChange={() => {
+                                if (!hydrated) return;
                                 setPage(1);
                                 setKindFilter(opt.value);
                             }}
@@ -115,7 +118,12 @@ function MyAssetsTab({ onInsert }: { onInsert: (payload: InsertAssetPayload) => 
                 </div>
             </div>
 
-            {visible.length ? (
+            {!hydrated ? (
+                <div className="flex min-h-75 flex-col items-center justify-center gap-3 text-sm text-stone-500">
+                    <Spin />
+                    <span>正在加载素材...</span>
+                </div>
+            ) : visible.length ? (
                 <div className="grid grid-cols-4 gap-3">
                     {visible.map((asset) => (
                         <PickerCard key={asset.id} title={asset.title} kind={asset.kind} cover={asset.coverUrl || (asset.kind === "image" ? asset.data.dataUrl : "")} onClick={() => handleInsert(asset)} />
@@ -125,7 +133,7 @@ function MyAssetsTab({ onInsert }: { onInsert: (payload: InsertAssetPayload) => 
                 <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有素材" className="py-12" />
             )}
 
-            {filtered.length > PAGE_SIZE && (
+            {hydrated && filtered.length > PAGE_SIZE && (
                 <div className="flex justify-center">
                     <Pagination size="small" current={page} pageSize={PAGE_SIZE} total={filtered.length} onChange={setPage} showSizeChanger={false} />
                 </div>

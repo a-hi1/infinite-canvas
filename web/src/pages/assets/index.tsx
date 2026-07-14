@@ -1,6 +1,6 @@
 import { Copy, Download, PencilLine, Search, Trash2, Upload } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { App, Button, Card, Drawer, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Tag, Typography } from "antd";
+import { App, Button, Card, Drawer, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Spin, Tag, Typography } from "antd";
 import { saveAs } from "file-saver";
 
 import { useCopyText } from "@/hooks/use-copy-text";
@@ -37,6 +37,7 @@ export default function AssetsPage() {
     const imageInputRef = useRef<HTMLInputElement>(null);
     const assetInputRef = useRef<HTMLInputElement>(null);
     const assets = useAssetStore((state) => state.assets);
+    const hydrated = useAssetStore((state) => state.hydrated);
     const addAsset = useAssetStore((state) => state.addAsset);
     const updateAsset = useAssetStore((state) => state.updateAsset);
     const removeAsset = useAssetStore((state) => state.removeAsset);
@@ -199,9 +200,10 @@ export default function AssetsPage() {
                             className="w-full"
                             size="large"
                             allowClear
+                            disabled={!hydrated}
                             prefix={<Search className="size-4 text-stone-400" />}
                             value={keyword}
-                            placeholder="搜索标题、内容、标签或来源"
+                            placeholder={hydrated ? "搜索标题、内容、标签或来源" : "正在加载我的素材..."}
                             onChange={(event) => {
                                 setPage(1);
                                 setKeyword(event.target.value);
@@ -224,6 +226,7 @@ export default function AssetsPage() {
                                             checked={kindFilter === option.value}
                                             className={cn("prompt-filter-tag", kindFilter === option.value && "is-active")}
                                             onChange={() => {
+                                                if (!hydrated) return;
                                                 setPage(1);
                                                 setKindFilter(option.value as AssetKind | "all");
                                             }}
@@ -236,21 +239,24 @@ export default function AssetsPage() {
                             <div className="flex flex-wrap gap-4">
                                 <button
                                     type="button"
-                                    className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline dark:text-stone-300"
+                                    disabled={!hydrated}
+                                    className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-stone-300"
                                     onClick={() => void exportAllAssets()}
                                 >
                                     导出素材
                                 </button>
                                 <button
                                     type="button"
-                                    className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline dark:text-stone-300"
+                                    disabled={!hydrated}
+                                    className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-stone-300"
                                     onClick={() => assetInputRef.current?.click()}
                                 >
                                     导入素材
                                 </button>
                                 <button
                                     type="button"
-                                    className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline dark:text-stone-300"
+                                    disabled={!hydrated}
+                                    className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-stone-300"
                                     onClick={openCreate}
                                 >
                                     新增素材
@@ -261,27 +267,36 @@ export default function AssetsPage() {
                 </div>
 
                 <div className="mx-auto flex max-w-7xl flex-col gap-5">
-                    <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                        {visibleAssets.map((asset) => (
-                            <AssetCard key={asset.id} asset={asset} onOpen={() => setPreviewAsset(asset)} onEdit={() => openEdit(asset)} onCopy={copyAssetText} onDownload={downloadImage} onDelete={() => setDeletingAsset(asset)} />
-                        ))}
-                    </div>
+                    {!hydrated ? (
+                        <section className="flex min-h-[360px] flex-col items-center justify-center gap-3 border-y border-stone-200 text-sm text-stone-500 dark:border-stone-800">
+                            <Spin />
+                            <span>正在加载我的素材...</span>
+                        </section>
+                    ) : (
+                        <>
+                            <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                                {visibleAssets.map((asset) => (
+                                    <AssetCard key={asset.id} asset={asset} onOpen={() => setPreviewAsset(asset)} onEdit={() => openEdit(asset)} onCopy={copyAssetText} onDownload={downloadImage} onDelete={() => setDeletingAsset(asset)} />
+                                ))}
+                            </div>
 
-                    {!visibleAssets.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有找到素材" className="py-20" /> : null}
+                            {!visibleAssets.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={validAssets.length ? "没有找到素材" : "还没有素材"} className="py-20" /> : null}
 
-                    <div className="flex justify-center">
-                        <Pagination
-                            current={page}
-                            pageSize={pageSize}
-                            total={filteredAssets.length}
-                            showSizeChanger
-                            pageSizeOptions={[10, 20, 50, 100]}
-                            onChange={(nextPage, nextPageSize) => {
-                                setPage(nextPage);
-                                setPageSize(nextPageSize);
-                            }}
-                        />
-                    </div>
+                            <div className="flex justify-center">
+                                <Pagination
+                                    current={page}
+                                    pageSize={pageSize}
+                                    total={filteredAssets.length}
+                                    showSizeChanger
+                                    pageSizeOptions={[10, 20, 50, 100]}
+                                    onChange={(nextPage, nextPageSize) => {
+                                        setPage(nextPage);
+                                        setPageSize(nextPageSize);
+                                    }}
+                                />
+                            </div>
+                        </>
+                    )}
                 </div>
             </main>
 

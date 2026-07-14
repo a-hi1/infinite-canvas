@@ -101,6 +101,7 @@ const NODE_STATUS_IDLE = "idle" as const;
 const NODE_STATUS_LOADING = "loading" as const;
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
+const CANVAS_MEDIA_HYDRATION_TIMEOUT_MS = 8000;
 const IMAGE_PROMPT_REVERSE_PRESET = `请根据参考图片反推一段适合用于 AI 生图的提示词。
 
 要求：
@@ -395,6 +396,7 @@ function InfiniteCanvasPage() {
 
     useEffect(() => {
         if (!hydrated) return;
+        let cancelled = false;
         setProjectLoaded(false);
         const project = openProject(projectId);
         if (!project) {
@@ -403,8 +405,18 @@ function InfiniteCanvasPage() {
         }
 
         const restore = async () => {
-            const restoredNodes = await hydrateCanvasImages(resetInterruptedGeneration(project.nodes));
-            const restoredSessions = await hydrateAssistantImages(project.chatSessions || []);
+            const baseNodes = resetInterruptedGeneration(project.nodes);
+            let restoredNodes = baseNodes;
+            let restoredSessions = project.chatSessions || [];
+            let restoreWarning = false;
+
+            try {
+                [restoredNodes, restoredSessions] = await Promise.all([hydrateCanvasImages(baseNodes), hydrateAssistantImages(project.chatSessions || [])]);
+            } catch {
+                restoreWarning = true;
+            }
+
+            if (cancelled) return;
             setNodes(restoredNodes);
             setConnections(project.connections);
             setChatSessions(restoredSessions);
@@ -427,9 +439,13 @@ function InfiniteCanvasPage() {
             };
             setHistoryState({ canUndo: false, canRedo: false });
             setProjectLoaded(true);
+            if (restoreWarning) message.warning("部分本地媒体恢复较慢，已先打开画布");
         };
         void restore();
-    }, [hydrated, navigate, openProject, projectId]);
+        return () => {
+            cancelled = true;
+        };
+    }, [hydrated, message, navigate, openProject, projectId]);
 
     useEffect(() => {
         if (!projectLoaded || !["new", "recent", "choose"].includes(searchParams.get("mode") || "")) return;
@@ -3090,26 +3106,36 @@ async function resolveMetadataReferences(metadata: CanvasNodeMetadata) {
 }
 
 async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
-    return Promise.all(
-        nodes.map(async (node) => {
-            const content = node.metadata?.content;
-            if ((node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) && node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await resolveMediaUrl(node.metadata.storageKey, content) } };
-            if (node.type !== CanvasNodeType.Image || !content) return node;
-            if (node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await resolveImageUrl(node.metadata.storageKey, content) } };
-            if (!content.startsWith("data:image/")) return node;
-            return { ...node, metadata: { ...node.metadata, ...imageMetadata(await uploadImage(content)) } };
-        }),
-    );
+    return Promise.all(nodes.map((node) => hydrateCanvasNodeMedia(node)));
+}
+
+async function hydrateCanvasNodeMedia(node: CanvasNodeData) {
+    try {
+        const content = node.metadata?.content;
+        if ((node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) && node.metadata?.storageKey) {
+            return { ...node, metadata: { ...node.metadata, content: await withCanvasHydrationTimeout(resolveMediaUrl(node.metadata.storageKey, content)) } };
+        }
+        if (node.type !== CanvasNodeType.Image || !content) return node;
+        if (node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await withCanvasHydrationTimeout(resolveImageUrl(node.metadata.storageKey, content)) } };
+        if (!content.startsWith("data:image/")) return node;
+        return { ...node, metadata: { ...node.metadata, ...imageMetadata(await withCanvasHydrationTimeout(uploadImage(content))) } };
+    } catch {
+        return node;
+    }
 }
 
 async function hydrateAssistantImages(sessions: CanvasAssistantSession[]) {
     const hydrateItem = async <T extends { dataUrl?: string; storageKey?: string }>(item: T) => {
-        if (item.storageKey) return { ...item, dataUrl: await resolveImageUrl(item.storageKey, item.dataUrl) };
-        if (item.dataUrl?.startsWith("data:image/")) {
-            const image = await uploadImage(item.dataUrl);
-            return { ...item, dataUrl: image.url, storageKey: image.storageKey };
+        try {
+            if (item.storageKey) return { ...item, dataUrl: await withCanvasHydrationTimeout(resolveImageUrl(item.storageKey, item.dataUrl)) };
+            if (item.dataUrl?.startsWith("data:image/")) {
+                const image = await withCanvasHydrationTimeout(uploadImage(item.dataUrl));
+                return { ...item, dataUrl: image.url, storageKey: image.storageKey };
+            }
+            return item;
+        } catch {
+            return item;
         }
-        return item;
     };
     return Promise.all(
         sessions.map(async (session) => ({
@@ -3122,6 +3148,15 @@ async function hydrateAssistantImages(sessions: CanvasAssistantSession[]) {
             ),
         })),
     );
+}
+
+function withCanvasHydrationTimeout<T>(promise: Promise<T>) {
+    return Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+            window.setTimeout(() => reject(new Error("画布媒体恢复超时")), CANVAS_MEDIA_HYDRATION_TIMEOUT_MS);
+        }),
+    ]);
 }
 
 function getGenerationCount(count: string) {
