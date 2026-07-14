@@ -11,6 +11,7 @@ import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSettingsSummary } from "@/components/video-settings-panel";
 import { AGNES_VIDEO_SIZE, agnesVideoModeHint, agnesVideoRequestError, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { grokVideoModeHint, isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
@@ -98,9 +99,10 @@ export default function VideoPage() {
     const videoRequestChannel = resolveModelChannel(videoRequestConfig, model);
     const agnesMode = isAgnesVideoConfig(videoRequestConfig);
     const seedanceMode = isSeedanceVideoConfig(videoRequestConfig);
-    const videoProviderLabel = agnesMode ? "Agnes Video" : seedanceMode ? "Seedance / Agent Plan" : "OpenAI /videos";
+    const grokMode = isGrokVideoConfig(videoRequestConfig);
+    const videoProviderLabel = agnesMode ? "Agnes Video" : seedanceMode ? "Seedance / Agent Plan" : grokMode ? "Grok Imagine" : "OpenAI /videos";
     const videoReadinessWarning = getVideoReadinessWarning(videoRequestConfig, model);
-    const referenceModeHint = agnesMode ? agnesVideoModeHint : seedanceMode ? "当前模型支持参考图、参考视频和参考音频" : "当前 OpenAI 格式视频接口仅支持参考图；参考视频/音频需要 Seedance 2.0 / 火山 Agent Plan";
+    const referenceModeHint = agnesMode ? agnesVideoModeHint : seedanceMode ? "当前模型支持参考图、参考视频和参考音频" : grokMode ? grokVideoModeHint : "当前 OpenAI 格式视频接口仅支持参考图；参考视频/音频需要 Seedance 2.0 / 火山 Agent Plan";
     const canGenerate = Boolean(prompt.trim());
 
     useEffect(() => {
@@ -914,13 +916,14 @@ function buildVideoConfig(config: AiConfig, model: string): AiConfig {
         };
     }
     const seedance = isSeedanceVideoConfig(partial);
+    const grok = isGrokVideoConfig(partial);
     return {
         ...config,
         model,
         videoModel: model,
-        size: seedance ? normalizeSeedanceRatio(config.size) : normalizeVideoSize(config.size),
-        videoSeconds: normalizeVideoSeconds(config.videoSeconds),
-        vquality: normalizeResolution(config.vquality),
+        size: seedance ? normalizeSeedanceRatio(config.size) : grok ? normalizeGrokAspectRatio(config.size) : normalizeVideoSize(config.size),
+        videoSeconds: grok ? String(normalizeGrokDuration(config.videoSeconds)) : normalizeVideoSeconds(config.videoSeconds),
+        vquality: grok ? normalizeGrokResolution(config.vquality) : normalizeResolution(config.vquality),
         videoGenerateAudio: String(boolConfig(config.videoGenerateAudio, true)),
         videoWatermark: String(boolConfig(config.videoWatermark, false)),
     };

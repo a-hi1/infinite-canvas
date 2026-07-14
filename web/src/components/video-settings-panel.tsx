@@ -3,6 +3,7 @@ import { Switch } from "antd";
 
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import { AGNES_VIDEO_HEIGHT, AGNES_VIDEO_SIZE, AGNES_VIDEO_WIDTH, agnesDurationOptions, agnesVideoModeHint, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
+import { isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
 import { boolConfig, isSeedanceFastModel, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceDurationOptions, seedancePixelLabel, seedanceRatioOptions, seedanceResolutionOptions } from "@/lib/seedance-video";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
@@ -37,6 +38,9 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     }
     if (isSeedanceVideoConfig(config)) {
         return <SeedanceVideoSettingsPanel config={config} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} className={className} />;
+    }
+    if (isGrokVideoConfig(config)) {
+        return <GrokVideoSettingsPanel config={config} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} className={className} />;
     }
 
     const seconds = config.videoSeconds || "6";
@@ -137,6 +141,48 @@ function AgnesVideoSettingsPanel({ config, onConfigChange, theme, showTitle, cla
     );
 }
 
+function GrokVideoSettingsPanel({ config, onConfigChange, theme, showTitle, className }: VideoSettingsPanelProps) {
+    const resolution = normalizeGrokResolution(config.vquality).replace(/p$/i, "");
+    const ratio = normalizeGrokAspectRatio(config.size);
+    const duration = normalizeGrokDuration(config.videoSeconds);
+
+    return (
+        <ImageSettingsTheme theme={theme}>
+            <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
+                {showTitle ? <div className="text-lg font-semibold">Grok 视频设置</div> : null}
+                <SettingGroup title="清晰度" color={theme.node.muted}>
+                    <div className="grid grid-cols-3 gap-2.5">
+                        {["480", "720", "1080"].map((value) => (
+                            <OptionPill key={value} selected={resolution === value} theme={theme} onClick={() => onConfigChange("vquality", value)}>
+                                {value}p
+                            </OptionPill>
+                        ))}
+                    </div>
+                </SettingGroup>
+                <SettingGroup title="比例" color={theme.node.muted}>
+                    <div className="grid grid-cols-3 gap-2.5">
+                        {["16:9", "9:16", "1:1", "4:3", "3:4"].map((value) => (
+                            <OptionPill key={value} selected={ratio === value} theme={theme} onClick={() => onConfigChange("size", value)}>
+                                {value}
+                            </OptionPill>
+                        ))}
+                    </div>
+                </SettingGroup>
+                <SettingGroup title="秒数" color={theme.node.muted}>
+                    <div className="grid grid-cols-3 gap-2.5">
+                        {[4, 6, 10].map((value) => (
+                            <OptionPill key={value} selected={duration === value} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
+                                {value}s
+                            </OptionPill>
+                        ))}
+                        <NumberInput value={String(duration)} min={1} max={10} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} />
+                    </div>
+                </SettingGroup>
+            </div>
+        </ImageSettingsTheme>
+    );
+}
+
 function SeedanceVideoSettingsPanel({ config, onConfigChange, theme, showTitle, className }: VideoSettingsPanelProps) {
     const model = modelOptionName(config.model || config.videoModel);
     const resolution = normalizeSeedanceResolution(config.vquality, model);
@@ -203,6 +249,7 @@ function SeedanceVideoSettingsPanel({ config, onConfigChange, theme, showTitle, 
 
 export function videoSettingsSummary(config: Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "baseUrl">) {
     if (isAgnesVideoConfig(config)) return `Agnes · ${AGNES_VIDEO_SIZE} · ${normalizeAgnesDuration(config.videoSeconds)}s`;
+    if (isGrokVideoConfig(config)) return `Grok · ${normalizeGrokResolution(config.vquality)} · ${normalizeGrokAspectRatio(config.size)} · ${normalizeGrokDuration(config.videoSeconds)}s`;
     return `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
 }
 

@@ -1,6 +1,6 @@
 import axios from "axios";
 
-import { buildApiUrl, isAiProxyBaseUrl, resolveModelRequestConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { buildApiUrl, isAiProxyBaseUrl, modelMatchesCapability, modelOptionName, resolveModelRequestConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
@@ -621,6 +621,7 @@ function parseGeminiImagePayload(payload: GeminiPayload) {
 
 export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
+    assertImageModel(requestConfig.model);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     if (requestConfig.apiFormat === "gemini") {
         try {
@@ -657,6 +658,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
 
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
+    assertImageModel(requestConfig.model);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
     if (requestConfig.apiFormat === "gemini") {
@@ -692,6 +694,10 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     } catch (error) {
         throw new Error(readAxiosError(error, "请求失败"));
     }
+}
+
+function assertImageModel(model: string) {
+    if (modelMatchesCapability(model, "video")) throw new Error(`当前选择的是「${modelOptionName(model)}」，它是视频模型。请切换到视频生成，或在配置中选择图片模型。`);
 }
 
 export async function requestImageQuestion(config: AiConfig, messages: AiTextMessage[], onDelta: (text: string) => void, options?: RequestOptions) {
