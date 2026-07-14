@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, WandSparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Tag, Tooltip, Typography } from "antd";
 import localforage from "localforage";
@@ -10,6 +10,7 @@ import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
+import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
 import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
@@ -83,6 +84,7 @@ export default function ImagePage() {
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [promptDialogOpen, setPromptDialogOpen] = useState(false);
     const [assetPickerOpen, setAssetPickerOpen] = useState(false);
+    const [optimizingPrompt, setOptimizingPrompt] = useState(false);
     const [startedAt, setStartedAt] = useState(0);
     const [elapsedMs, setElapsedMs] = useState(0);
     const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
@@ -90,6 +92,7 @@ export default function ImagePage() {
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
     const model = effectiveConfig.imageModel || effectiveConfig.model;
+    const textModel = effectiveConfig.textModel || effectiveConfig.model;
     const canGenerate = Boolean(prompt.trim());
     const generationCount = Math.max(1, Math.min(10, Number(config.count) || 1));
 
@@ -132,6 +135,31 @@ export default function ImagePage() {
             message.success(`已读取 ${nextReferences.length} 张参考图`);
         } catch {
             message.error("剪切板里没有可读取的图片");
+        }
+    };
+
+    const optimizePrompt = async () => {
+        const text = prompt.trim();
+        if (!text) {
+            message.error("请先输入提示词");
+            return;
+        }
+        if (!isAiConfigReady(effectiveConfig, textModel)) {
+            message.warning("请先配置可用的文本模型，用于优化提示词");
+            openConfigDialog(true);
+            return;
+        }
+        setOptimizingPrompt(true);
+        try {
+            const optimized = await optimizeGenerationPrompt(effectiveConfig, text, "image", {
+                onDelta: (value) => setPrompt(value),
+            });
+            setPrompt(optimized);
+            message.success("提示词已优化");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "提示词优化失败");
+        } finally {
+            setOptimizingPrompt(false);
         }
     };
 
@@ -193,23 +221,111 @@ export default function ImagePage() {
     };
 
     const addResultToReferences = async (image: GeneratedImage, index: number) => {
-        const stored = await uploadImage(image.dataUrl);
-        setReferences((value) => [...value, { id: nanoid(), name: `result-${index + 1}.png`, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }]);
-        message.success("已加入参考图");
+        try {
+            // 已有本地 storageKey：直接复用，不要再去拉 imgen 远程地址
+            if (image.storageKey) {
+                const localUrl = await resolveImageUrl(image.storageKey, image.dataUrl);
+                if (localUrl && (localUrl.startsWith("blob:") || localUrl.startsWith("data:"))) {
+                    setReferences((value) => [
+                        ...value,
+                        {
+                            id: nanoid(),
+                            name: `result-${index + 1}.png`,
+                            type: image.mimeType || "image/png",
+                            dataUrl: localUrl,
+                            storageKey: image.storageKey,
+                        },
+                    ]);
+                    message.success("已加入参考图");
+                    return;
+                }
+            }
+
+            // 远程临时图：尝试本地下载；失败则明确提示
+            if (/^https?:\/\//i.test(image.dataUrl)) {
+                try {
+                    const stored = await uploadImage(image.dataUrl);
+                    if (!stored.storageKey && stored.remote) {
+                        message.error("这张生成图是远程临时地址，浏览器读不到内容，无法作为参考图。请先下载到本地再上传");
+                        return;
+                    }
+                    setReferences((value) => [
+                        ...value,
+                        {
+                            id: nanoid(),
+                            name: `result-${index + 1}.png`,
+                            type: stored.mimeType || image.mimeType || "image/png",
+                            dataUrl: stored.url,
+                            storageKey: stored.storageKey,
+                        },
+                    ]);
+                    message.success("已加入参考图");
+                    return;
+                } catch {
+                    message.error("无法读取该生成图（远程地址 CORS/网络限制）。请下载后重新上传本地图片再生成");
+                    return;
+                }
+            }
+
+            const stored = await uploadImage(image.dataUrl);
+            setReferences((value) => [
+                ...value,
+                {
+                    id: nanoid(),
+                    name: `result-${index + 1}.png`,
+                    type: stored.mimeType || image.mimeType || "image/png",
+                    dataUrl: stored.url,
+                    storageKey: stored.storageKey,
+                },
+            ]);
+            message.success("已加入参考图");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "加入参考图失败");
+        }
     };
 
     const saveResultToAssets = async (image: GeneratedImage, index: number) => {
-        const stored = await uploadImage(image.dataUrl);
-        addAsset({
-            kind: "image",
-            title: `生成结果 ${index + 1}`,
-            coverUrl: stored.url,
-            tags: [],
-            source: "生图工作台",
-            data: { dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType },
-            metadata: { source: "image-page", prompt },
-        });
-        message.success("已加入我的素材");
+        try {
+            if (image.storageKey) {
+                const localUrl = await resolveImageUrl(image.storageKey, image.dataUrl);
+                addAsset({
+                    kind: "image",
+                    title: `生成结果 ${index + 1}`,
+                    coverUrl: localUrl || image.dataUrl,
+                    tags: [],
+                    source: "生图工作台",
+                    data: {
+                        dataUrl: localUrl || image.dataUrl,
+                        storageKey: image.storageKey,
+                        width: image.width,
+                        height: image.height,
+                        bytes: image.bytes,
+                        mimeType: image.mimeType || "image/png",
+                    },
+                    metadata: { source: "image-page", prompt },
+                });
+                message.success("已加入我的素材");
+                return;
+            }
+
+            const stored = await uploadImage(image.dataUrl);
+            if (!stored.storageKey && stored.remote) {
+                message.error("这张生成图无法本地保存（远程临时地址不可读）。请先下载再导入素材");
+                return;
+            }
+            addAsset({
+                kind: "image",
+                title: `生成结果 ${index + 1}`,
+                coverUrl: stored.url,
+                tags: [],
+                source: "生图工作台",
+                data: { dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType },
+                metadata: { source: "image-page", prompt },
+            });
+            message.success("已加入我的素材");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "加入素材失败");
+        }
     };
 
     const insertPickedAsset = async (payload: InsertAssetPayload) => {
@@ -283,8 +399,30 @@ export default function ImagePage() {
             const generated = snapshot.references.length ? await requestEdit({ ...snapshot.config, count: String(count) }, snapshot.text, snapshot.references) : await requestGeneration({ ...snapshot.config, count: String(count) }, snapshot.text);
             const images = await Promise.all(
                 generated.slice(0, count).map(async (image, index) => {
-                    const meta = await readImageMeta(image.dataUrl);
-                    const nextImage = { id: image.id, dataUrl: image.dataUrl, durationMs: performance.now() - batchStartedAt, width: meta.width, height: meta.height, bytes: getDataUrlByteSize(image.dataUrl) };
+                    // 优先本地落盘：即使上游只给 imgen.x.ai，也尽量先 download；失败再保留远程 URL。
+                    let dataUrl = image.dataUrl;
+                    let storageKey: string | undefined;
+                    let width = 0;
+                    let height = 0;
+                    let bytes = getDataUrlByteSize(image.dataUrl);
+                    try {
+                        const stored = await uploadImage(image.dataUrl);
+                        dataUrl = stored.url;
+                        storageKey = stored.storageKey;
+                        width = stored.width;
+                        height = stored.height;
+                        bytes = stored.bytes;
+                    } catch {
+                        const meta = await readImageMeta(image.dataUrl);
+                        width = meta.width;
+                        height = meta.height;
+                    }
+                    if (!width || !height) {
+                        const meta = await readImageMeta(dataUrl);
+                        width = meta.width;
+                        height = meta.height;
+                    }
+                    const nextImage: GeneratedImage = { id: image.id, dataUrl, storageKey, durationMs: performance.now() - batchStartedAt, width, height, bytes };
                     setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
                     return nextImage;
                 }),
@@ -310,8 +448,29 @@ export default function ImagePage() {
             const result = snapshot.references.length ? await requestEdit(snapshot.config, snapshot.text, snapshot.references) : await requestGeneration(snapshot.config, snapshot.text);
             const image = result[0];
             if (!image) throw new Error("接口没有返回图片");
-            const meta = await readImageMeta(image.dataUrl);
-            const nextImage = { id: image.id, dataUrl: image.dataUrl, durationMs: performance.now() - itemStartedAt, width: meta.width, height: meta.height, bytes: getDataUrlByteSize(image.dataUrl) };
+            let dataUrl = image.dataUrl;
+            let storageKey: string | undefined;
+            let width = 0;
+            let height = 0;
+            let bytes = getDataUrlByteSize(image.dataUrl);
+            try {
+                const stored = await uploadImage(image.dataUrl);
+                dataUrl = stored.url;
+                storageKey = stored.storageKey;
+                width = stored.width;
+                height = stored.height;
+                bytes = stored.bytes;
+            } catch {
+                const meta = await readImageMeta(image.dataUrl);
+                width = meta.width;
+                height = meta.height;
+            }
+            if (!width || !height) {
+                const meta = await readImageMeta(dataUrl);
+                width = meta.width;
+                height = meta.height;
+            }
+            const nextImage: GeneratedImage = { id: image.id, dataUrl, storageKey, durationMs: performance.now() - itemStartedAt, width, height, bytes };
             setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
             return nextImage;
         } catch (error) {
@@ -365,7 +524,10 @@ export default function ImagePage() {
                             <div>
                                 <div className="mb-2 flex items-center justify-between gap-3">
                                     <span className="text-base font-semibold">提示词</span>
-                                    <div className="flex gap-2">
+                                    <div className="flex flex-wrap justify-end gap-2">
+                                        <Button size="small" icon={<WandSparkles className="size-3.5" />} loading={optimizingPrompt} disabled={!prompt.trim() || optimizingPrompt || running} onClick={() => void optimizePrompt()}>
+                                            AI 优化
+                                        </Button>
                                         <Button size="small" icon={<BookOpen className="size-3.5" />} onClick={() => setPromptDialogOpen(true)}>
                                             查看提示词库
                                         </Button>
@@ -374,7 +536,8 @@ export default function ImagePage() {
                                         </Button>
                                     </div>
                                 </div>
-                                <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder="描述画面主体、风格、构图、光线和用途" />
+                                <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder="描述画面主体、风格、构图、光线和用途" disabled={optimizingPrompt} />
+                                <div className="mt-1.5 text-xs text-stone-500 dark:text-stone-400">AI 优化会使用当前文本模型，把简短描述扩写成更准确、美观的生图提示词。</div>
                             </div>
 
                             <div className="min-w-0">

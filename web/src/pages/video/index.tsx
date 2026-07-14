@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImageIcon, LoaderCircle, Music2, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon } from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImageIcon, LoaderCircle, Music2, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon, WandSparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Tag, Typography } from "antd";
 import localforage from "localforage";
@@ -13,6 +13,7 @@ import { AGNES_VIDEO_SIZE, agnesVideoModeHint, agnesVideoRequestError, isAgnesVi
 import { canvasThemes } from "@/lib/canvas-theme";
 import { grokVideoModeHint, isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
+import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
 import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
@@ -75,6 +76,7 @@ export default function VideoPage() {
     const activeLogIdsRef = useRef<Set<string>>(new Set());
     const effectiveConfig = useEffectiveConfig();
     const updateConfig = useConfigStore((state) => state.updateConfig);
+    const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const addAsset = useAssetStore((state) => state.addAsset);
     const [prompt, setPrompt] = useState("");
@@ -88,6 +90,7 @@ export default function VideoPage() {
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [promptDialogOpen, setPromptDialogOpen] = useState(false);
     const [assetPickerOpen, setAssetPickerOpen] = useState(false);
+    const [optimizingPrompt, setOptimizingPrompt] = useState(false);
     const [startedAt, setStartedAt] = useState(0);
     const [elapsedMs, setElapsedMs] = useState(0);
     const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
@@ -95,6 +98,7 @@ export default function VideoPage() {
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
     const model = effectiveConfig.videoModel || effectiveConfig.model;
+    const textModel = effectiveConfig.textModel || effectiveConfig.model;
     const videoRequestConfig = buildVideoConfig(effectiveConfig, model);
     const videoRequestChannel = resolveModelChannel(videoRequestConfig, model);
     const agnesMode = isAgnesVideoConfig(videoRequestConfig);
@@ -192,6 +196,31 @@ export default function VideoPage() {
             await saveLog(buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: performance.now() - batchStartedAt, status: "失败", error: errorMessage }));
             message.error(errorMessage);
             setRunning(false);
+        }
+    };
+
+    const optimizePrompt = async () => {
+        const text = prompt.trim();
+        if (!text) {
+            message.error("请先输入提示词");
+            return;
+        }
+        if (!isAiConfigReady(effectiveConfig, textModel)) {
+            message.warning("请先配置可用的文本模型，用于优化提示词");
+            openConfigDialog(true);
+            return;
+        }
+        setOptimizingPrompt(true);
+        try {
+            const optimized = await optimizeGenerationPrompt(effectiveConfig, text, "video", {
+                onDelta: (value) => setPrompt(value),
+            });
+            setPrompt(optimized);
+            message.success("提示词已优化");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "提示词优化失败");
+        } finally {
+            setOptimizingPrompt(false);
         }
     };
 
@@ -315,7 +344,7 @@ export default function VideoPage() {
             for (let attempt = 0; attempt < 120; attempt += 1) {
                 const state = await pollVideoGenerationTask(pollingConfig, log.task);
                 if (state.status === "completed") {
-                    const stored = await storeGeneratedVideo(state.result);
+                    const stored = await storeGeneratedVideo(state.result, pollingConfig);
                     const nextVideo: GeneratedVideo = {
                         id: nanoid(),
                         url: stored.url,
@@ -328,12 +357,12 @@ export default function VideoPage() {
                     };
                     setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
                     await saveLog({ ...log, status: "成功", durationMs: nextVideo.durationMs, video: nextVideo, error: undefined });
-                    message.success("视频已生成");
+                    message.success(stored.storageKey ? "视频已生成" : "视频已生成（经代理预览）");
                     return;
                 }
                 if (state.status === "failed") throw new Error(state.error);
                 if (attempt === 119) throw new Error("视频生成超时，请稍后重试");
-                await delay(log.task.provider === "seedance" || log.task.provider === "agnes" ? 5000 : 2500);
+                await delay(log.task.provider === "seedance" || log.task.provider === "agnes" || log.task.provider === "grok" ? 5000 : 2500);
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "生成失败";
@@ -399,7 +428,10 @@ export default function VideoPage() {
                             <div>
                                 <div className="mb-2 flex items-center justify-between gap-3">
                                     <span className="text-base font-semibold">提示词</span>
-                                    <div className="flex gap-2">
+                                    <div className="flex flex-wrap justify-end gap-2">
+                                        <Button size="small" icon={<WandSparkles className="size-3.5" />} loading={optimizingPrompt} disabled={!prompt.trim() || optimizingPrompt || running} onClick={() => void optimizePrompt()}>
+                                            AI 优化
+                                        </Button>
                                         <Button size="small" icon={<BookOpen className="size-3.5" />} onClick={() => setPromptDialogOpen(true)}>
                                             查看提示词库
                                         </Button>
@@ -408,7 +440,8 @@ export default function VideoPage() {
                                         </Button>
                                     </div>
                                 </div>
-                                <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder="描述镜头运动、主体动作、场景氛围和画面风格" />
+                                <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder="描述镜头运动、主体动作、场景氛围和画面风格" disabled={optimizingPrompt} />
+                                <div className="mt-1.5 text-xs text-stone-500 dark:text-stone-400">AI 优化会使用当前文本模型，补全镜头运动、动作节奏与画面风格，便于生成更合理的视频。</div>
                             </div>
 
                             <div className="min-w-0">
@@ -583,9 +616,28 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
 }
 
 function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedVideo; onDownload: (video: GeneratedVideo) => void; onSaveAsset: (video: GeneratedVideo) => void }) {
+    const [previewError, setPreviewError] = useState(false);
+    const isBlob = (video.url || "").startsWith("blob:");
+    const isProxy = (video.url || "").includes("/ai-proxy/media");
+    const isRemote = /^https?:\/\//i.test(video.url || "") && !isProxy;
     return (
         <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-            {video.url ? <video src={video.url} controls className="aspect-video w-full bg-black object-contain" /> : <div className="flex aspect-video w-full items-center justify-center bg-black text-sm text-white/70">视频预览不可用</div>}
+            {video.url && !previewError ? (
+                <video
+                    key={video.url}
+                    src={video.url}
+                    controls
+                    playsInline
+                    preload="auto"
+                    className="aspect-video w-full bg-black object-contain"
+                    onError={() => setPreviewError(true)}
+                />
+            ) : (
+                <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 bg-black px-4 text-center text-sm text-white/70">
+                    <span>{previewError ? "视频预览失败" : "视频预览不可用"}</span>
+                    <span className="text-xs text-white/50">{isRemote ? "若视频地址有效，请检查网络是否可访问该 CDN；也可尝试下载后本地播放" : isProxy ? "代理预览失败，可尝试下载后本地播放" : "可尝试下载后本地播放"}</span>
+                </div>
+            )}
             <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-200 px-3 py-2.5 dark:border-stone-800">
                 <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
                     <span>
@@ -593,6 +645,9 @@ function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedV
                     </span>
                     <span>{formatBytes(video.bytes)}</span>
                     <span>{formatDuration(video.durationMs)}</span>
+                    {isBlob || video.storageKey ? <span className="text-emerald-600 dark:text-emerald-400">本地可播</span> : null}
+                    {isProxy && !video.storageKey ? <span className="text-sky-600 dark:text-sky-400">代理预览</span> : null}
+                    {isRemote && !video.storageKey ? <span className="text-amber-600 dark:text-amber-400">远程直链</span> : null}
                 </div>
                 <div className="flex shrink-0 gap-1">
                     <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => onSaveAsset(video)}>

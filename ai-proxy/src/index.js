@@ -160,10 +160,15 @@ function assertAuthorized(req) {
 }
 
 function assertMediaAuthorized(req, incomingUrl) {
+    // 媒体代理只转发白名单公网资源，默认不强制访问令牌：
+    // 用户常直连 codex2api 等中转，前端没有 AI_PROXY_ACCESS_TOKEN，
+    // 若媒体也强制鉴权，生成视频就无法同源落盘预览。
+    // 需要强制时设置 AI_PROXY_MEDIA_REQUIRE_AUTH=true。
     if (!proxyAccessToken) return;
+    if (String(process.env.AI_PROXY_MEDIA_REQUIRE_AUTH || "").toLowerCase() !== "true") return;
     if (readRequestToken(req) === proxyAccessToken) return;
     if (incomingUrl.searchParams.get("token") === proxyAccessToken) return;
-    throw httpError(401, "AI 代理访问令牌无效");
+    throw httpError(401, "AI 代理媒体访问令牌无效");
 }
 
 function readRequestToken(req) {
@@ -244,6 +249,9 @@ function buildMediaTargetUrl(incomingUrl) {
 function isAllowedMediaTarget(target) {
     if (target.protocol !== "https:" && target.protocol !== "http:") return false;
     const hostname = target.hostname.toLowerCase();
+    // 生成视频 CDN 域名变化快；允许常见云存储/CDN，并覆盖 xAI / Agnes 相关主机。
+    // 仍禁止 localhost / 内网地址，避免 SSRF。
+    if (isPrivateHostname(hostname)) return false;
     return (
         hostname === "platform-outputs.agnes-ai.space" ||
         hostname.endsWith(".agnes-ai.space") ||
@@ -251,9 +259,40 @@ function isAllowedMediaTarget(target) {
         hostname.endsWith(".agnes-ai.com") ||
         hostname === "imgen.x.ai" ||
         hostname.endsWith(".imgen.x.ai") ||
+        hostname === "vidgen.x.ai" ||
+        hostname.endsWith(".vidgen.x.ai") ||
         hostname === "cdn.x.ai" ||
-        hostname.endsWith(".cdn.x.ai")
+        hostname.endsWith(".cdn.x.ai") ||
+        hostname === "x.ai" ||
+        hostname.endsWith(".x.ai") ||
+        hostname.endsWith(".amazonaws.com") ||
+        hostname.endsWith(".cloudfront.net") ||
+        hostname.endsWith(".r2.dev") ||
+        hostname.endsWith(".googleusercontent.com") ||
+        hostname.endsWith(".blob.core.windows.net") ||
+        hostname.endsWith(".aliyuncs.com") ||
+        hostname.endsWith(".myqcloud.com") ||
+        hostname.includes("video") ||
+        hostname.includes("media") ||
+        hostname.includes("cdn") ||
+        hostname.includes("storage") ||
+        hostname.includes("s3")
     );
+}
+
+function isPrivateHostname(hostname) {
+    if (!hostname) return true;
+    if (hostname === "localhost" || hostname.endsWith(".local") || hostname.endsWith(".internal")) return true;
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
+        const parts = hostname.split(".").map(Number);
+        if (parts[0] === 10) return true;
+        if (parts[0] === 127) return true;
+        if (parts[0] === 192 && parts[1] === 168) return true;
+        if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+        if (parts[0] === 169 && parts[1] === 254) return true;
+        if (parts[0] === 0) return true;
+    }
+    return false;
 }
 
 function buildMediaForwardHeaders(req) {

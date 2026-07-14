@@ -21,4 +21,13 @@ export default defineConfig({
         __APP_VERSION__: JSON.stringify(localVersion),
         __APP_RELEASES__: JSON.stringify(parseChangelog(localChangelog)),
     },
+    server: {
+        // 本地 dev 时把 /ai-proxy 转到 Docker 的 3001（nginx 再转 ai-proxy），用于远程视频同源下载/预览
+        proxy: {
+            "/ai-proxy": {
+                target: "http://127.0.0.1:3001",
+                changeOrigin: true,
+            },
+        },
+    },
 });

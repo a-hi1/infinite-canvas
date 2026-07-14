@@ -66,6 +66,45 @@ export function dataUrlToFile(image: ReferenceImage) {
     return new File([bytes], image.name || "reference.png", { type: mimeType });
 }
 
+/** 压缩 data URI，避免 Grok / 中转站因 base64 过大直接 400。 */
+export async function compressImageDataUrl(dataUrl: string, maxEdge = 1280, quality = 0.82) {
+    if (!dataUrl.startsWith("data:image/")) return dataUrl;
+    if (getDataUrlByteSize(dataUrl) <= 1.2 * 1024 * 1024 && !needsImageResize(dataUrl, maxEdge)) return dataUrl;
+
+    const image = await loadHtmlImage(dataUrl);
+    const scale = Math.min(1, maxEdge / Math.max(image.naturalWidth || maxEdge, image.naturalHeight || maxEdge));
+    const width = Math.max(1, Math.round((image.naturalWidth || maxEdge) * scale));
+    const height = Math.max(1, Math.round((image.naturalHeight || maxEdge) * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return dataUrl;
+    context.drawImage(image, 0, 0, width, height);
+
+    let nextQuality = quality;
+    let compressed = canvas.toDataURL("image/jpeg", nextQuality);
+    while (getDataUrlByteSize(compressed) > 1.5 * 1024 * 1024 && nextQuality > 0.5) {
+        nextQuality -= 0.1;
+        compressed = canvas.toDataURL("image/jpeg", nextQuality);
+    }
+    return compressed;
+}
+
+function needsImageResize(dataUrl: string, maxEdge: number) {
+    // 快速路径：没有尺寸信息时也允许压缩函数走完整逻辑。
+    return getDataUrlByteSize(dataUrl) > 800 * 1024 || maxEdge < 4096;
+}
+
+function loadHtmlImage(src: string) {
+    return new Promise<HTMLImageElement>((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error("参考图解码失败"));
+        image.src = src;
+    });
+}
+
 function guessImageMimeType(url: string) {
     const lower = url.toLowerCase();
     if (lower.includes(".jpg") || lower.includes(".jpeg")) return "image/jpeg";

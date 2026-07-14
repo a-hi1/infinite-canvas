@@ -46,4 +46,4 @@ export function normalizeGrokAspectRatio(value: string) {
     return options.reduce((best, item) => (Math.abs(item[1] - ratio) < Math.abs(best[1] - ratio) ? item : best), options[0])[0];
 }
 
-export const grokVideoModeHint = "Grok 视频使用 /v1/videos/generations：单图 image:{url}，多图 reference_images。本地参考图优先转 data URI；远程 imgen 图若中转站拉不到，请改用本地上传。失败时会直接显示上游 400 原文。";
+export const grokVideoModeHint = "Grok 参考图生视频：请上传本地小图（优先 jpg/png）。单图走 image，多图走 reference_images；会优先尝试 grok-imagine-video-1.5。中转站若只支持创建不支持查询，需 POST 响应直接返回 video.url，或补齐 GET /v1/videos/{request_id}。";

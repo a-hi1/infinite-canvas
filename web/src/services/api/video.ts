@@ -1,6 +1,6 @@
 import axios from "axios";
 
-import { dataUrlToFile } from "@/lib/image-utils";
+import { compressImageDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { AGNES_VIDEO_HEIGHT, AGNES_VIDEO_WIDTH, agnesFrameCount, agnesVideoRequestError, isAgnesBaseUrl, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
@@ -47,7 +47,7 @@ type ApiEnvelope<T> = T | { code?: number; data?: T | null; msg?: string };
 type RequestOptions = { signal?: AbortSignal };
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
-export type VideoGenerationTask = { id: string; provider: "openai" | "seedance" | "agnes" | "grok"; model: string };
+export type VideoGenerationTask = { id: string; provider: "openai" | "seedance" | "agnes" | "grok"; model: string; readyResult?: VideoGenerationResult };
 export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "failed"; error: string };
 
 function aiApiUrl(config: AiConfig, path: string) {
@@ -95,6 +95,10 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
 }
 
 export async function pollVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    // 创建接口若已直接返回可播放结果，跳过轮询（部分中转站同步返回 video.url）
+    if (task.readyResult?.url || task.readyResult?.blob) {
+        return { status: "completed", result: task.readyResult };
+    }
     const requestConfig = resolveModelRequestConfig(config, task.model);
     assertVideoConfig(requestConfig, requestConfig.model);
     if (task.provider === "agnes") return pollAgnesTask(requestConfig, task, options);
@@ -103,9 +107,30 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
     return pollOpenAIVideoTask(requestConfig, task, options);
 }
 
-export async function storeGeneratedVideo(result: VideoGenerationResult): Promise<UploadedFile> {
-    if (result.blob) return uploadMediaFile(result.blob, "video");
-    if (result.url) return { url: result.url, storageKey: "", bytes: 0, mimeType: result.mimeType || "video/mp4" };
+export async function storeGeneratedVideo(result: VideoGenerationResult, config?: AiConfig): Promise<UploadedFile> {
+    if (result.blob) {
+        const typed = ensureVideoBlob(result.blob, result.mimeType);
+        return uploadMediaFile(typed, "video");
+    }
+    if (result.url) {
+        // 尽量落本地 blob；失败时保留 URL 给 <video src> 直接播放（vidgen.x.ai 常允许 <video> 播，但禁止 JS fetch）。
+        const candidates = videoDownloadCandidates(result.url, config);
+        for (const candidate of candidates) {
+            try {
+                const blob = await downloadVideoBlob(candidate);
+                return uploadMediaFile(ensureVideoBlob(blob, result.mimeType), "video");
+            } catch {
+                // try next
+            }
+        }
+        const proxyUrl = mediaProxyCandidates(result.url, config)[0];
+        return {
+            url: proxyUrl || result.url,
+            storageKey: "",
+            bytes: 0,
+            mimeType: result.mimeType || "video/mp4",
+        };
+    }
     throw new Error("视频接口没有返回可播放的视频");
 }
 
@@ -161,36 +186,180 @@ async function createGrokTask(config: AiConfig, model: string, prompt: string, r
     let lastError: unknown;
     for (const payload of payloads) {
         try {
-            const created = unwrapGrokVideoResponse((await axios.post<ApiGrokVideoResponse>(grokCreateApiUrl(config), payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data);
-            const id = created.request_id || created.id;
-            if (!id) throw new Error("Grok 视频接口没有返回 request_id");
-            return { id, provider: "grok", model };
+            // 中转站图生视频可能较慢，创建超时放宽，尽量等同步结果
+            const created = unwrapGrokVideoResponse(
+                (
+                    await axios.post<ApiGrokVideoResponse>(grokCreateApiUrl(config), payload, {
+                        headers: aiHeaders(config, "application/json"),
+                        timeout: 180000,
+                        signal: options?.signal,
+                    })
+                ).data,
+            );
+            const id = created.request_id || created.id || "grok-inline";
+            const ready = extractGrokReadyResult(created);
+            if (ready) {
+                return {
+                    id,
+                    provider: "grok",
+                    model: String(payload.model || model),
+                    readyResult: await videoResultFromUrl(ready, options, config),
+                };
+            }
+            if (!created.request_id && !created.id) throw new Error("Grok 视频接口没有返回 request_id");
+            // 新任务清掉该 host 的“不支持查询”缓存，避免上次 404 影响本次
+            grokPollHostState.delete(hostKeyOf(config));
+            grokPollMissCount.delete(pollMissKey(config, id));
+            return { id, provider: "grok", model: String(payload.model || model) };
         } catch (error) {
             lastError = error;
-            // 只在字段兼容候选之间切换；鉴权/限流/404 等直接结束。
+            // 只在字段兼容候选之间切换；鉴权/限流等直接结束。
             if (!isRetryableGrokPayloadError(error)) break;
         }
     }
 
-    // codex2api 等中转常见：有 /videos/generations，但没有 OpenAI /videos。
-    // 对 Grok 路径不再回退 /videos，避免连续 400 后再多一次 404 噪音。
     throw new Error(formatGrokCreateError(lastError, references, payloads.length));
+}
+
+// host 探测：ok=查询可用；missing=确认不支持。任务级 404 先累计，不立刻判死。
+const grokPollHostState = new Map<string, "ok" | "missing">();
+const grokPollMissCount = new Map<string, number>();
+const GROK_POLL_NOT_FOUND_GRACE = 18; // 约 18*5s ≈ 90s，给中转站任务落库时间
+
+function hostKeyOf(config: AiConfig) {
+    return config.baseUrl.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+function pollMissKey(config: AiConfig, taskId: string) {
+    return `${hostKeyOf(config)}::${taskId}`;
+}
+
+function extractGrokReadyResult(payload: GrokVideoResponse) {
+    const url = readGrokVideoUrl(payload);
+    if (!url) return "";
+    const status = String(payload.status || "").toLowerCase();
+    if (["pending", "queued", "running", "processing", "in_progress", "generating"].includes(status)) return "";
+    // 无 status 但有 url：中转常同步返回
+    return url;
 }
 
 async function pollGrokTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
-        const state = unwrapGrokVideoResponse((await axios.get<ApiGrokVideoResponse>(aiApiUrl(config, `/videos/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data);
+        // 官方：POST /videos/generations + GET /videos/{request_id}
+        // 见 https://docs.x.ai/docs/guides/video-generation
+        const state = unwrapGrokVideoResponse(await fetchGrokTaskState(config, task, options));
         const status = String(state.status || "").toLowerCase();
         const url = readGrokVideoUrl(state);
-        const completed = status === "done" || status === "completed" || status === "succeeded";
-        if (completed && url) return { status: "completed", result: await videoResultFromUrl(url, options, config) };
-        if (completed) return { status: "failed", error: "Grok 任务完成但没有返回视频 URL，请在浏览器 Network 中查看 /v1/videos/{id} 响应体并发我" };
-        if (url && !["pending", "queued", "running", "processing"].includes(status)) return { status: "completed", result: await videoResultFromUrl(url, options, config) };
+        const completed = status === "done" || status === "completed" || status === "succeeded" || status === "success";
+        if (completed && url) {
+            grokPollMissCount.delete(pollMissKey(config, task.id));
+            return { status: "completed", result: await videoResultFromUrl(url, options, config) };
+        }
+        if (completed) return { status: "failed", error: "Grok 任务完成但没有返回视频 URL" };
+        // 部分中转不给 status，但已经带了可播放 URL
+        if (url && !["pending", "queued", "running", "processing", "in_progress", "generating"].includes(status)) {
+            grokPollMissCount.delete(pollMissKey(config, task.id));
+            return { status: "completed", result: await videoResultFromUrl(url, options, config) };
+        }
         if (["failed", "fail", "error", "expired", "cancelled", "canceled"].includes(status)) return { status: "failed", error: readGrokError(state) || "Grok 视频生成失败" };
         return { status: "pending" };
     } catch (error) {
-        throw new Error(readAxiosError(error, "Grok 视频任务查询失败"));
+        // 中转站常见：任务刚创建时 GET /videos/{id} 暂时 404，先当 pending 继续等
+        if (error instanceof GrokPollNotReadyError) return { status: "pending" };
+        throw new Error(error instanceof Error ? error.message : readAxiosError(error, "Grok 视频任务查询失败"));
     }
+}
+
+class GrokPollNotReadyError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "GrokPollNotReadyError";
+    }
+}
+
+async function fetchGrokTaskState(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions) {
+    const hostKey = hostKeyOf(config);
+    if (grokPollHostState.get(hostKey) === "missing") {
+        throw new Error(formatGrokPollUnsupportedError(config));
+    }
+
+    // 官方路径优先；兼容部分中转的 generations 前缀
+    const paths = [`/videos/${task.id}`, `/videos/generations/${task.id}`];
+    let sawNotFound = false;
+    let lastError: unknown;
+
+    for (const path of paths) {
+        try {
+            const response = await axios.get<ApiGrokVideoResponse>(aiApiUrl(config, path), {
+                headers: aiHeaders(config),
+                timeout: 60000,
+                signal: options?.signal,
+            });
+            grokPollHostState.set(hostKey, "ok");
+            grokPollMissCount.delete(pollMissKey(config, task.id));
+            return response.data;
+        } catch (error) {
+            if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+            lastError = error;
+            const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+            if (status === 404 || status === 405) {
+                sawNotFound = true;
+                continue;
+            }
+            if (isRetryableGrokPollNetworkError(error)) {
+                await delay(1500, options?.signal);
+                try {
+                    const response = await axios.get<ApiGrokVideoResponse>(aiApiUrl(config, path), {
+                        headers: aiHeaders(config),
+                        timeout: 60000,
+                        signal: options?.signal,
+                    });
+                    grokPollHostState.set(hostKey, "ok");
+                    grokPollMissCount.delete(pollMissKey(config, task.id));
+                    return response.data;
+                } catch (retryError) {
+                    lastError = retryError;
+                    const retryStatus = axios.isAxiosError(retryError) ? retryError.response?.status : undefined;
+                    if (retryStatus === 404 || retryStatus === 405) {
+                        sawNotFound = true;
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+
+    if (sawNotFound) {
+        const key = pollMissKey(config, task.id);
+        const misses = (grokPollMissCount.get(key) || 0) + 1;
+        grokPollMissCount.set(key, misses);
+        // 前几次 404：任务可能还没落库，继续 pending
+        if (misses < GROK_POLL_NOT_FOUND_GRACE) {
+            throw new GrokPollNotReadyError("Grok 任务查询暂不可用，继续等待");
+        }
+        // 长时间一直 404：判定中转站未实现查询接口
+        grokPollHostState.set(hostKey, "missing");
+        throw new Error(formatGrokPollUnsupportedError(config));
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("Grok 视频任务查询失败");
+}
+
+function formatGrokPollUnsupportedError(config: AiConfig) {
+    return [
+        "当前中转站长时间无法查询 Grok 视频状态",
+        "官方路径是 GET /v1/videos/{request_id}",
+        `你的 Base URL：${config.baseUrl.trim() || "（空）"}`,
+        "若 POST /v1/videos/generations 能创建但查询持续 404/405，需要中转站补齐查询接口",
+        "参考图生视频请确认创建请求使用本地小图，并优先模型 grok-imagine-video-1.5",
+    ].join("。");
+}
+
+function isRetryableGrokPollNetworkError(error: unknown) {
+    if (!axios.isAxiosError(error)) return false;
+    if (error.response) return false;
+    const code = String(error.code || "").toUpperCase();
+    return code === "ERR_NETWORK" || code === "ECONNABORTED" || code === "ECONNRESET" || code === "ETIMEDOUT" || !error.response;
 }
 
 async function createAgnesTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions): Promise<VideoGenerationTask> {
@@ -322,18 +491,7 @@ async function buildGrokPayloadCandidates(config: AiConfig, model: string, promp
     const aspectRatio = normalizeGrokAspectRatio(config.size);
     const resolution = normalizeGrokResolution(config.vquality);
     const imageInputs = await Promise.all(references.slice(0, 7).map(resolveGrokImageInput));
-
-    const basePayload: Record<string, unknown> = {
-        model: modelName,
-        prompt,
-        duration,
-        aspect_ratio: aspectRatio,
-        resolution,
-    };
-    if (!imageInputs.length) {
-        // 部分中转同时认 seconds
-        return [basePayload, { ...basePayload, seconds: String(duration) }];
-    }
+    const models = grokModelCandidates(modelName, imageInputs.length);
 
     const candidates: Array<Record<string, unknown>> = [];
     const pushUnique = (payload: Record<string, unknown>) => {
@@ -342,20 +500,56 @@ async function buildGrokPayloadCandidates(config: AiConfig, model: string, promp
         candidates.push(payload);
     };
 
-    // 控制候选数量：先最小官方字段，再补 duration/比例；避免 5 次 400 刷屏。
-    if (imageInputs.length === 1) {
-        // 最小 image-to-video（很多中转对 resolution/aspect_ratio 更挑）
-        pushUnique({ model: modelName, prompt, image: imageInputs[0] });
-        pushUnique({ model: modelName, prompt, duration, image: imageInputs[0] });
-        pushUnique({ ...basePayload, image: imageInputs[0] });
-    } else {
-        const labeledPrompt = buildGrokReferencePrompt(prompt, imageInputs.length);
-        pushUnique({ model: modelName, prompt: labeledPrompt, reference_images: imageInputs });
-        pushUnique({ model: modelName, prompt: labeledPrompt, duration, reference_images: imageInputs });
-        pushUnique({ ...basePayload, prompt: labeledPrompt, reference_images: imageInputs });
+    if (!imageInputs.length) {
+        for (const nextModel of models) {
+            // 文生视频：官方字段 + 兼容 seconds
+            pushUnique({ model: nextModel, prompt, duration, aspect_ratio: aspectRatio, resolution });
+            pushUnique({ model: nextModel, prompt, duration });
+            pushUnique({ model: nextModel, prompt, seconds: String(duration), aspect_ratio: aspectRatio, resolution });
+        }
+        return candidates.slice(0, 4);
     }
 
-    return candidates;
+    // 图生视频 / 参考生视频
+    // 官方：单图 image:{url}；多图 reference_images。中转站常还需兼容 images / image_url。
+    // https://docs.x.ai/developers/model-capabilities/video/image-to-video
+    if (imageInputs.length === 1) {
+        const image = imageInputs[0];
+        for (const nextModel of models) {
+            // 优先 1.5 模型字段形态
+            pushUnique({ model: nextModel, prompt, image, duration, aspect_ratio: aspectRatio, resolution });
+            pushUnique({ model: nextModel, prompt, image, duration });
+            pushUnique({ model: nextModel, prompt, image: image.url, duration });
+            pushUnique({ model: nextModel, prompt, image_url: image.url, duration });
+            pushUnique({ model: nextModel, prompt, images: [image.url], duration });
+        }
+    } else {
+        const labeledPrompt = buildGrokReferencePrompt(prompt, imageInputs.length);
+        const urls = imageInputs.map((item) => item.url);
+        for (const nextModel of models) {
+            pushUnique({ model: nextModel, prompt: labeledPrompt, reference_images: imageInputs, duration: Math.min(duration, 10), aspect_ratio: aspectRatio });
+            pushUnique({ model: nextModel, prompt: labeledPrompt, reference_images: imageInputs, duration: Math.min(duration, 10) });
+            pushUnique({ model: nextModel, prompt: labeledPrompt, reference_images: urls, duration: Math.min(duration, 10) });
+            pushUnique({ model: nextModel, prompt: labeledPrompt, images: urls, duration: Math.min(duration, 10) });
+        }
+    }
+
+    return candidates.slice(0, 5);
+}
+
+function grokModelCandidates(modelName: string, imageCount: number) {
+    const models: string[] = [];
+    const lower = modelName.toLowerCase();
+    // 参考图生视频优先 1.5（中转兼容更好），再回退用户选择
+    if (imageCount > 0) {
+        if (!lower.includes("1.5")) models.push("grok-imagine-video-1.5");
+        models.push(modelName);
+        if (lower.includes("1.5")) models.push("grok-imagine-video");
+    } else {
+        models.push(modelName);
+        if (lower.includes("grok-imagine-video") && !lower.includes("1.5")) models.push("grok-imagine-video-1.5");
+    }
+    return Array.from(new Set(models.filter(Boolean)));
 }
 
 function buildGrokReferencePrompt(prompt: string, imageCount: number) {
@@ -371,19 +565,20 @@ async function resolveGrokImageInput(image: ReferenceImage): Promise<{ url: stri
 }
 
 async function resolveGrokReferenceImageUrl(image: ReferenceImage) {
-    // 1) 本地/blob 优先转 data URI，让中转站不依赖外网拉 imgen.x.ai
+    // 1) 本地/blob 优先转压缩后的 data URI，避免超大 base64 触发上游 400
     const binary = await resolveReferenceBinaryDataUrl(image);
-    if (binary) return binary;
+    if (binary) return compressImageDataUrl(binary);
 
     // 2) 已是 data URI
     const directUrl = (image.url || image.dataUrl || "").trim();
-    if (directUrl.startsWith("data:")) return directUrl;
+    if (directUrl.startsWith("data:")) return compressImageDataUrl(directUrl);
 
     // 3) 公网 URL 直接透传（浏览器 CORS 读不了时，交给上游服务端拉取）
     if (isPublicMediaUrl(directUrl)) return directUrl;
 
     const fallback = await imageToDataUrl(image);
-    if (fallback && (fallback.startsWith("data:") || isPublicMediaUrl(fallback))) return fallback;
+    if (fallback?.startsWith("data:")) return compressImageDataUrl(fallback);
+    if (fallback && isPublicMediaUrl(fallback)) return fallback;
     throw new Error("参考图读取失败，请改用本地上传的图片（远程 imgen.x.ai 图常因 CORS 无法在浏览器读取）");
 }
 
@@ -408,11 +603,15 @@ function formatGrokCreateError(error: unknown, references: ReferenceImage[], att
         const url = (image.url || image.dataUrl || "").trim();
         return isPublicMediaUrl(url) && !image.storageKey && !url.startsWith("data:") && !url.startsWith("blob:");
     });
+    const hasLocalReference = references.some((image) => Boolean(image.storageKey) || (image.dataUrl || "").startsWith("blob:") || (image.dataUrl || "").startsWith("data:"));
+    const vagueUpstream = /upstream returned status 400|status 400/i.test(detail);
     const tips = [
         detail,
         attemptCount > 1 ? `已尝试 ${attemptCount} 种请求格式` : "",
-        hasRemoteOnlyReference ? "当前参考图是远程地址（如 imgen.x.ai）。若中转站无法访问该地址，请改用本地上传的参考图" : "",
-        "请打开 Network 查看 /v1/videos/generations 的 Response 原文；若仍失败，把 Response JSON（可打码 Key）发我",
+        hasRemoteOnlyReference ? "当前参考图是远程地址（如 imgen.x.ai）。中转站/xAI 若无法访问该临时图，请改用本地上传的参考图" : "",
+        hasLocalReference && vagueUpstream ? "若使用本地大图，已自动压缩后重试仍失败，可换更小的 jpg/png，或把视频模型改为 grok-imagine-video-1.5（图生视频更完整）" : "",
+        vagueUpstream && !hasLocalReference && !hasRemoteOnlyReference ? "若是纯文生视频，请检查模型名是否为 grok-imagine-video / grok-imagine-video-1.5，以及时长是否在 1-15 秒" : "",
+        "请在 Network 打开失败的 /v1/videos/generations，把 Request Payload 的 model/image 字段形态和 Response JSON（可打码）发我",
     ].filter(Boolean);
     return tips.join("。");
 }
@@ -480,6 +679,8 @@ async function resolveSeedanceAudioUrl(audio: ReferenceAudio) {
 }
 
 async function videoResultFromUrl(url: string, options?: RequestOptions, config?: AiConfig, waitUntilReady = false): Promise<VideoGenerationResult> {
+    // 与旧实现一致：仅当前渠道是 /ai-proxy 时走媒体代理；否则直接用远程 URL。
+    // vidgen.x.ai 通常禁止 JS fetch（CORS），但 <video src> 可以直接播放。
     const playableUrl = mediaProxyUrl(url, config) || url;
     if (waitUntilReady) {
         try {
@@ -491,13 +692,26 @@ async function videoResultFromUrl(url: string, options?: RequestOptions, config?
     }
 
     try {
-        const response = await axios.get<Blob>(playableUrl, { responseType: "blob", timeout: 45000, signal: options?.signal });
-        await assertVideoBlob(response.data);
-        return { blob: response.data };
+        const blob = await downloadVideoBlob(playableUrl, options);
+        return { blob: ensureVideoBlob(blob), mimeType: "video/mp4" };
     } catch (error) {
         if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+        // 下载失败不判失败：把 URL 交给页面 <video> 播放
         return { url: playableUrl, mimeType: "video/mp4" };
     }
+}
+
+async function downloadVideoBlob(url: string, options?: RequestOptions) {
+    // 不要给跨域 CDN 带 Authorization，否则会触发预检并 CORS 失败。
+    const response = await axios.get<Blob>(url, { responseType: "blob", timeout: 120000, signal: options?.signal });
+    await assertVideoBlob(response.data);
+    if (!response.data.size) throw new Error("视频内容为空");
+    return response.data;
+}
+
+function ensureVideoBlob(blob: Blob, mimeType = "video/mp4") {
+    if (blob.type && blob.type.startsWith("video/")) return blob;
+    return blob.slice(0, blob.size, mimeType || "video/mp4");
 }
 
 async function assertRemoteVideoReady(url: string, options?: RequestOptions) {
@@ -505,7 +719,23 @@ async function assertRemoteVideoReady(url: string, options?: RequestOptions) {
     await assertVideoBlob(response.data);
 }
 
+function videoDownloadCandidates(url: string, config?: AiConfig) {
+    const list: string[] = [];
+    const proxyUrl = mediaProxyUrl(url, config);
+    if (proxyUrl) list.push(proxyUrl);
+    if (isPublicMediaUrl(url) && !list.includes(url)) list.push(url);
+    if (!list.length) list.push(url);
+    return list;
+}
+
+function mediaProxyCandidates(url: string, config?: AiConfig) {
+    const proxyUrl = mediaProxyUrl(url, config);
+    return proxyUrl ? [proxyUrl] : [];
+}
+
 function mediaProxyUrl(url: string, config?: AiConfig) {
+    if (!isPublicMediaUrl(url)) return "";
+    // 只有当前请求渠道本身是 /ai-proxy 才代理；直连 codex2api 时不要碰本地 ai-proxy。
     if (!config || !isAiProxyBaseUrl(config.baseUrl)) return "";
     const params = new URLSearchParams({ url });
     if (config.apiKey.trim()) params.set("token", config.apiKey.trim());
@@ -565,13 +795,29 @@ function unwrapAgnesTask(payload: ApiAgnesResponse) {
 
 function unwrapGrokVideoResponse(payload: ApiGrokVideoResponse): GrokVideoResponse {
     if (!payload) throw new Error("Grok 视频接口没有返回任务");
-    const envelope = payload as { code?: number | string; data?: GrokVideoResponse | null; msg?: string; message?: string };
-    if (typeof payload === "object" && "code" in payload && envelope.code !== undefined) {
-        if (String(envelope.code) !== "0") throw new Error(envelope.msg || envelope.message || "Grok 视频请求失败");
-        if (!envelope.data) throw new Error("Grok 视频接口没有返回任务");
-        return envelope.data;
+    const root = payload as Record<string, unknown>;
+
+    // 中转常见包一层：{ code, data } / { data: { request_id, video } } / { result: {...} }
+    if (typeof root.code !== "undefined") {
+        if (String(root.code) !== "0" && String(root.code) !== "200" && String(root.code).toLowerCase() !== "ok" && String(root.code).toLowerCase() !== "success") {
+            throw new Error(String(root.msg || root.message || "Grok 视频请求失败"));
+        }
     }
-    return payload as GrokVideoResponse;
+
+    const nested =
+        (root.data && typeof root.data === "object" ? (root.data as Record<string, unknown>) : null) ||
+        (root.result && typeof root.result === "object" ? (root.result as Record<string, unknown>) : null) ||
+        (root.response && typeof root.response === "object" ? (root.response as Record<string, unknown>) : null);
+
+    const candidate = (nested || root) as GrokVideoResponse;
+    // 再展开一层 data/result，兼容双重包装
+    if (candidate && typeof candidate === "object") {
+        const deeper = (candidate as Record<string, unknown>).data || (candidate as Record<string, unknown>).result;
+        if (deeper && typeof deeper === "object" && (readGrokVideoUrl(deeper as GrokVideoResponse) || (deeper as GrokVideoResponse).request_id || (deeper as GrokVideoResponse).id || (deeper as GrokVideoResponse).status)) {
+            return deeper as GrokVideoResponse;
+        }
+    }
+    return candidate;
 }
 
 function readAgnesError(payload: AgnesTaskResponse) {
@@ -666,6 +912,7 @@ function readAxiosError(error: unknown, fallback: string) {
         const responseData = error.response?.data as unknown;
         const detail = readErrorPayload(responseData);
         if (detail) return detail;
+        if (!error.response) return readNetworkError(error.code, fallback);
         return statusMessage(error.response?.status, fallback);
     }
     if (error instanceof DOMException && error.name === "AbortError") return "请求已取消";
@@ -713,6 +960,12 @@ function statusMessage(status: number | undefined, fallback: string) {
     if (status === 404) return `${fallback}（404），当前渠道可能不支持该视频接口路径或所选模型，请确认视频模型与 Base URL 匹配`;
     if (status === 429) return "请求被限流或额度不足，请稍后重试；Agnes Video 建议通过服务器代理串行提交，避免浏览器重复点击或多个任务并发";
     return status ? `${fallback}（${status}）` : fallback;
+}
+
+function readNetworkError(code: string | undefined, fallback: string) {
+    if (code === "ECONNABORTED" || code === "ETIMEDOUT") return `${fallback}：连接超时，请检查中转站网络或稍后重试`;
+    if (code === "ERR_NETWORK" || code === "ECONNRESET") return `${fallback}：连接被中断（常见于错误轮询路径或中转站瞬时断连），请重试`;
+    return `${fallback}：无法连接中转站，请确认 Base URL 可从浏览器访问`;
 }
 
 async function requestWithRateLimitRetry<T>(request: () => Promise<T>, signal?: AbortSignal) {

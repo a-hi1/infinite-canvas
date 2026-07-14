@@ -4,7 +4,7 @@ import { buildApiUrl, isAiProxyBaseUrl, modelMatchesCapability, modelOptionName,
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
-import { imageToDataUrl } from "@/services/image-storage";
+import { ensureLocalImageDataUrl, imageToDataUrl } from "@/services/image-storage";
 import type { ReferenceImage } from "@/types/image";
 
 export type AiTextMessage = {
@@ -181,27 +181,65 @@ function resolveRequestSize(quality: string | undefined, size: string) {
 }
 
 function resolveImageDataUrl(item: Record<string, unknown>) {
-    if (typeof item.b64_json === "string" && item.b64_json) {
-        return `data:image/png;base64,${item.b64_json}`;
+    const b64 = readImageBase64(item);
+    if (b64) {
+        const mime = guessImageMimeFromBase64Field(item) || "image/png";
+        return b64.startsWith("data:") ? b64 : `data:${mime};base64,${b64.replace(/^data:[^;]+;base64,/, "")}`;
     }
-    if (typeof item.url === "string" && item.url) {
-        return item.url;
+    if (typeof item.url === "string" && item.url) return item.url;
+    if (typeof item.image_url === "string" && item.image_url) return item.image_url;
+    if (item.image_url && typeof item.image_url === "object") {
+        const nested = item.image_url as Record<string, unknown>;
+        if (typeof nested.url === "string" && nested.url) return nested.url;
     }
     return null;
+}
+
+function readImageBase64(item: Record<string, unknown>) {
+    for (const key of ["b64_json", "b64", "base64", "image_base64", "data"]) {
+        const value = item[key];
+        if (typeof value === "string" && value.trim()) {
+            const text = value.trim();
+            if (text.startsWith("data:image/") || looksLikeBase64(text)) return text;
+        }
+    }
+    return "";
+}
+
+function guessImageMimeFromBase64Field(item: Record<string, unknown>) {
+    if (typeof item.mime_type === "string" && item.mime_type.startsWith("image/")) return item.mime_type;
+    if (typeof item.output_format === "string") {
+        const format = item.output_format.toLowerCase();
+        if (format === "jpeg" || format === "jpg") return "image/jpeg";
+        if (format === "webp") return "image/webp";
+    }
+    return "image/png";
+}
+
+function looksLikeBase64(value: string) {
+    if (value.length < 64) return false;
+    return /^[A-Za-z0-9+/=\r\n]+$/.test(value.slice(0, 200));
 }
 
 function parseImagePayload(payload: ImageApiResponse) {
     if (typeof payload.code === "number" && payload.code !== 0) {
         throw new Error(payload.msg || "请求失败");
     }
-    const images =
-        payload.data
-            ?.map(resolveImageDataUrl)
-            .filter((value): value is string => Boolean(value))
-            .map((dataUrl) => ({ id: nanoid(), dataUrl })) || [];
+    const rows = Array.isArray(payload.data) ? payload.data : [];
+    const images = rows
+        .map((item) => resolveImageDataUrl(item as Record<string, unknown>))
+        .filter((value): value is string => Boolean(value))
+        .map((dataUrl) => ({ id: nanoid(), dataUrl }));
 
     if (images.length === 0) {
         throw new Error("接口没有返回图片");
+    }
+
+    // 中转站若忽略 response_format=b64_json，只给 imgen.x.ai 远程 URL，本机网络又访问不了时会“生成成功但看不见”。
+    const onlyRemoteXai = images.every((image) => /^https?:\/\/(?:[\w.-]+\.)?imgen\.x\.ai\//i.test(image.dataUrl) || /^https?:\/\/(?:[\w.-]+\.)?cdn\.x\.ai\//i.test(image.dataUrl));
+    if (onlyRemoteXai) {
+        // 仍返回结果，让上层尝试展示/落盘；同时在 dataUrl 保持原样。上层 uploadImage 失败时会保留 remote URL。
+        return images;
     }
 
     return images;
@@ -685,10 +723,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     }
     const files = await Promise.all(
         references.map(async (image) => {
-            const dataUrl = await imageToDataUrl(image);
-            if (!dataUrl?.startsWith("data:")) {
-                throw new Error("参考图是远程地址且无法在浏览器中读取（常见于 xAI 临时图片 URL 的 CORS 限制）。请重新上传本地图片，或改用返回 base64 的渠道后再做图生图/编辑");
-            }
+            const dataUrl = await ensureLocalImageDataUrl(image);
             return dataUrlToFile({ ...image, dataUrl });
         }),
     );

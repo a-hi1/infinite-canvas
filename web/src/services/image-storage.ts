@@ -63,21 +63,43 @@ export async function setImageBlob(storageKey: string, blob: Blob) {
 }
 
 export async function imageToDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string }) {
-    const url = image.dataUrl || (await resolveImageUrl(image.storageKey, image.url || ""));
-    if (!url || url.startsWith("data:")) return url;
-    if (url.startsWith("blob:") || image.storageKey) {
-        return blobToDataUrl(await fetchImageBlob(url));
+    // 优先本地 storageKey，避免 remote imgen URL 抢先导致读失败
+    if (image.storageKey) {
+        const localUrl = await resolveImageUrl(image.storageKey, "");
+        if (localUrl) {
+            if (localUrl.startsWith("data:")) return localUrl;
+            return blobToDataUrl(await fetchImageBlob(localUrl));
+        }
     }
+
+    const url = image.dataUrl || image.url || "";
+    if (!url) return "";
+    if (url.startsWith("data:")) return url;
+    if (url.startsWith("blob:")) return blobToDataUrl(await fetchImageBlob(url));
+
     if (isRemoteHttpUrl(url)) {
         try {
             return blobToDataUrl(await fetchImageBlob(url));
         } catch {
-            // Keep remote URL for display / providers that accept public image URLs.
-            // Callers that require binary upload must handle non-data URLs themselves.
+            // 远程临时图（如 imgen.x.ai）常因 CORS 读不到。调用方若需要二进制上传必须处理非 data URL。
             return url;
         }
     }
+
     return blobToDataUrl(await fetchImageBlob(url));
+}
+
+/** 把图片转成可上传的本地 data URL；远程不可读时抛出明确错误。 */
+export async function ensureLocalImageDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string; name?: string }) {
+    const dataUrl = await imageToDataUrl(image);
+    if (dataUrl?.startsWith("data:")) return dataUrl;
+    if (image.storageKey) {
+        const localUrl = await resolveImageUrl(image.storageKey, "");
+        if (localUrl?.startsWith("blob:") || localUrl?.startsWith("data:")) {
+            return localUrl.startsWith("data:") ? localUrl : blobToDataUrl(await fetchImageBlob(localUrl));
+        }
+    }
+    throw new Error("这张图还不能当参考图：它是远程临时地址且浏览器无法读取。请用“下载”后重新上传本地图，或换返回 base64 的生图渠道");
 }
 
 async function storeImageBlob(blob: Blob): Promise<UploadedImage> {
@@ -134,25 +156,18 @@ function isRemoteHttpUrl(value: string) {
 }
 
 function mediaProxyCandidates(url: string) {
-    const tokens = new Set<string>();
     const config = useConfigStore.getState().config;
     const preferredModel = config.imageModel || config.model;
-    if (preferredModel) {
-        const channel = resolveModelRequestConfig(config, preferredModel);
-        if (isAiProxyBaseUrl(channel.baseUrl) && channel.apiKey.trim()) tokens.add(channel.apiKey.trim());
-    }
-    if (isAiProxyBaseUrl(config.baseUrl) && config.apiKey.trim()) tokens.add(config.apiKey.trim());
-    for (const channel of config.channels || []) {
-        if (isAiProxyBaseUrl(channel.baseUrl) && channel.apiKey.trim()) tokens.add(channel.apiKey.trim());
-    }
+    const preferredChannel = preferredModel ? resolveModelRequestConfig(config, preferredModel) : null;
+    // 只看当前图片模型所在渠道，避免 Agnes 代理渠道“污染” Grok 直连中转站链路。
+    if (!preferredChannel || !isAiProxyBaseUrl(preferredChannel.baseUrl)) return [];
 
-    const candidates = Array.from(tokens).map((token) => {
+    const candidates: string[] = [`${AI_PROXY_BASE_URL}/media?${new URLSearchParams({ url }).toString()}`];
+    if (preferredChannel.apiKey.trim()) {
         const params = new URLSearchParams({ url });
-        params.set("token", token);
-        return `${AI_PROXY_BASE_URL}/media?${params.toString()}`;
-    });
-    // Only try unauthenticated media proxy when no proxy token is known.
-    if (!candidates.length) candidates.push(`${AI_PROXY_BASE_URL}/media?${new URLSearchParams({ url }).toString()}`);
+        params.set("token", preferredChannel.apiKey.trim());
+        candidates.push(`${AI_PROXY_BASE_URL}/media?${params.toString()}`);
+    }
     return candidates;
 }
 
