@@ -565,8 +565,10 @@ async function fetchAllowlistedMedia(remoteUrl, type) {
     if (parsed.protocol !== "https:") throw Object.assign(new Error("仅允许 https 远程媒体"), { status: 400 });
     if (!isAllowedMediaHost(parsed.hostname)) throw Object.assign(new Error("远程媒体域名不在白名单"), { status: 403 });
 
-    // Keep timeout short: local Docker often cannot reach imgen/vidgen at all; fail fast instead of hanging UI.
-    const fetchTimeoutMs = Number(process.env.API_REMOTE_FETCH_TIMEOUT_MS || 8000);
+    // 视频默认更长：能出网时尽量下完；出网不通则到点失败并给出可操作提示。
+    // 可用环境变量覆盖：API_REMOTE_FETCH_TIMEOUT_MS
+    const defaultTimeout = type === "video" ? 90000 : 15000;
+    const fetchTimeoutMs = Number(process.env.API_REMOTE_FETCH_TIMEOUT_MS || defaultTimeout);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), fetchTimeoutMs);
     let response;
@@ -575,17 +577,21 @@ async function fetchAllowlistedMedia(remoteUrl, type) {
             method: "GET",
             redirect: "manual",
             signal: controller.signal,
-            headers: { Accept: type === "image" ? "image/*,*/*" : "video/*,*/*" },
+            headers: {
+                Accept: type === "image" ? "image/*,*/*" : "video/*,*/*",
+                // 部分 CDN 对无 UA 请求不友好
+                "User-Agent": "infinite-canvas-api/0.1",
+            },
         });
     } catch (error) {
         const cause = error && typeof error === "object" ? error.cause || error : error;
         const code = String(cause?.code || error?.code || "");
         const name = String(error?.name || "");
         let msg = "拉取远程媒体失败";
-        if (name === "AbortError" || code.includes("TIMEOUT")) {
-            msg = `拉取远程媒体超时（${Math.round(fetchTimeoutMs / 1000)}s）。当前服务器访问不了 imgen/vidgen 时会失败，请改用本机已落盘结果，或下载后导入`;
-        } else if (code.includes("ECONNREFUSED") || code.includes("ENOTFOUND") || code.includes("ECONNRESET") || code.includes("UND_ERR")) {
-            msg = "服务器无法连接远程媒体（容器出网被拒/DNS失败）。请改用本机已落盘文件，或下载后导入素材";
+        if (name === "AbortError" || code.includes("TIMEOUT") || code.includes("ABORT")) {
+            msg = `拉取远程媒体超时（${Math.round(fetchTimeoutMs / 1000)}s）。本机/容器访问不了 imgen/vidgen 时会失败：可配置 ai-proxy 出网后重试生成以落盘，或浏览器打开视频链接下载后导入`;
+        } else if (code.includes("ECONNREFUSED") || code.includes("ENOTFOUND") || code.includes("ECONNRESET") || code.includes("UND_ERR") || code.includes("EAI_AGAIN")) {
+            msg = "服务器无法连接远程媒体（DNS/出网失败）。中转站视频链在浏览器也因 CORS 无法直读；请启动可访问外网的 ai-proxy 后重试，或手动下载导入";
         }
         throw Object.assign(new Error(msg), { status: 502 });
     } finally {
@@ -619,11 +625,23 @@ async function fetchAllowlistedMedia(remoteUrl, type) {
     if (!buf.length) throw Object.assign(new Error("远程文件为空"), { status: 502 });
     if (buf.length > maxBytes) throw Object.assign(new Error("远程文件过大"), { status: 413 });
 
-    const sniffed = sniffMime(buf) || String(response.headers.get("content-type") || "").split(";")[0].trim();
+    const contentType = String(response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    const sniffed = sniffMime(buf) || contentType;
     const allowed = type === "image" ? ["image/jpeg", "image/png", "image/webp"] : ["video/mp4", "video/webm"];
-    // Some CDNs return octet-stream; accept if magic matched earlier or content-type vague but magic ok.
-    const mime = allowed.includes(sniffed) ? sniffed : sniffMime(buf);
-    if (!allowed.includes(mime)) throw Object.assign(new Error(`远程文件类型不受支持: ${sniffed || "unknown"}`), { status: 400 });
+    // CDN 常返回 application/octet-stream；扩展名 .mp4 时按视频接受
+    let mime = allowed.includes(sniffed) ? sniffed : sniffMime(buf);
+    if (!allowed.includes(mime) && type === "video") {
+        if (contentType === "application/octet-stream" || contentType === "binary/octet-stream" || !contentType) {
+            if (/\.(mp4|m4v|webm)(?:$|\?)/i.test(parsed.pathname) || /\.mp4(?:$|\?)/i.test(remoteUrl)) {
+                mime = parsed.pathname.toLowerCase().includes(".webm") ? "video/webm" : "video/mp4";
+            }
+        }
+    }
+    if (!allowed.includes(mime) && type === "image" && (contentType === "application/octet-stream" || !contentType)) {
+        const magic = sniffMime(buf);
+        if (allowed.includes(magic)) mime = magic;
+    }
+    if (!allowed.includes(mime)) throw Object.assign(new Error(`远程文件类型不受支持: ${sniffed || contentType || "unknown"}`), { status: 400 });
 
     return { bytes: buf, mime, filename: path.basename(parsed.pathname) || (type === "image" ? "remote.jpg" : "remote.mp4") };
 }

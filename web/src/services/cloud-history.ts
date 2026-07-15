@@ -1,6 +1,7 @@
 import { getImageBlob } from "@/services/image-storage";
 import { getMediaBlob } from "@/services/file-storage";
 import { blobFromUrl, isCloudApiError, uploadCloudJob, type CloudJob } from "@/services/cloud-api";
+import { AI_PROXY_BASE_URL } from "@/stores/use-config-store";
 import { useAuthStore } from "@/stores/use-auth-store";
 
 function isRemoteHttpUrl(value: string) {
@@ -9,6 +10,29 @@ function isRemoteHttpUrl(value: string) {
 
 function isLocalObjectUrl(value: string) {
     return (value || "").startsWith("blob:") || (value || "").startsWith("data:");
+}
+
+function isXaiMediaHost(url: string) {
+    try {
+        const host = new URL(url).hostname.toLowerCase();
+        return host.includes("vidgen.x.ai") || host.includes("imgen.x.ai") || host.includes("cdn.x.ai") || host === "x.ai" || host.endsWith(".x.ai");
+    } catch {
+        return /vidgen\.x\.ai|imgen\.x\.ai|cdn\.x\.ai/i.test(url);
+    }
+}
+
+/** 中转站返回的 xAI 临时链：浏览器 CORS 读不到；优先走同源 /ai-proxy/media 取字节 */
+async function tryFetchViaSameOriginMediaProxy(remoteUrl: string): Promise<Blob | null> {
+    if (!isRemoteHttpUrl(remoteUrl) || !isXaiMediaHost(remoteUrl)) return null;
+    const proxyUrl = `${AI_PROXY_BASE_URL}/media?${new URLSearchParams({ url: remoteUrl }).toString()}`;
+    try {
+        const response = await fetch(proxyUrl, { credentials: "same-origin" });
+        if (!response.ok) return null;
+        const blob = await response.blob();
+        return blob.size > 0 ? blob : null;
+    } catch {
+        return null;
+    }
 }
 
 export type CloudSaveResult = {
@@ -29,8 +53,9 @@ async function uploadCloudJobFromUrl(input: {
     params?: Record<string, unknown>;
 }) {
     const controller = new AbortController();
-    // UI should fail fast when server cannot reach remote CDN.
-    const timer = window.setTimeout(() => controller.abort(), 12000);
+    // 视频文件较大，给服务端更长时间；图片可短一些
+    const timeoutMs = input.type === "video" ? 120000 : 20000;
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
         const response = await fetch(`/api/jobs/${input.type}/from-url`, {
             method: "POST",
@@ -55,12 +80,17 @@ async function uploadCloudJobFromUrl(input: {
         }
         const payload = (await response.json().catch(() => null)) as { code?: number; data?: CloudJob; msg?: string } | null;
         if (!response.ok || !payload || payload.code !== 0 || !payload.data) {
+            // 把后端 502 原文透出，方便区分「超时 / 出网失败 / 类型不支持」
             throw new Error(payload?.msg || `远程上云失败（${response.status}）`);
         }
         return payload.data;
     } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {
-            throw new Error("远程上云超时：服务器访问不了 imgen/vidgen 时会失败。请用本机已落盘结果，或下载后导入");
+            throw new Error(
+                input.type === "video"
+                    ? "远程视频上云超时：本机服务器访问 vidgen 太慢或不通。可：① 配置并启动 ai-proxy 后重试生成以落盘 ② 浏览器另开视频链接下载后导入"
+                    : "远程上云超时：服务器访问不了 imgen/vidgen。请用本机已落盘结果，或下载后导入",
+            );
         }
         throw error;
     } finally {
@@ -123,17 +153,39 @@ export async function saveImageToCloudDetailed(input: {
             return { job };
         }
         if (isRemoteHttpUrl(input.dataUrl)) {
-            const job = await uploadCloudJobFromUrl({
-                type: "image",
-                url: input.dataUrl,
-                prompt: input.prompt,
-                model: input.model,
-                width: input.width,
-                height: input.height,
-                clientLocalId: input.clientLocalId,
-                params: input.params,
-            });
-            return { job };
+            const viaProxy = await tryFetchViaSameOriginMediaProxy(input.dataUrl);
+            if (viaProxy) {
+                const job = await uploadCloudJob({
+                    type: "image",
+                    file: viaProxy,
+                    filename: "image.png",
+                    prompt: input.prompt,
+                    model: input.model,
+                    width: input.width,
+                    height: input.height,
+                    clientLocalId: input.clientLocalId,
+                    params: { ...(input.params || {}), via: "ai-proxy-media" },
+                });
+                return { job };
+            }
+            try {
+                const job = await uploadCloudJobFromUrl({
+                    type: "image",
+                    url: input.dataUrl,
+                    prompt: input.prompt,
+                    model: input.model,
+                    width: input.width,
+                    height: input.height,
+                    clientLocalId: input.clientLocalId,
+                    params: input.params,
+                });
+                return { job };
+            } catch (fromUrlError) {
+                return {
+                    job: null,
+                    error: toSaveError(fromUrlError, "远程图上云失败：浏览器 CORS 读不到，服务端也拉不到。可下载后本地导入"),
+                };
+            }
         }
         return { job: null, error: "没有可上传的本地文件或远程地址" };
     } catch (error) {
@@ -196,19 +248,49 @@ export async function saveVideoToCloudDetailed(input: {
             return { job };
         }
         if (isRemoteHttpUrl(input.url)) {
-            const job = await uploadCloudJobFromUrl({
-                type: "video",
-                url: input.url,
-                prompt: input.prompt,
-                model: input.model,
-                width: input.width,
-                height: input.height,
-                durationMs: input.durationMs,
-                clientLocalId: input.clientLocalId,
-                provider: input.provider,
-                params: input.params,
-            });
-            return { job };
+            // 中转站 + vidgen：浏览器读不到；先试同源 ai-proxy 取字节再 multipart 上云
+            const viaProxy = await tryFetchViaSameOriginMediaProxy(input.url);
+            if (viaProxy) {
+                const job = await uploadCloudJob({
+                    type: "video",
+                    file: viaProxy,
+                    filename: "video.mp4",
+                    prompt: input.prompt,
+                    model: input.model,
+                    width: input.width,
+                    height: input.height,
+                    durationMs: input.durationMs,
+                    clientLocalId: input.clientLocalId,
+                    provider: input.provider,
+                    params: { ...(input.params || {}), via: "ai-proxy-media" },
+                });
+                return { job };
+            }
+            // 再让服务端直拉远程 CDN（本机/服务器能出网时成功）
+            try {
+                const job = await uploadCloudJobFromUrl({
+                    type: "video",
+                    url: input.url,
+                    prompt: input.prompt,
+                    model: input.model,
+                    width: input.width,
+                    height: input.height,
+                    durationMs: input.durationMs,
+                    clientLocalId: input.clientLocalId,
+                    provider: input.provider,
+                    params: input.params,
+                });
+                return { job };
+            } catch (fromUrlError) {
+                return {
+                    job: null,
+                    error:
+                        toSaveError(
+                            fromUrlError,
+                            "视频可播放但无法上云：浏览器 CORS 读不到 vidgen，且服务端也拉不到该地址。请确保 Docker 的 ai-proxy 可访问外网后重试生成（会尽量落盘），或手动下载视频后导入",
+                        ),
+                };
+            }
         }
         return { job: null, error: "没有可上传的本地文件或远程地址" };
     } catch (error) {

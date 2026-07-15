@@ -124,7 +124,8 @@ export async function storeGeneratedVideo(result: VideoGenerationResult, config?
         return uploadMediaFile(typed, "video");
     }
     if (result.url) {
-        // 尽量落本地 blob；失败时保留 URL 给 <video src> 直接播放（vidgen.x.ai 常允许 <video> 播，但禁止 JS fetch）。
+        // 尽量落本地 blob，便于上云；失败时保留 URL 给 <video src> 直接播放
+        // （vidgen.x.ai 常允许 <video> 播，但禁止浏览器 JS fetch）。
         const candidates = videoDownloadCandidates(result.url, config);
         for (const candidate of candidates) {
             try {
@@ -134,9 +135,10 @@ export async function storeGeneratedVideo(result: VideoGenerationResult, config?
                 // try next
             }
         }
-        const proxyUrl = mediaProxyCandidates(result.url, config)[0];
+        // 仍可能播放：优先同源媒体代理 URL（若可用），否则原始远程 URL
+        const playable = mediaProxyCandidates(result.url, config)[0] || sameOriginMediaProxyUrl(result.url) || result.url;
         return {
-            url: proxyUrl || result.url,
+            url: playable,
             storageKey: "",
             bytes: 0,
             mimeType: result.mimeType || "video/mp4",
@@ -727,7 +729,19 @@ async function videoResultFromUrl(url: string, options?: RequestOptions, config?
 }
 
 async function downloadVideoBlob(url: string, options?: RequestOptions) {
-    // 不要给跨域 CDN 带 Authorization，否则会触发预检并 CORS 失败。
+    // 同源 /ai-proxy/media 用 fetch 即可；跨域 CDN 不要带 Authorization。
+    if (url.startsWith("/") || url.includes("/ai-proxy/media")) {
+        const response = await fetch(url, { signal: options?.signal, credentials: url.includes("token=") ? "include" : "same-origin" });
+        if (!response.ok) throw new Error(`下载视频失败（${response.status}）`);
+        const blob = await response.blob();
+        await assertVideoBlob(blob);
+        if (!blob.size) throw new Error("视频内容为空");
+        return blob;
+    }
+    // 已知 CORS 封锁主机：浏览器 JS 永远读不到，避免无意义的 axios 报错刷屏
+    if (isBrowserCorsBlockedVideoHost(url)) {
+        throw new Error("远程视频禁止浏览器直读（CORS）");
+    }
     const response = await axios.get<Blob>(url, { responseType: "blob", timeout: 120000, signal: options?.signal });
     await assertVideoBlob(response.data);
     if (!response.data.size) throw new Error("视频内容为空");
@@ -746,25 +760,57 @@ async function assertRemoteVideoReady(url: string, options?: RequestOptions) {
 
 function videoDownloadCandidates(url: string, config?: AiConfig) {
     const list: string[] = [];
-    const proxyUrl = mediaProxyUrl(url, config);
-    if (proxyUrl) list.push(proxyUrl);
-    if (isPublicMediaUrl(url) && !list.includes(url)) list.push(url);
-    if (!list.length) list.push(url);
+    // 1) 当前渠道若是 ai-proxy，优先带 token 的媒体代理
+    const channelProxy = mediaProxyUrl(url, config);
+    if (channelProxy) list.push(channelProxy);
+    // 2) 对 xAI 等 CORS 封锁 CDN：即使生成走中转站，也尝试同源 /ai-proxy/media 取字节（静默失败）
+    //    这样本地可落盘 storageKey，云端上云才能成功。
+    const sameOriginProxy = sameOriginMediaProxyUrl(url);
+    if (sameOriginProxy && !list.includes(sameOriginProxy)) list.push(sameOriginProxy);
+    // 3) 非封锁主机才尝试浏览器直连
+    if (isPublicMediaUrl(url) && !isBrowserCorsBlockedVideoHost(url) && !list.includes(url)) list.push(url);
+    if (!list.length && isPublicMediaUrl(url)) list.push(url);
     return list;
 }
 
 function mediaProxyCandidates(url: string, config?: AiConfig) {
-    const proxyUrl = mediaProxyUrl(url, config);
-    return proxyUrl ? [proxyUrl] : [];
+    const list: string[] = [];
+    const channelProxy = mediaProxyUrl(url, config);
+    if (channelProxy) list.push(channelProxy);
+    const sameOriginProxy = sameOriginMediaProxyUrl(url);
+    if (sameOriginProxy && !list.includes(sameOriginProxy)) list.push(sameOriginProxy);
+    return list;
 }
 
 function mediaProxyUrl(url: string, config?: AiConfig) {
     if (!isPublicMediaUrl(url)) return "";
-    // 只有当前请求渠道本身是 /ai-proxy 才代理；直连 codex2api 时不要碰本地 ai-proxy。
+    // 渠道级代理：仅当当前请求渠道本身是 /ai-proxy
     if (!config || !isAiProxyBaseUrl(config.baseUrl)) return "";
     const params = new URLSearchParams({ url });
     if (config.apiKey.trim()) params.set("token", config.apiKey.trim());
     return `${AI_PROXY_BASE_URL}/media?${params.toString()}`;
+}
+
+/** 不依赖当前 AI 渠道：对已知 CORS 封锁 CDN 尝试同源媒体代理（Docker 里 ai-proxy 能出网时最有用） */
+function sameOriginMediaProxyUrl(url: string) {
+    if (!isPublicMediaUrl(url) || !isBrowserCorsBlockedVideoHost(url)) return "";
+    return `${AI_PROXY_BASE_URL}/media?${new URLSearchParams({ url }).toString()}`;
+}
+
+function isBrowserCorsBlockedVideoHost(url: string) {
+    try {
+        const host = new URL(url).hostname.toLowerCase();
+        return (
+            host === "vidgen.x.ai" ||
+            host.endsWith(".vidgen.x.ai") ||
+            host === "imgen.x.ai" ||
+            host.endsWith(".imgen.x.ai") ||
+            host === "cdn.x.ai" ||
+            host.endsWith(".cdn.x.ai")
+        );
+    } catch {
+        return /vidgen\.x\.ai|imgen\.x\.ai|cdn\.x\.ai/i.test(url);
+    }
 }
 
 class VideoOutputNotReadyError extends Error {
