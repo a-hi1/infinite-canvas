@@ -111,6 +111,8 @@ const IMAGE_MAX_PIXELS = 8294400;
 const IMAGE_MAX_EDGE = 3840;
 const IMAGE_MAX_RATIO = 3;
 const IMAGE_OUTPUT_FORMAT = "png";
+const GEMINI_SUPPORTED_RATIOS = ["1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9"];
+const GEMINI_IMAGE_SIZE_BY_QUALITY: Record<string, string> = { low: "1K", medium: "2K", high: "4K", standard: "1K", hd: "2K" };
 
 function normalizeQuality(quality: string) {
     const value = quality.trim().toLowerCase();
@@ -143,14 +145,19 @@ function resolveSize(quality: string | undefined, ratio: string): string {
     return `${width}x${height}`;
 }
 
-function parseImageRatio(value: string) {
+function parseRatioValue(value: string) {
     const parts = value.split(":");
     if (parts.length !== 2) throw new Error("图像尺寸格式不支持，请使用 auto、9:16 或 1024x1024");
     const w = Number(parts[0]);
     const h = Number(parts[1]);
     if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) throw new Error("图像比例必须是正数，例如 9:16");
-    if (Math.max(w, h) / Math.min(w, h) > IMAGE_MAX_RATIO) throw new Error("图像宽高比不能超过 3:1，请调整尺寸");
     return { width: w, height: h };
+}
+
+function parseImageRatio(value: string) {
+    const ratio = parseRatioValue(value);
+    if (Math.max(ratio.width, ratio.height) / Math.min(ratio.width, ratio.height) > IMAGE_MAX_RATIO) throw new Error("图像宽高比不能超过 3:1，请调整尺寸");
+    return ratio;
 }
 
 function parseImageDimensions(value: string) {
@@ -178,6 +185,51 @@ function resolveRequestSize(quality: string | undefined, size: string) {
     }
     if (value.includes(":")) return resolveSize(quality, value);
     throw new Error("图像尺寸格式不支持，请使用 auto、9:16 或 1024x1024");
+}
+
+function resolveGeminiImageConfig(config: AiConfig) {
+    const value = (config.size || "").trim();
+    const dimensions = parseImageDimensions(value);
+    const ratio = dimensions ? `${dimensions.width}:${dimensions.height}` : value;
+    // Gemini 支持更极端比例（如 21:9），用 parseRatioValue 匹配最近支持比例，避免被 OpenAI 3:1 校验误伤
+    const aspectRatio = value && value.toLowerCase() !== "auto" ? closestGeminiAspectRatio(ratio) : undefined;
+    const imageSize = supportsGeminiImageSize(config.model) ? resolveGeminiImageSize(config.quality, dimensions) : undefined;
+    // Gemini 原生字段为 imageConfig；部分中转也可能读 responseFormat.image，两者都带上更稳
+    const image = {
+        ...(aspectRatio ? { aspectRatio } : {}),
+        ...(imageSize ? { imageSize } : {}),
+    };
+    if (!Object.keys(image).length) return {};
+    return {
+        imageConfig: image,
+        responseFormat: { image },
+    };
+}
+
+function closestGeminiAspectRatio(value: string) {
+    const ratio = parseRatioValue(value);
+    const target = ratio.width / ratio.height;
+    return GEMINI_SUPPORTED_RATIOS.reduce((best, item) => {
+        const current = parseRatioValue(item);
+        const bestRatio = parseRatioValue(best);
+        return Math.abs(current.width / current.height - target) < Math.abs(bestRatio.width / bestRatio.height - target) ? item : best;
+    });
+}
+
+function resolveGeminiImageSize(quality: string, dimensions: { width: number; height: number } | null) {
+    const normalizedQuality = normalizeQuality(quality || "");
+    if (normalizedQuality) return GEMINI_IMAGE_SIZE_BY_QUALITY[normalizedQuality];
+    if (!dimensions) return undefined;
+    const edge = Math.max(dimensions.width, dimensions.height);
+    if (edge <= 768) return "512";
+    if (edge <= 1536) return "1K";
+    if (edge <= 3072) return "2K";
+    return "4K";
+}
+
+function supportsGeminiImageSize(model: string) {
+    const value = (model || "").toLowerCase();
+    return value.includes("gemini-3") || value.includes("3.1") || value.includes("3-pro");
 }
 
 function resolveImageDataUrl(item: Record<string, unknown>) {
@@ -633,7 +685,12 @@ async function requestGeminiImagesOnce(config: AiConfig, prompt: string, referen
     const response = await axios.post<GeminiPayload>(
         geminiApiUrl(config, "generateContent"),
         {
-            ...toGeminiBody(config, [{ role: "user", content: prompt }], { generationConfig: { responseModalities: ["TEXT", "IMAGE"] } }),
+            ...toGeminiBody(config, [{ role: "user", content: prompt }], {
+                generationConfig: {
+                    responseModalities: ["TEXT", "IMAGE"],
+                    ...resolveGeminiImageConfig(config),
+                },
+            }),
             contents: [{ role: "user", parts }],
         },
         { headers: geminiHeaders(config), signal: options?.signal },

@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { FileText, Image as ImageIcon, Music2, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
+import { isImeComposing, isPlainEnterKey } from "@/lib/keyboard-event";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 
@@ -28,6 +29,7 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
     const [mention, setMention] = useState<MentionState | null>(null);
     const [activeIndex, setActiveIndex] = useState(0);
     const [hasSelection, setHasSelection] = useState(false);
+    const [focused, setFocused] = useState(false);
     const candidates = useMemo(() => {
         if (!mention) return [];
         const query = mention.query.trim().toLowerCase();
@@ -83,11 +85,16 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
         setHasSelection(Boolean(textarea && textarea.selectionStart !== textarea.selectionEnd));
     };
 
-    const showOverlay = Boolean(activeLabels.length && !hasSelection);
+    // 聚焦时关闭高亮层：Chromium 在 color:transparent 时 caret 会一起消失（已生成节点常有 @图片1 引用）
+    const showOverlay = Boolean(activeLabels.length && !hasSelection && !focused);
+    const textColor = style?.color || theme.node.text || "#111827";
+    const caretColor = "#2563eb";
     const mergedStyle = {
         ...(style || {}),
-        color: showOverlay ? "transparent" : style?.color,
-        caretColor: style?.color || theme.node.text,
+        color: showOverlay ? "transparent" : textColor,
+        caretColor,
+        // 避免透明文字把 WebKit 光标一并隐藏
+        WebkitTextFillColor: showOverlay ? "transparent" : textColor,
         ...(showOverlay ? { background: "transparent", backgroundColor: "transparent" } : {}),
     } as CSSProperties;
     const menu = mention && candidates.length && textareaRef.current ? <MentionMenu textarea={textareaRef.current} references={candidates} activeIndex={Math.min(activeIndex, candidates.length - 1)} theme={theme} onSelect={insertReference} /> : null;
@@ -95,7 +102,7 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
     return (
         <div className={`relative h-full w-full ${containerClassName || ""}`}>
             {showOverlay ? (
-                <div ref={overlayRef} className={`${className || ""} pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words`} style={{ ...style, color: theme.node.text }}>
+                <div ref={overlayRef} className={`${className || ""} pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words`} style={{ ...style, color: theme.node.text, caretColor: "transparent" }}>
                     <MentionHighlightText value={value || props.placeholder?.toString() || ""} labels={activeLabels} placeholder={!value} />
                 </div>
             ) : null}
@@ -107,7 +114,7 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                     else if (forwardedRef) forwardedRef.current = node;
                 }}
                 value={value}
-                className={className}
+                className={`${className || ""} canvas-prompt-caret`}
                 style={mergedStyle}
                 onChange={(event) => {
                     const next = event.target.value;
@@ -131,6 +138,10 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                     props.onPointerUp?.(event);
                 }}
                 onKeyDown={(event) => {
+                    if (isImeComposing(event)) {
+                        onKeyDown?.(event);
+                        return;
+                    }
                     if (mention && candidates.length) {
                         if (event.key === "ArrowDown") {
                             event.preventDefault();
@@ -153,7 +164,7 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                             return;
                         }
                     }
-                    if (event.key === "Enter" && onSubmit && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+                    if (isPlainEnterKey(event) && onSubmit) {
                         event.preventDefault();
                         onSubmit();
                         return;
@@ -164,7 +175,12 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                     syncOverlayScroll();
                     props.onScroll?.(event);
                 }}
+                onFocus={(event) => {
+                    setFocused(true);
+                    props.onFocus?.(event);
+                }}
                 onBlur={(event) => {
+                    setFocused(false);
                     setHasSelection(false);
                     window.setTimeout(closeMention, 120);
                     props.onBlur?.(event);

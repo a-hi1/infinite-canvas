@@ -3,6 +3,7 @@ import { Button, Tooltip } from "antd";
 import { ArrowUp, CheckCircle2, CircleAlert, ImagePlus, LoaderCircle, UserRound, Wrench, X, XCircle } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
+import { isPlainEnterKey } from "@/lib/keyboard-event";
 import type { LocalUser } from "@/stores/use-user-store";
 
 export type CanvasAgentChatAttachment = { id: string; name: string; url: string };
@@ -198,7 +199,7 @@ export function AgentChatComposer({
                         void onAddFiles(images);
                     }}
                     onKeyDown={(event) => {
-                        if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey) return;
+                        if (!isPlainEnterKey(event)) return;
                         event.preventDefault();
                         void onSubmit();
                     }}

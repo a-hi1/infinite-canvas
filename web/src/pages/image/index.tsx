@@ -425,51 +425,61 @@ export default function ImagePage() {
 
     const runGenerationBatch = async (snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }, count: number) => {
         const batchStartedAt = performance.now();
+        // 优先一次请求拿齐 count；失败或数量不足时再串行补齐，避免并发触发 429。
         try {
             const generated = snapshot.references.length ? await requestEdit({ ...snapshot.config, count: String(count) }, snapshot.text, snapshot.references) : await requestGeneration({ ...snapshot.config, count: String(count) }, snapshot.text);
-            const images = await Promise.all(
-                generated.slice(0, count).map(async (image, index) => {
-                    // 优先本地落盘：即使上游只给 imgen.x.ai，也尽量先 download；失败再保留远程 URL。
-                    let dataUrl = image.dataUrl;
-                    let storageKey: string | undefined;
-                    let width = 0;
-                    let height = 0;
-                    let bytes = getDataUrlByteSize(image.dataUrl);
-                    try {
-                        const stored = await uploadImage(image.dataUrl);
-                        dataUrl = stored.url;
-                        storageKey = stored.storageKey;
-                        width = stored.width;
-                        height = stored.height;
-                        bytes = stored.bytes;
-                    } catch {
-                        const meta = await readImageMeta(image.dataUrl);
-                        width = meta.width;
-                        height = meta.height;
-                    }
-                    if (!width || !height) {
-                        const meta = await readImageMeta(dataUrl);
-                        width = meta.width;
-                        height = meta.height;
-                    }
-                    const nextImage: GeneratedImage = { id: image.id, dataUrl, storageKey, durationMs: performance.now() - batchStartedAt, width, height, bytes };
-                    setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
-                    return nextImage;
-                }),
-            );
+            const images: GeneratedImage[] = [];
+            for (let index = 0; index < Math.min(generated.length, count); index += 1) {
+                const image = generated[index];
+                let dataUrl = image.dataUrl;
+                let storageKey: string | undefined;
+                let width = 0;
+                let height = 0;
+                let bytes = getDataUrlByteSize(image.dataUrl);
+                try {
+                    const stored = await uploadImage(image.dataUrl);
+                    dataUrl = stored.url;
+                    storageKey = stored.storageKey;
+                    width = stored.width;
+                    height = stored.height;
+                    bytes = stored.bytes;
+                } catch {
+                    const meta = await readImageMeta(image.dataUrl);
+                    width = meta.width;
+                    height = meta.height;
+                }
+                if (!width || !height) {
+                    const meta = await readImageMeta(dataUrl);
+                    width = meta.width;
+                    height = meta.height;
+                }
+                const nextImage: GeneratedImage = { id: image.id, dataUrl, storageKey, durationMs: performance.now() - batchStartedAt, width, height, bytes };
+                setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
+                images.push(nextImage);
+            }
             if (images.length < count) {
-                const settled = await Promise.allSettled(Array.from({ length: count - images.length }, (_, offset) => runGenerationSlot(images.length + offset, snapshot)));
-                const fallbackImages = settled.filter((item): item is PromiseFulfilledResult<GeneratedImage> => item.status === "fulfilled").map((item) => item.value);
-                const failed = settled.find((item): item is PromiseRejectedResult => item.status === "rejected");
-                return { images: [...images, ...fallbackImages], firstError: images.length || fallbackImages.length ? "" : failed?.reason instanceof Error ? failed.reason.message : "接口返回图片数量不足" };
+                const { images: fallbackImages, firstError } = await runGenerationSlotsSerial(snapshot, images.length, count);
+                return { images: [...images, ...fallbackImages], firstError: images.length || fallbackImages.length ? "" : firstError || "接口返回图片数量不足" };
             }
             return { images, firstError: "" };
         } catch (error) {
             const firstError = error instanceof Error ? error.message : "生成失败";
-            const settled = await Promise.allSettled(Array.from({ length: count }, (_, index) => runGenerationSlot(index, snapshot)));
-            const images = settled.filter((item): item is PromiseFulfilledResult<GeneratedImage> => item.status === "fulfilled").map((item) => item.value);
-            return { images, firstError };
+            const serial = await runGenerationSlotsSerial(snapshot, 0, count);
+            return { images: serial.images, firstError: serial.images.length ? "" : serial.firstError || firstError };
         }
+    };
+
+    const runGenerationSlotsSerial = async (snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }, startIndex: number, count: number) => {
+        const images: GeneratedImage[] = [];
+        let firstError = "";
+        for (let index = startIndex; index < count; index += 1) {
+            try {
+                images.push(await runGenerationSlot(index, snapshot));
+            } catch (error) {
+                if (!firstError) firstError = error instanceof Error ? error.message : "生成失败";
+            }
+        }
+        return { images, firstError };
     };
 
     const runGenerationSlot = async (index: number, snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }) => {
@@ -623,7 +633,11 @@ export default function ImagePage() {
                             </div>
                         </div>
 
-                        <div className="mt-auto pt-6">
+                        <div className="mt-auto space-y-2 pt-6">
+                            <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">
+                                请求模式：{modelOptionLabel(effectiveConfig, model)} · {references.length ? "图生图 /v1/images/edits" : "文生图 /v1/images/generations"} · 参考图 {references.length} 张 · 生成 {generationCount} 张
+                                <div className="mt-1 opacity-75">多张时优先一次请求；不足或失败时串行补齐，降低 429 风险。</div>
+                            </div>
                             <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
                                 开始生成
                             </Button>

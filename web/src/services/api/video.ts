@@ -10,8 +10,16 @@ import { AI_PROXY_BASE_URL, buildApiUrl, isAiProxyBaseUrl, modelOptionName, reso
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
-type VideoResponse = { id: string; status?: string; error?: { message?: string } };
-type ApiVideoResponse = VideoResponse | { code?: number; data?: VideoResponse | null; msg?: string };
+type VideoResponse = {
+    id: string;
+    status?: string;
+    error?: { message?: string };
+    url?: string;
+    result_url?: string;
+    video_url?: string;
+    content?: { video_url?: string; url?: string } | null;
+};
+type ApiVideoResponse = VideoResponse | { code?: number | string; data?: VideoResponse | null; msg?: string; message?: string; error?: { message?: string } };
 type GrokVideoAsset = { url?: string; video_url?: string; output_url?: string; download_url?: string; [key: string]: unknown };
 type GrokVideoResponse = {
     id?: string;
@@ -39,11 +47,14 @@ type AgnesTaskResponse = { video_id?: string; id?: string; status?: string; vide
 type ApiAgnesResponse = AgnesTaskResponse | { code?: number | string; data?: AgnesTaskResponse | null; msg?: string; message?: string };
 type SeedanceTask = {
     id: string;
-    status?: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "expired";
+    status?: "queued" | "running" | "succeeded" | "completed" | "failed" | "cancelled" | "expired";
     error?: { code?: string; message?: string } | null;
-    content?: { video_url?: string; last_frame_url?: string } | null;
+    content?: { video_url?: string; url?: string; last_frame_url?: string } | null;
+    url?: string;
+    result_url?: string;
+    video_url?: string;
 };
-type ApiEnvelope<T> = T | { code?: number; data?: T | null; msg?: string };
+type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: string; message?: string; error?: { message?: string } };
 type RequestOptions = { signal?: AbortSignal };
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
@@ -169,12 +180,24 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
 async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
         const video = unwrapVideoResponse((await axios.get<ApiVideoResponse>(aiApiUrl(config, `/videos/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data);
+        // 部分中转在 status 未完成或没有 /content 时直接返回可播 URL
+        const directUrl = openAiCompatibleVideoUrl(video);
+        if (directUrl) return { status: "completed", result: await videoResultFromUrl(directUrl, options) };
         if (video.status === "completed") {
-            const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal });
-            await assertVideoBlob(content.data);
-            return { status: "completed", result: { blob: content.data } };
+            try {
+                const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal });
+                await assertVideoBlob(content.data);
+                return { status: "completed", result: { blob: content.data } };
+            } catch (contentError) {
+                // /content 不存在时，再尝试从任务体里抠 URL
+                const fallbackUrl = openAiCompatibleVideoUrl(video);
+                if (fallbackUrl) return { status: "completed", result: await videoResultFromUrl(fallbackUrl, options) };
+                throw contentError;
+            }
         }
-        if (video.status === "failed" || video.status === "cancelled") return { status: "failed", error: video.error?.message || "视频生成失败" };
+        if (video.status === "failed" || video.status === "cancelled") {
+            return { status: "failed", error: readErrorPayload(video.error?.message) || readErrorPayload(video) || "视频生成失败" };
+        }
         return { status: "pending" };
     } catch (error) {
         throw new Error(readAxiosError(error, "视频任务查询失败"));
@@ -435,12 +458,14 @@ async function createSeedanceTask(config: AiConfig, model: string, prompt: strin
 async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
         const state = unwrapSeedanceTask((await axios.get<ApiEnvelope<SeedanceTask>>(seedanceApiUrl(config, task.id), { headers: aiHeaders(config), signal: options?.signal })).data);
-        if (state.status === "succeeded") {
-            const url = state.content?.video_url;
-            if (!url) return { status: "failed", error: "Seedance 任务成功但没有返回视频 URL" };
-            return { status: "completed", result: await videoResultFromUrl(url, options) };
+        const url = openAiCompatibleVideoUrl(state);
+        if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
+        if (state.status === "succeeded" || state.status === "completed") {
+            return { status: "failed", error: "Seedance 任务成功但没有返回视频 URL" };
         }
-        if (state.status === "failed" || state.status === "cancelled" || state.status === "expired") return { status: "failed", error: state.error?.message || `Seedance 视频生成${state.status === "expired" ? "超时" : "失败"}` };
+        if (state.status === "failed" || state.status === "cancelled" || state.status === "expired") {
+            return { status: "failed", error: readErrorPayload(state.error?.message) || readErrorPayload(state) || `Seedance 视频生成${state.status === "expired" ? "超时" : "失败"}` };
+        }
         return { status: "pending" };
     } catch (error) {
         throw new Error(readAxiosError(error, "Seedance 任务查询失败"));
@@ -898,12 +923,18 @@ function readGrokError(payload: GrokVideoResponse) {
 
 function unwrapEnvelope<T>(payload: ApiEnvelope<T>, emptyMessage: string): T {
     if (!payload) throw new Error(emptyMessage);
-    if (typeof payload === "object" && "code" in payload && typeof payload.code === "number") {
-        if (payload.code !== 0) throw new Error(payload.msg || "请求失败");
+    if (typeof payload === "object" && "code" in payload && payload.code !== undefined) {
+        if (payload.code !== 0 && payload.code !== "0") throw new Error(readErrorPayload(payload) || "请求失败");
         if (!payload.data) throw new Error(emptyMessage);
         return payload.data;
     }
     return payload as T;
+}
+
+/** OpenAI / Seedance 兼容：从任务响应里尽量抠可播 URL（不碰 Grok 专用解析） */
+function openAiCompatibleVideoUrl(payload: VideoResponse | SeedanceTask) {
+    const candidates = [payload.video_url, payload.result_url, payload.url, payload.content?.video_url, payload.content?.url];
+    return candidates.find((url) => typeof url === "string" && (isPublicMediaUrl(url) || /\.mp4(\?|#|$)/i.test(url))) || "";
 }
 
 function readAxiosError(error: unknown, fallback: string) {
@@ -988,14 +1019,14 @@ function isRateLimitError(error: unknown) {
 
 async function assertVideoBlob(blob: Blob) {
     if (!blob.type.includes("json")) return;
-    let payload: { code?: number; msg?: string; error?: { message?: string } };
+    let payload: { code?: number | string; msg?: string; message?: string; error?: { message?: string } };
     try {
-        payload = JSON.parse(await blob.text()) as { code?: number; msg?: string; error?: { message?: string } };
+        payload = JSON.parse(await blob.text()) as { code?: number | string; msg?: string; message?: string; error?: { message?: string } };
     } catch {
         return;
     }
-    if (typeof payload.code === "number" && payload.code !== 0) throw new Error(payload.msg || "视频下载失败");
-    if (payload.error?.message) throw new Error(payload.error.message);
+    if (payload.code !== undefined && payload.code !== 0 && payload.code !== "0") throw new Error(readErrorPayload(payload) || "视频下载失败");
+    if (payload.error?.message) throw new Error(readErrorPayload(payload.error.message) || payload.error.message);
 }
 
 function isPublicMediaUrl(value: string) {

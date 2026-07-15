@@ -290,6 +290,17 @@
         opacity: 1;
     }
 
+    /* 画布提示词输入：强制可见光标（对抗透明文字高亮层 / Chromium caret 消失） */
+    .canvas-prompt-caret,
+    .canvas-prompt-caret:focus {
+        caret-color: #2563eb !important;
+    }
+
+    .dark .canvas-prompt-caret,
+    .dark .canvas-prompt-caret:focus {
+        caret-color: #60a5fa !important;
+    }
+
     /* 画布节点文本框 / 提示词输入：滚动条加粗，方便点击拖动 */
     .canvas-prompt-scrollbar {
         scrollbar-color: rgba(28, 25, 23, 0.72) rgba(28, 25, 23, 0.08);

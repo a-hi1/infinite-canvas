@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { ChevronRight, Image as ImageIcon, Music2, RefreshCw, Star, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
+import { displayNodeTitle } from "@/lib/canvas/node-title";
 import { formatBytes } from "@/lib/image-utils";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
@@ -39,6 +40,7 @@ type CanvasNodeProps = {
     onConnectStart: (event: React.MouseEvent, nodeId: string, handleType: "source" | "target") => void;
     onResize: (nodeId: string, width: number, height: number, position?: Position) => void;
     onContentChange: (nodeId: string, content: string) => void;
+    onTitleChange?: (nodeId: string, title: string) => void;
     onToggleBatch?: (nodeId: string) => void;
     onSetBatchPrimary?: (node: CanvasNodeData) => void;
     onRetry?: (node: CanvasNodeData) => void;
@@ -94,6 +96,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onConnectStart,
     onResize,
     onContentChange,
+    onTitleChange,
     onToggleBatch,
     onSetBatchPrimary,
     onRetry,
@@ -104,6 +107,9 @@ export const CanvasNode = React.memo(function CanvasNode({
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [hovered, setHovered] = useState(false);
     const [isEditingContent, setIsEditingContent] = useState(false);
+    const [isEditingTitle, setIsEditingTitle] = useState(false);
+    const [titleDraft, setTitleDraft] = useState(data.title || "");
+    const titleInputRef = useRef<HTMLInputElement>(null);
     const hasImageContent = data.type === CanvasNodeType.Image && Boolean(data.metadata?.content);
     const hasVideoContent = data.type === CanvasNodeType.Video && Boolean(data.metadata?.content);
     const hasAudioContent = data.type === CanvasNodeType.Audio && Boolean(data.metadata?.content);
@@ -147,6 +153,18 @@ export const CanvasNode = React.memo(function CanvasNode({
     }, [data.type, editRequestNonce]);
 
     useEffect(() => {
+        if (isEditingTitle) return;
+        setTitleDraft(data.title || "");
+    }, [data.title, isEditingTitle]);
+
+    useEffect(() => {
+        if (!isEditingTitle) return;
+        const input = titleInputRef.current;
+        input?.focus();
+        input?.select();
+    }, [isEditingTitle]);
+
+    useEffect(() => {
         if (!isEditingContent) return;
 
         const handleOutsidePointerDown = (event: PointerEvent) => {
@@ -160,6 +178,20 @@ export const CanvasNode = React.memo(function CanvasNode({
         window.addEventListener("pointerdown", handleOutsidePointerDown, true);
         return () => window.removeEventListener("pointerdown", handleOutsidePointerDown, true);
     }, [isEditingContent]);
+
+    const commitTitle = () => {
+        const next = titleDraft.trim() || data.title || "未命名节点";
+        setTitleDraft(next);
+        setIsEditingTitle(false);
+        if (next !== data.title) onTitleChange?.(data.id, next);
+    };
+
+    const beginEditTitle = (event?: React.MouseEvent | React.PointerEvent) => {
+        event?.stopPropagation();
+        event?.preventDefault();
+        setTitleDraft(data.title || "");
+        setIsEditingTitle(true);
+    };
 
     const handleResizeMove = useCallback(
         (event: MouseEvent) => {
@@ -255,6 +287,47 @@ export const CanvasNode = React.memo(function CanvasNode({
             }}
             onContextMenu={(event) => onContextMenu(event, data.id)}
         >
+            {/* 名称放在节点正上方外侧，短标签样式，不盖住画面内容 */}
+            <div className="pointer-events-auto absolute left-1/2 top-0 z-[90] max-w-[min(220px,90%)] -translate-x-1/2 -translate-y-[calc(100%+6px)]" data-canvas-no-zoom>
+                {isEditingTitle ? (
+                    <input
+                        ref={titleInputRef}
+                        value={titleDraft}
+                        className="h-7 w-full min-w-[96px] rounded-md border px-2 text-center text-[11px] font-medium outline-none"
+                        style={{ background: theme.toolbar.panel, borderColor: selectionBlue, color: theme.node.text }}
+                        onChange={(event) => setTitleDraft(event.target.value)}
+                        onBlur={commitTitle}
+                        onKeyDown={(event) => {
+                            event.stopPropagation();
+                            if (event.key === "Enter") {
+                                event.preventDefault();
+                                commitTitle();
+                            }
+                            if (event.key === "Escape") {
+                                event.preventDefault();
+                                setTitleDraft(data.title || "");
+                                setIsEditingTitle(false);
+                            }
+                        }}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => event.stopPropagation()}
+                    />
+                ) : (
+                    <button
+                        type="button"
+                        className={`mx-auto flex h-7 max-w-full items-center truncate rounded-md px-2 text-[11px] font-medium transition ${isSelected || hovered ? "opacity-100" : "opacity-70"}`}
+                        style={{ background: "transparent", color: theme.node.muted }}
+                        title={`${data.title || "未命名节点"}（单击改名）`}
+                        onClick={beginEditTitle}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onDoubleClick={beginEditTitle}
+                    >
+                        {displayNodeTitle(data.title, data.type, data.metadata?.prompt)}
+                    </button>
+                )}
+            </div>
             <div
                 className="relative h-full w-full overflow-visible rounded-3xl border-2"
                 style={{
@@ -327,7 +400,11 @@ export const CanvasNode = React.memo(function CanvasNode({
             <ConnectionHandleDot side="left" visible={hovered || isSelected || isConnecting} onMouseDown={(event) => onConnectStart(event, data.id, "target")} />
             <ConnectionHandleDot side="right" visible={data.type !== CanvasNodeType.Config && (hovered || isSelected || isConnecting)} onMouseDown={(event) => onConnectStart(event, data.id, "source")} />
 
-            {showPanel && renderPanel ? <div className="absolute left-1/2 top-full z-[70] w-max max-w-[min(560px,calc(100vw-32px))] -translate-x-1/2 pt-4">{renderPanel(data)}</div> : null}
+            {showPanel && renderPanel ? (
+                <div className="absolute left-1/2 top-full z-[70] w-max max-w-[min(560px,calc(100vw-32px))] -translate-x-1/2 select-text pt-4" data-canvas-no-zoom>
+                    {renderPanel(data)}
+                </div>
+            ) : null}
         </div>
     );
 });
@@ -506,7 +583,19 @@ function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
                 <span className="text-sm">空视频节点</span>
             </div>
         );
-    return <video src={node.metadata.content} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-no-zoom />;
+    return (
+        <video
+            src={node.metadata.content}
+            controls
+            tabIndex={-1}
+            className="h-full w-full rounded-[18px] bg-black object-contain"
+            data-canvas-no-zoom
+            onMouseDown={(event) => {
+                // 保留控件点击，但避免 video 抢走下方提示词焦点
+                if ((event.target as HTMLElement).tagName === "VIDEO") event.preventDefault();
+            }}
+        />
+    );
 }
 
 function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
@@ -521,7 +610,7 @@ function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
         <div className="flex h-full w-full flex-col justify-center gap-3 px-4" style={{ background: theme.node.fill, color: theme.node.text }}>
             <div className="flex min-w-0 items-center gap-2 text-sm opacity-70">
                 <Music2 className="size-4 shrink-0" />
-                <span className="truncate">{node.title || "音频"}</span>
+                <span className="truncate">{displayNodeTitle(node.title, CanvasNodeType.Audio, node.metadata?.prompt)}</span>
             </div>
             <audio src={node.metadata.content} controls className="w-full" data-canvas-no-zoom />
         </div>

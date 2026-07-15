@@ -24,6 +24,10 @@ export type ImageUpscaleParams = {
 export type ImageSplitParams = {
     rows: number;
     columns: number;
+    /** 0-1 之间的水平分割线（从上到下，不含 0/1） */
+    horizontalLines?: number[];
+    /** 0-1 之间的垂直分割线（从左到右，不含 0/1） */
+    verticalLines?: number[];
 };
 
 export type ImageSplitPiece = {
@@ -45,21 +49,31 @@ export async function cropDataUrl(dataUrl: string, crop?: ImageCropRect) {
 
 export async function splitDataUrl(dataUrl: string, params: ImageSplitParams): Promise<ImageSplitPiece[]> {
     const image = await loadImage(dataUrl);
-    const rows = Math.max(1, Math.floor(params.rows));
-    const columns = Math.max(1, Math.floor(params.columns));
+    const xCuts = buildSplitCuts(params.verticalLines, Math.max(1, Math.floor(params.columns)), image.width);
+    const yCuts = buildSplitCuts(params.horizontalLines, Math.max(1, Math.floor(params.rows)), image.height);
     const pieces: ImageSplitPiece[] = [];
 
-    for (let row = 0; row < rows; row += 1) {
-        const sy = Math.floor((row * image.height) / rows);
-        const sh = Math.floor(((row + 1) * image.height) / rows) - sy;
-        for (let column = 0; column < columns; column += 1) {
-            const sx = Math.floor((column * image.width) / columns);
-            const sw = Math.floor(((column + 1) * image.width) / columns) - sx;
+    for (let row = 0; row < yCuts.length - 1; row += 1) {
+        const sy = yCuts[row];
+        const sh = Math.max(1, yCuts[row + 1] - sy);
+        for (let column = 0; column < xCuts.length - 1; column += 1) {
+            const sx = xCuts[column];
+            const sw = Math.max(1, xCuts[column + 1] - sx);
             pieces.push({ row, column, dataUrl: drawCrop(image, sx, sy, sw, sh) });
         }
     }
 
     return pieces;
+}
+
+function buildSplitCuts(lines: number[] | undefined, count: number, size: number) {
+    if (lines?.length) {
+        const normalized = Array.from(new Set(lines.map((value) => Math.min(0.98, Math.max(0.02, value)))))
+            .sort((a, b) => a - b)
+            .map((value) => Math.round(value * size));
+        return [0, ...normalized.filter((value, index, list) => value > 0 && value < size && value !== list[index - 1]), size];
+    }
+    return Array.from({ length: count + 1 }, (_, index) => Math.round((index * size) / count));
 }
 
 export async function transformAngleDataUrl(dataUrl: string, params: ImageAngleTransform) {

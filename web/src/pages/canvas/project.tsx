@@ -8,7 +8,7 @@ import { requestEdit, requestGeneration, requestImageQuestion } from "@/services
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { DOCS_URL } from "@/constant/env";
-import { defaultConfig, type AiConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { defaultConfig, modelMatchesCapability, type AiConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { resolveImageUrl, uploadImage, type UploadedImage } from "@/services/image-storage";
 import { resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
@@ -46,6 +46,7 @@ import { useCanvasAgentStore } from "@/stores/canvas/use-canvas-agent-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { applyCanvasAgentOps, type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import { buildCanvasResourceReferences, buildNodeMentionReferences } from "@/lib/canvas/canvas-resource-references";
+import { shortGenerationTitle } from "@/lib/canvas/node-title";
 import type { CanvasAgentMode } from "@/components/canvas/canvas-agent-chat-ui";
 import {
     CanvasNodeType,
@@ -203,6 +204,36 @@ function ConnectionCreateMenu({ pending, onCreate, onClose }: { pending: Pending
     );
 }
 
+function NodeCreateMenu({ position, onCreate, onClose }: { position: Position; onCreate: (type: CanvasNodeType) => void; onClose: () => void }) {
+    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    return (
+        <div
+            className="absolute z-[120] w-[300px] rounded-[18px] border p-3 shadow-2xl backdrop-blur"
+            data-connection-create-menu
+            data-canvas-no-zoom
+            style={{ left: position.x, top: position.y, background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+        >
+            <div className="mb-2 flex items-center justify-between px-1">
+                <span className="text-sm font-medium" style={{ color: theme.node.muted }}>
+                    选择节点
+                </span>
+                <button type="button" className="grid size-7 place-items-center rounded-lg text-base opacity-55 transition hover:bg-white/10 hover:opacity-100" onClick={onClose} aria-label="关闭">
+                    ×
+                </button>
+            </div>
+            <div className="grid gap-1">
+                <ConnectionCreateOption theme={theme} icon={<List className="size-5" />} title="文本" description="笔记 / 脚本" onClick={() => onCreate(CanvasNodeType.Text)} />
+                <ConnectionCreateOption theme={theme} icon={<ImageIcon className="size-5" />} title="图片" onClick={() => onCreate(CanvasNodeType.Image)} />
+                <ConnectionCreateOption theme={theme} icon={<Video className="size-5" />} title="视频" onClick={() => onCreate(CanvasNodeType.Video)} />
+                <ConnectionCreateOption theme={theme} icon={<Music2 className="size-5" />} title="音频" onClick={() => onCreate(CanvasNodeType.Audio)} />
+                <ConnectionCreateOption theme={theme} icon={<Settings2 className="size-5" />} title="生成配置" description="模型、尺寸、数量和输入顺序" onClick={() => onCreate(CanvasNodeType.Config)} />
+            </div>
+        </div>
+    );
+}
+
 function ConnectionCreateOption({ theme, icon, title, description, onClick }: { theme: (typeof canvasThemes)[keyof typeof canvasThemes]; icon: React.ReactNode; title: string; description?: string; onClick?: () => void }) {
     return (
         <button type="button" className="flex h-16 w-full cursor-pointer items-center gap-3 rounded-2xl px-3 text-left transition" style={{ color: theme.node.text }} onClick={onClick} onMouseEnter={(event) => (event.currentTarget.style.background = theme.node.fill)} onMouseLeave={(event) => (event.currentTarget.style.background = "transparent")}>
@@ -283,6 +314,7 @@ function InfiniteCanvasPage() {
     const [mouseWorld, setMouseWorld] = useState<Position>({ x: 0, y: 0 });
     const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
     const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+    const [nodeCreatePosition, setNodeCreatePosition] = useState<Position | null>(null);
     const [runningNodeId, setRunningNodeId] = useState<string | null>(null);
     const [isMiniMapOpen, setIsMiniMapOpen] = useState(false);
     const [backgroundMode, setBackgroundMode] = useState<CanvasBackgroundMode>("lines");
@@ -499,6 +531,16 @@ function InfiniteCanvasPage() {
     }, [dialogNodeId]);
 
     useEffect(() => {
+        // 工具条跟随当前单选节点；多选或清空选择时收起，避免误触
+        if (selectedNodeIds.size === 1) {
+            const onlyId = Array.from(selectedNodeIds)[0];
+            setToolbarNodeId(onlyId);
+            return;
+        }
+        setToolbarNodeId(null);
+    }, [selectedNodeIds]);
+
+    useEffect(() => {
         if (!projectLoaded) return;
         if (viewportSaveTimerRef.current) clearTimeout(viewportSaveTimerRef.current);
         viewportSaveTimerRef.current = setTimeout(() => {
@@ -571,7 +613,8 @@ function InfiniteCanvasPage() {
 
     const keepNodeToolbar = useCallback(
         (nodeId: string) => {
-            if (nodeDraggingRef.current || nodeImageSettingsOpen) return;
+            // 仅对当前选中节点显示工具条，避免鼠标划过所有节点时频繁弹出
+            if (nodeDraggingRef.current || nodeImageSettingsOpen || !selectedNodeIdsRef.current.has(nodeId)) return;
             if (toolbarHideTimerRef.current) {
                 clearTimeout(toolbarHideTimerRef.current);
                 toolbarHideTimerRef.current = null;
@@ -584,7 +627,11 @@ function InfiniteCanvasPage() {
     const hideNodeToolbar = useCallback(() => {
         if (toolbarHideTimerRef.current) clearTimeout(toolbarHideTimerRef.current);
         toolbarHideTimerRef.current = setTimeout(() => {
-            setToolbarNodeId(null);
+            setToolbarNodeId((current) => {
+                // 仍选中时保持工具条，仅离开未选中节点时隐藏
+                if (current && selectedNodeIdsRef.current.has(current)) return current;
+                return null;
+            });
             toolbarHideTimerRef.current = null;
         }, 120);
     }, []);
@@ -1059,6 +1106,7 @@ function InfiniteCanvasPage() {
     const handleCanvasMouseDown = useCallback(
         (event: ReactPointerEvent<HTMLDivElement>) => {
             setContextMenu(null);
+            setNodeCreatePosition(null);
             if (pendingConnectionCreateRef.current) cancelPendingConnectionCreate();
             if (event.button !== 0) return;
 
@@ -1092,6 +1140,7 @@ function InfiniteCanvasPage() {
     const handleNodeMouseDown = useCallback((event: ReactMouseEvent, nodeId: string) => {
         event.stopPropagation();
         setContextMenu(null);
+        setNodeCreatePosition(null);
         setHoveredNodeId(null);
         setToolbarNodeId(null);
         setSelectedConnectionId(null);
@@ -1480,6 +1529,11 @@ function InfiniteCanvasPage() {
                 return { ...node, height, position: { x: node.position.x, y: node.position.y + node.height / 2 - height / 2 }, metadata: { ...node.metadata, freeResize } };
             }),
         );
+    }, []);
+
+    const handleNodeTitleChange = useCallback((nodeId: string, title: string) => {
+        const nextTitle = title.trim() || "未命名节点";
+        setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, title: nextTitle } : node)));
     }, []);
 
     const handleNodeContentChange = useCallback((nodeId: string, content: string) => {
@@ -2023,7 +2077,7 @@ function InfiniteCanvasPage() {
                     const rootNode: CanvasNodeData = {
                         id: rootId,
                         type: CanvasNodeType.Image,
-                        title: effectivePrompt.slice(0, 32) || "Generated Image",
+                        title: shortGenerationTitle(CanvasNodeType.Image, effectivePrompt),
                         position: {
                             x: isEmptyImageNode ? parentPosition.x : parentPosition.x + parentConfig.width + gap,
                             y: parentPosition.y + parentConfig.height / 2 - imageConfig.height / 2,
@@ -2043,7 +2097,7 @@ function InfiniteCanvasPage() {
                     const childNodes: CanvasNodeData[] = childIds.map((id, index) => ({
                         id,
                         type: CanvasNodeType.Image,
-                        title: effectivePrompt.slice(0, 32) || "Generated Image",
+                        title: shortGenerationTitle(CanvasNodeType.Image, effectivePrompt),
                         position: {
                             x: rootNode.position.x + rootNode.width + 120 + (index % 2) * (imageConfig.width + 36),
                             y: rootNode.position.y + Math.floor(index / 2) * (imageConfig.height + rowGap),
@@ -2079,7 +2133,7 @@ function InfiniteCanvasPage() {
                                         : {
                                               ...node,
                                               type: CanvasNodeType.Text,
-                                              title: prompt.slice(0, 32) || "Prompt",
+                                              title: shortGenerationTitle(CanvasNodeType.Text, prompt),
                                               width: parentConfig.width,
                                               height: parentConfig.height,
                                               metadata: { ...node.metadata, content: prompt, prompt, status: NODE_STATUS_SUCCESS, fontSize: 14, errorDetails: undefined },
@@ -2175,7 +2229,7 @@ function InfiniteCanvasPage() {
                     const videoNode: CanvasNodeData = {
                         id: videoId,
                         type: CanvasNodeType.Video,
-                        title: effectivePrompt.slice(0, 32) || "Generated Video",
+                        title: shortGenerationTitle(CanvasNodeType.Video, effectivePrompt),
                         position: isEmptyVideoNode ? sourceNode.position : { x: parent.x + (sourceNode?.width || spec.width) + 96, y: parent.y },
                         width: isEmptyVideoNode ? sourceNode.width : spec.width,
                         height: isEmptyVideoNode ? sourceNode.height : spec.height,
@@ -2203,7 +2257,7 @@ function InfiniteCanvasPage() {
                     const audioNode: CanvasNodeData = {
                         id: audioId,
                         type: CanvasNodeType.Audio,
-                        title: effectivePrompt.slice(0, 32) || "Generated Audio",
+                        title: shortGenerationTitle(CanvasNodeType.Audio, effectivePrompt),
                         position: isEmptyAudioNode ? sourceNode.position : { x: parent.x + (sourceNode?.width || spec.width) + 96, y: parent.y + ((sourceNode?.height || spec.height) - spec.height) / 2 },
                         width: isEmptyAudioNode ? sourceNode.width : spec.width,
                         height: isEmptyAudioNode ? sourceNode.height : spec.height,
@@ -2234,7 +2288,7 @@ function InfiniteCanvasPage() {
                     const childNodes: CanvasNodeData[] = childIds.map((id, index) => ({
                         id,
                         type: CanvasNodeType.Text,
-                        title: effectivePrompt.slice(0, 32) || "Generated Text",
+                        title: shortGenerationTitle(CanvasNodeType.Text, effectivePrompt),
                         position: {
                             x: parentPosition.x + parentConfig.width + 96,
                             y: parentPosition.y + parentConfig.height / 2 - textConfig.height / 2 + (index - (textCount - 1) / 2) * (textConfig.height + 36),
@@ -2270,7 +2324,7 @@ function InfiniteCanvasPage() {
                             : node.id === nodeId && isConfigNode
                               ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS } }
                               : node.id === nodeId && !editingTextNode
-                                ? { ...node, type: CanvasNodeType.Text, title: prompt.slice(0, 32) || "Generated Text", metadata: { ...node.metadata, content: answerByNodeId.get(node.id) || streamed, status: NODE_STATUS_SUCCESS } }
+                                ? { ...node, type: CanvasNodeType.Text, title: shortGenerationTitle(CanvasNodeType.Text, prompt), metadata: { ...node.metadata, content: answerByNodeId.get(node.id) || streamed, status: NODE_STATUS_SUCCESS } }
                                 : node,
                     ),
                 );
@@ -2445,7 +2499,7 @@ function InfiniteCanvasPage() {
             const node: CanvasNodeData = {
                 id,
                 type: CanvasNodeType.Image,
-                title: image.prompt.slice(0, 32) || "Generated Image",
+                title: shortGenerationTitle(CanvasNodeType.Image, image.prompt),
                 position: { x: center.x - config.width / 2, y: center.y - config.height / 2 },
                 width: config.width,
                 height: config.height,
@@ -2550,9 +2604,15 @@ function InfiniteCanvasPage() {
                     onViewportChange={(next) => {
                         setViewport(next);
                         setContextMenu(null);
+                        setNodeCreatePosition(null);
                     }}
                     onCanvasMouseDown={handleCanvasMouseDown}
                     onCanvasDeselect={deselectCanvas}
+                    onCanvasDoubleClick={(event) => {
+                        setContextMenu(null);
+                        setPendingConnectionCreate(null);
+                        setNodeCreatePosition(screenToCanvas(event.clientX, event.clientY));
+                    }}
                     onContextMenu={preventCanvasContextMenu}
                     onDrop={handleDrop}
                 >
@@ -2664,6 +2724,7 @@ function InfiniteCanvasPage() {
                             onConnectStart={handleConnectStart}
                             onResize={handleNodeResize}
                             onContentChange={handleNodeContentChange}
+                            onTitleChange={handleNodeTitleChange}
                             onToggleBatch={toggleBatchExpanded}
                             onSetBatchPrimary={setBatchPrimary}
                             onRetry={(node) => void handleRetryNode(node)}
@@ -2691,6 +2752,16 @@ function InfiniteCanvasPage() {
                         />
                     ) : null}
                     {pendingConnectionCreate ? <ConnectionCreateMenu pending={pendingConnectionCreate} onCreate={(type) => createConnectedNode(type, pendingConnectionCreate)} onClose={cancelPendingConnectionCreate} /> : null}
+                    {nodeCreatePosition ? (
+                        <NodeCreateMenu
+                            position={nodeCreatePosition}
+                            onCreate={(type) => {
+                                createNode(type, nodeCreatePosition);
+                                setNodeCreatePosition(null);
+                            }}
+                            onClose={() => setNodeCreatePosition(null)}
+                        />
+                    ) : null}
                 </InfiniteCanvas>
 
                 <CanvasNodeHoverToolbar
@@ -3208,11 +3279,18 @@ function getInputSummary(inputs: NodeGenerationInput[]) {
     };
 }
 
-function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | undefined, mode: CanvasNodeGenerationMode): AiConfig {
+function resolveGenerationModel(config: AiConfig, currentModel: string | undefined, mode: CanvasNodeGenerationMode) {
     const defaultModel = mode === "image" ? config.imageModel : mode === "video" ? config.videoModel : mode === "audio" ? config.audioModel : config.textModel;
+    const fallbackModel = mode === "image" ? defaultConfig.imageModel : mode === "video" ? defaultConfig.videoModel : mode === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
+    if (currentModel && modelMatchesCapability(currentModel, mode)) return currentModel;
+    if (defaultModel && modelMatchesCapability(defaultModel, mode)) return defaultModel;
+    return fallbackModel || defaultModel || currentModel || config.model || defaultConfig.model;
+}
+
+function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | undefined, mode: CanvasNodeGenerationMode): AiConfig {
     const merged = {
         ...config,
-        model: node?.metadata?.model || defaultModel || (mode === "audio" ? defaultConfig.audioModel : config.model || defaultConfig.model),
+        model: resolveGenerationModel(config, node?.metadata?.model, mode),
         quality: node?.metadata?.quality || config.quality || defaultConfig.quality,
         size: node?.metadata?.size || config.size || defaultConfig.size,
         videoSeconds: node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds,

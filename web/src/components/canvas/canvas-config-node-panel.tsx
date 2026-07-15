@@ -4,7 +4,7 @@ import { Button, Segmented } from "antd";
 
 import { ModelPicker } from "@/components/model-picker";
 import { AGNES_VIDEO_SIZE, agnesVideoModeHint, agnesVideoTextOnlyError, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
-import { defaultConfig, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, modelMatchesCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { CreditSymbol, requestCreditCost } from "@/constant/credits";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -46,7 +46,13 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                         size="small"
                         className="canvas-config-mode !rounded-md !p-0.5"
                         value={mode}
-                        onChange={(value) => onConfigChange(node.id, { generationMode: value as CanvasGenerationMode })}
+                        onChange={(value) => {
+                            const nextMode = value as CanvasGenerationMode;
+                            onConfigChange(node.id, {
+                                generationMode: nextMode,
+                                model: resolveModeModel(globalConfig, node.metadata?.model, nextMode),
+                            });
+                        }}
                         options={[
                             {
                                 value: "image",
@@ -156,11 +162,18 @@ function InputChip({ label, value, style }: { label: string; value: string; styl
     );
 }
 
-function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: CanvasGenerationMode): AiConfig {
+function resolveModeModel(globalConfig: AiConfig, currentModel: string | undefined, mode: CanvasGenerationMode) {
     const defaultModel = mode === "image" ? globalConfig.imageModel : mode === "video" ? globalConfig.videoModel : mode === "audio" ? globalConfig.audioModel : globalConfig.textModel;
+    const fallbackModel = mode === "image" ? defaultConfig.imageModel : mode === "video" ? defaultConfig.videoModel : mode === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
+    if (currentModel && modelMatchesCapability(currentModel, mode)) return currentModel;
+    if (defaultModel && modelMatchesCapability(defaultModel, mode)) return defaultModel;
+    return fallbackModel || defaultModel || currentModel || globalConfig.model || defaultConfig.model;
+}
+
+function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: CanvasGenerationMode): AiConfig {
     return {
         ...globalConfig,
-        model: node.metadata?.model || defaultModel || (mode === "audio" ? defaultConfig.audioModel : globalConfig.model || defaultConfig.model),
+        model: resolveModeModel(globalConfig, node.metadata?.model, mode),
         quality: node.metadata?.quality || globalConfig.quality || defaultConfig.quality,
         size: node.metadata?.size || globalConfig.size || defaultConfig.size,
         videoSeconds: node.metadata?.seconds || globalConfig.videoSeconds || defaultConfig.videoSeconds,
