@@ -1,7 +1,7 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImageIcon, LoaderCircle, Music2, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon, WandSparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Tag, Typography } from "antd";
+import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Segmented, Tag, Typography } from "antd";
 import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { saveAs } from "file-saver";
@@ -19,7 +19,11 @@ import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceRefe
 import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
+import { CloudHistoryPanel } from "@/components/cloud-history-panel";
+import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyncStatus } from "@/lib/cloud-sync";
+import { saveVideoToCloud } from "@/services/cloud-history";
 import { useAssetStore } from "@/stores/use-asset-store";
+import { useAuthStore } from "@/stores/use-auth-store";
 import { isAiProxyBaseUrl, modelOptionLabel, modelOptionName, resolveModelChannel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ReferenceImage } from "@/types/image";
@@ -62,6 +66,9 @@ type GenerationLog = {
     task?: VideoGenerationTask;
     video?: GeneratedVideo;
     error?: string;
+    cloudSync?: CloudSyncStatus;
+    cloudJobIds?: string[];
+    cloudError?: string;
 };
 
 type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "baseUrl" | "apiFormat"> & { channelId?: string; channelName?: string };
@@ -81,6 +88,7 @@ export default function VideoPage() {
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const addAsset = useAssetStore((state) => state.addAsset);
+    const cloudUser = useAuthStore((state) => state.user);
     const [prompt, setPrompt] = useState("");
     const [references, setReferences] = useState<ReferenceImage[]>([]);
     const [videoReferences, setVideoReferences] = useState<ReferenceVideo[]>([]);
@@ -98,6 +106,8 @@ export default function VideoPage() {
     const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
     const [previewLog, setPreviewLog] = useState<GenerationLog | null>(null);
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+    const [historySource, setHistorySource] = useState<"local" | "cloud">("local");
+    const [cloudRefreshKey, setCloudRefreshKey] = useState(0);
 
     const model = effectiveConfig.videoModel || effectiveConfig.model;
     const textModel = effectiveConfig.textModel || effectiveConfig.model;
@@ -386,8 +396,31 @@ export default function VideoPage() {
                         mimeType: stored.mimeType,
                     };
                     setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
-                    await saveLog({ ...log, status: "成功", durationMs: nextVideo.durationMs, video: nextVideo, error: undefined });
+                    const loggedIn = Boolean(useAuthStore.getState().user);
+                    const successLog: GenerationLog = {
+                        ...log,
+                        status: "成功",
+                        durationMs: nextVideo.durationMs,
+                        video: nextVideo,
+                        error: undefined,
+                        cloudSync: loggedIn ? "pending" : "skipped",
+                        cloudError: undefined,
+                    };
+                    await saveLog(successLog);
+                    setLogs((value) => value.map((item) => (item.id === successLog.id ? successLog : item)));
                     message.success(stored.storageKey ? "视频已生成" : "视频已生成（经代理预览）");
+                    if (loggedIn) {
+                        void syncVideoLogToCloud(successLog).then(async (next) => {
+                            await saveLog(next);
+                            setLogs((value) => value.map((item) => (item.id === next.id ? next : item)));
+                            if (next.cloudSync === "synced") {
+                                message.success("已同步到云端历史");
+                                setCloudRefreshKey((value) => value + 1);
+                            } else if (next.cloudSync === "failed") {
+                                message.warning("云端同步失败，可在本机记录中重试");
+                            }
+                        });
+                    }
                     return;
                 }
                 if (state.status === "failed") throw new Error(state.error);
@@ -406,6 +439,25 @@ export default function VideoPage() {
                 setStartedAt(0);
             }
         }
+    };
+
+    const retryCloudSync = (log: GenerationLog) => {
+        if (!cloudUser) {
+            message.warning("请先登录后再同步到云端");
+            return;
+        }
+        const pending = { ...log, cloudSync: "pending" as const, cloudError: undefined };
+        void saveLog(pending).then(() => setLogs((value) => value.map((item) => (item.id === pending.id ? pending : item))));
+        void syncVideoLogToCloud(pending).then(async (next) => {
+            await saveLog(next);
+            setLogs((value) => value.map((item) => (item.id === next.id ? next : item)));
+            if (next.cloudSync === "synced") {
+                message.success("已同步到云端历史");
+                setCloudRefreshKey((value) => value + 1);
+            } else if (next.cloudSync === "failed") {
+                message.error(next.cloudError || "云端同步失败");
+            }
+        });
     };
 
     const previewGenerationLog = (log: GenerationLog) => {
@@ -428,7 +480,7 @@ export default function VideoPage() {
         <div className="flex h-full flex-col overflow-hidden bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
             <main className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[300px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)]">
                 <aside className="thin-scrollbar hidden min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:block">
-                    <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} />
+                    <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} historySource={historySource} cloudEnabled={Boolean(cloudUser)} cloudRefreshKey={cloudRefreshKey} onHistorySourceChange={setHistorySource} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} onRetryCloud={retryCloudSync} />
                 </aside>
 
                 <section className="grid gap-3 lg:min-h-0 lg:overflow-hidden xl:grid-cols-[420px_minmax(0,1fr)]">
@@ -612,7 +664,7 @@ export default function VideoPage() {
                 }}
             />
             <Drawer title="生成记录" placement="bottom" size="large" open={logsOpen} onClose={() => setLogsOpen(false)}>
-                <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} />
+                <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} historySource={historySource} cloudEnabled={Boolean(cloudUser)} cloudRefreshKey={cloudRefreshKey} onHistorySourceChange={setHistorySource} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} onRetryCloud={retryCloudSync} />
             </Drawer>
             <Drawer title="参数" placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
@@ -725,52 +777,96 @@ function LogPanel({
     logs,
     selectedLogIds,
     activeLogId,
+    historySource = "local",
+    cloudEnabled = false,
+    cloudRefreshKey = 0,
+    onHistorySourceChange,
     onSelectedLogIdsChange,
     onCreateSession,
     onDeleteSelected,
     onPreviewLog,
+    onRetryCloud,
 }: {
     logs: GenerationLog[];
     selectedLogIds: string[];
     activeLogId?: string;
+    historySource?: "local" | "cloud";
+    cloudEnabled?: boolean;
+    cloudRefreshKey?: number;
+    onHistorySourceChange?: (value: "local" | "cloud") => void;
     onSelectedLogIdsChange: (ids: string[]) => void;
     onCreateSession: () => void;
     onDeleteSelected: () => void;
     onPreviewLog: (log: GenerationLog) => void;
+    onRetryCloud?: (log: GenerationLog) => void;
 }) {
     const allSelected = Boolean(logs.length) && selectedLogIds.length === logs.length;
     const toggleAll = () => onSelectedLogIdsChange(allSelected ? [] : logs.map((log) => log.id));
+    const showCloud = historySource === "cloud";
 
     return (
         <>
             <div className="mb-3 flex items-center justify-between gap-3">
                 <h2 className="text-base font-semibold">生成记录</h2>
-                <Tag className="m-0">{logs.length}</Tag>
+                <Tag className="m-0">{showCloud ? "云端" : logs.length}</Tag>
             </div>
-            <div className="mb-4 flex flex-wrap gap-2">
-                <Button size="small" icon={<Plus className="size-3.5" />} onClick={onCreateSession}>
-                    新建
-                </Button>
-                <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!logs.length} onClick={toggleAll}>
-                    {allSelected ? "取消" : "全选"}
-                </Button>
-                <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedLogIds.length} onClick={onDeleteSelected}>
-                    删除
-                </Button>
-            </div>
-            <div className="space-y-3">
-                {logs.map((log) => (
-                    <LogCard key={log.id} log={log} selected={selectedLogIds.includes(log.id)} active={activeLogId === log.id} onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))} onClick={() => onPreviewLog(log)} />
-                ))}
-                {!logs.length ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">暂无生成记录</div> : null}
-            </div>
+            {onHistorySourceChange ? (
+                <div className="mb-3">
+                    <Segmented
+                        block
+                        size="small"
+                        value={historySource}
+                        onChange={(value) => onHistorySourceChange(value as "local" | "cloud")}
+                        options={[
+                            { label: "本机", value: "local" },
+                            { label: "云端", value: "cloud", disabled: !cloudEnabled },
+                        ]}
+                    />
+                    {!cloudEnabled ? <div className="mt-1.5 text-[11px] text-stone-400">登录后可查看云端历史</div> : null}
+                </div>
+            ) : null}
+            {showCloud ? (
+                <CloudHistoryPanel type="video" refreshKey={cloudRefreshKey} />
+            ) : (
+                <>
+                    <div className="mb-4 flex flex-wrap gap-2">
+                        <Button size="small" icon={<Plus className="size-3.5" />} onClick={onCreateSession}>
+                            新建
+                        </Button>
+                        <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!logs.length} onClick={toggleAll}>
+                            {allSelected ? "取消" : "全选"}
+                        </Button>
+                        <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedLogIds.length} onClick={onDeleteSelected}>
+                            删除
+                        </Button>
+                    </div>
+                    <div className="space-y-3">
+                        {logs.map((log) => (
+                            <LogCard key={log.id} log={log} selected={selectedLogIds.includes(log.id)} active={activeLogId === log.id} onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))} onClick={() => onPreviewLog(log)} onRetryCloud={onRetryCloud} />
+                        ))}
+                        {!logs.length ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">暂无生成记录</div> : null}
+                    </div>
+                </>
+            )}
         </>
     );
 }
 
-function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: GenerationLog; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void }) {
+function LogCard({ log, selected, active, onSelectedChange, onClick, onRetryCloud }: { log: GenerationLog; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void; onRetryCloud?: (log: GenerationLog) => void }) {
+    const syncLabel = cloudSyncLabel(log.cloudSync);
     return (
-        <button type="button" className={`block w-full rounded-lg border p-2 text-left transition ${active ? "border-stone-900 bg-blue-50 dark:border-stone-100 dark:bg-blue-950/20" : "border-stone-200 bg-background hover:bg-stone-50 dark:border-stone-800 dark:hover:bg-stone-900"}`} onClick={onClick}>
+        <div
+            role="button"
+            tabIndex={0}
+            className={`block w-full cursor-pointer rounded-lg border p-2 text-left transition ${active ? "border-stone-900 bg-blue-50 dark:border-stone-100 dark:bg-blue-950/20" : "border-stone-200 bg-background hover:bg-stone-50 dark:border-stone-800 dark:hover:bg-stone-900"}`}
+            onClick={onClick}
+            onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onClick();
+                }
+            }}
+        >
             <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2">
                 <Checkbox className="mt-0.5" checked={selected} onClick={(event) => event.stopPropagation()} onChange={(event) => onSelectedChange(event.target.checked)} />
                 <div className="min-w-0">
@@ -779,7 +875,19 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
                         <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none">{log.size}</Tag>
                         <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none">{log.resolution}p</Tag>
                         <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none">{log.seconds}s</Tag>
+                        {syncLabel ? (
+                            <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color={cloudSyncColor(log.cloudSync)}>
+                                {syncLabel}
+                            </Tag>
+                        ) : null}
                     </div>
+                    {log.cloudSync === "failed" && onRetryCloud ? (
+                        <div className="mt-2" onClick={(event) => event.stopPropagation()}>
+                            <Button size="small" onClick={() => onRetryCloud(log)}>
+                                重试上云
+                            </Button>
+                        </div>
+                    ) : null}
                 </div>
                 <div className="grid justify-items-end gap-2">
                     <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color={log.status === "成功" ? "blue" : log.status === "生成中" ? "processing" : "red"}>
@@ -790,7 +898,7 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
                     </Tag>
                 </div>
             </div>
-        </button>
+        </div>
     );
 }
 
@@ -847,6 +955,9 @@ async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog>
         task: log.task,
         video,
         error: log.error,
+        cloudSync: normalizeCloudSyncStatus(log.cloudSync),
+        cloudJobIds: Array.isArray(log.cloudJobIds) ? log.cloudJobIds.filter((id): id is string => typeof id === "string") : undefined,
+        cloudError: typeof log.cloudError === "string" ? log.cloudError : undefined,
     };
 }
 
@@ -916,6 +1027,30 @@ function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
         channelId: log.config?.channelId,
         channelName: log.config?.channelName,
     };
+}
+
+
+async function syncVideoLogToCloud(log: GenerationLog): Promise<GenerationLog> {
+    if (!useAuthStore.getState().user) {
+        return { ...log, cloudSync: "failed", cloudError: "未登录" };
+    }
+    if (!log.video?.url) {
+        return { ...log, cloudSync: "failed", cloudError: "没有可上传的视频" };
+    }
+    const saved = await saveVideoToCloud({
+        url: log.video.url,
+        storageKey: log.video.storageKey,
+        prompt: log.prompt,
+        model: log.model,
+        width: log.video.width,
+        height: log.video.height,
+        durationMs: log.video.durationMs,
+        clientLocalId: log.video.id || log.id,
+        provider: log.task?.provider,
+        params: { size: log.size, seconds: log.seconds, resolution: log.resolution, localLogId: log.id },
+    });
+    if (!saved) return { ...log, cloudSync: "failed", cloudError: "上传失败" };
+    return { ...log, cloudSync: "synced", cloudJobIds: [saved.id], cloudError: undefined };
 }
 
 function buildLog({ prompt, model, config, references, videoReferences, audioReferences, durationMs, status, task, video, error }: { prompt: string; model: string; config: AiConfig; references: ReferenceImage[]; videoReferences: ReferenceVideo[]; audioReferences: ReferenceAudio[]; durationMs: number; status: GenerationLog["status"]; task?: VideoGenerationTask; video?: GeneratedVideo; error?: string }): GenerationLog {

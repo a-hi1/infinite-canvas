@@ -22,8 +22,13 @@ export default defineConfig({
         __APP_RELEASES__: JSON.stringify(parseChangelog(localChangelog)),
     },
     server: {
-        // 本地 dev 时把 /ai-proxy 转到 Docker 的 3001（nginx 再转 ai-proxy），用于远程视频同源下载/预览
+        // 本地 dev：/api 直连宿主机 8080 上的 api 容器，避免 3001 被 VS Code 等占用导致 405
+        // /ai-proxy 仍走 Docker app(nginx) 的 3001；若 3001 异常可改用 http://127.0.0.1:8080 仅测账号
         proxy: {
+            "/api": {
+                target: "http://127.0.0.1:8080",
+                changeOrigin: true,
+            },
             "/ai-proxy": {
                 target: "http://127.0.0.1:3001",
                 changeOrigin: true,

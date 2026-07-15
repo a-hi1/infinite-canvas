@@ -4,6 +4,7 @@ node_modules/
 .env*
 !.env.example
 !.env.proxy.example
+!.env.api.example
 data/
 *.log
 *.tsbuildinfo

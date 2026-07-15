@@ -6,7 +6,7 @@
 
 `infinite-canvas` 是一个面向图片与视觉创作流程的开源 AI 工作台。核心应用是浏览器端 Vite + React 静态前端，提供无限画布、AI 图片/视频/音频生成、提示词库、素材库、画布助手、本地 Canvas Agent 与 Codex 插件集成。
 
-当前项目更适合个人、本地或自部署使用，不是完整 SaaS 平台。默认没有项目自带的账号系统或服务端数据库；自部署时可选启用 `ai-proxy` 隐藏共享上游 API Key。
+当前项目更适合个人、本地或自部署使用，不是完整 SaaS 平台。**默认仍是本地模式**（无强制登录）；可选启用云端账号，将生成结果历史上云。自部署时还可启用 `ai-proxy` 隐藏共享上游 API Key。
 
 ## 仓库组成
 
@@ -16,8 +16,9 @@
 | `docs/` | 文档站，Next.js + Fumadocs + MDX。 |
 | `canvas-agent/` | 本地 Canvas Agent，Node.js + Express + MCP SDK，用于连接浏览器画布与 Codex / Claude Code。 |
 | `plugins/infinite-canvas/` | Codex app 插件，封装 MCP 配置和画布操作 Skill。 |
-| `Dockerfile`、`nginx.conf` | 主 Web 应用 Docker 构建与 Nginx 静态托管配置，并同源转发 `/ai-proxy/`。 |
-| `docker-compose.local.yml` | 本地源码构建部署用 compose，目前端口映射为 `3001:3000`，并包含可选 `ai-proxy` 服务。 |
+| `api/` | 可选云端业务 API（注册登录、生成历史上云、鉴权读文件），Node 22，数据默认 `./data/api`。 |
+| `Dockerfile`、`nginx.conf` | 主 Web 应用 Docker 构建与 Nginx 静态托管配置，同源转发 `/api/` 与 `/ai-proxy/`。 |
+| `docker-compose.local.yml` | 本地源码构建部署用 compose，端口 `3001:3000`，包含 `app`、`api`、`ai-proxy`。 |
 | `ai-proxy/` | Node 22 HTTP AI 安全代理，用服务器 `.env.proxy` 注入真实上游 Key。 |
 
 ## 主应用架构
@@ -29,10 +30,15 @@
 - 画布组件：`web/src/components/canvas/`。
 - 画布状态：`web/src/stores/canvas/`。
 - 全局配置状态：`web/src/stores/use-config-store.ts`。
+- 可选登录态：`web/src/stores/use-auth-store.ts`；云端 API：`web/src/services/cloud-api.ts`、`web/src/services/cloud-history.ts`。
 - AI API 请求：`web/src/services/api/`。
 - 本地图片/文件存储：`web/src/services/image-storage.ts`、`web/src/services/file-storage.ts`。
 
-主应用默认仍可由浏览器前端直接请求用户配置的 AI Base URL。AI API Key、Base URL、画布项目、素材和生成记录默认保存在浏览器本地。自部署公网共享同一个 Key 时，应优先配置同源 `/ai-proxy`：真实上游 Key 放服务器 `.env.proxy`，前端只保存代理访问令牌或留空。
+主应用默认仍可由浏览器前端直接请求用户配置的 AI Base URL。AI API Key、Base URL、画布项目、素材和生成记录默认保存在浏览器本地。
+
+可选云端模式（`api` 服务）：用户注册登录后，图片/视频工作台在**本地生成成功之后**异步把结果上传到服务器（`POST /api/jobs/image|video`），文件按用户隔离存储，经 `GET /api/files/:id` 鉴权访问。工作台历史侧栏支持「本机 / 云端」切换查看云端列表（预览/下载/删除）。本机记录带 `cloudSync` 状态（pending/synced/failed/skipped），失败可在本机列表重试上云，且不得把本地生成成功改成失败。上云优先本地 blob/`storageKey`；若结果只是 `imgen.x.ai`/`vidgen.x.ai` 等远程 URL（浏览器 CORS 无法 fetch），走 `POST /api/jobs/{type}/from-url` 由服务端白名单拉取后落盘。上传幂等：同一用户 + 同一 `client_local_id` 重复提交返回已有任务（`deduped: true`），为后续计费防双扣预留。未登录时行为与原先一致；云 API 不可用时不得阻断本地功能。本地开发时 Vite 将 `/api` 代理到 `http://127.0.0.1:8080`。云端配置示例见 `.env.api.example`（邀请码 `API_INVITE_CODE`、Cookie Secure、来源白名单等）。
+
+自部署公网共享同一个 Key 时，应优先配置同源 `/ai-proxy`：真实上游 Key 放服务器 `.env.proxy`，前端只保存代理访问令牌或留空。
 
 默认渠道预填为中转站 `https://www.codex2api.com`（名称“默认中转站”），API Key 不写死，由用户自行填写；同时仍支持新增自定义渠道和“服务器 AI 代理”渠道。不要把真实中转站 Key 写进源码或默认配置。
 

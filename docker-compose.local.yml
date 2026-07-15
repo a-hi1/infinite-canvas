@@ -6,6 +6,25 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3001:3000"
+    depends_on:
+      - api
+      - ai-proxy
+    restart: unless-stopped
+
+  api:
+    image: infinite-canvas-api:local
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      PORT: "8080"
+      DATA_DIR: /data
+      API_ALLOWED_ORIGINS: ${API_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001}
+    volumes:
+      - ./data/api:/data
+    ports:
+      # 单独暴露 API，避免本机 3001 被其他进程（如 VS Code 端口转发）抢占导致 /api 405
+      - "8080:8080"
     restart: unless-stopped
 
   ai-proxy:

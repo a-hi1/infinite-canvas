@@ -1,7 +1,7 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, WandSparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Tag, Tooltip, Typography } from "antd";
+import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Segmented, Tag, Tooltip, Typography } from "antd";
 import localforage from "localforage";
 import { saveAs } from "file-saver";
 
@@ -17,8 +17,12 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { requestEdit, requestGeneration } from "@/services/api/image";
+import { CloudHistoryPanel } from "@/components/cloud-history-panel";
+import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyncStatus } from "@/lib/cloud-sync";
+import { saveImageToCloud } from "@/services/cloud-history";
 import { deleteStoredImages, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
+import { useAuthStore } from "@/stores/use-auth-store";
 import type { ReferenceImage } from "@/types/image";
 
 type GeneratedImage = {
@@ -57,6 +61,9 @@ type GenerationLog = {
     status: "成功" | "失败";
     images: GeneratedImage[];
     thumbnails: string[];
+    cloudSync?: CloudSyncStatus;
+    cloudJobIds?: string[];
+    cloudError?: string;
 };
 
 type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "size" | "count">;
@@ -77,6 +84,7 @@ export default function ImagePage() {
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const addAsset = useAssetStore((state) => state.addAsset);
+    const cloudUser = useAuthStore((state) => state.user);
     const [prompt, setPrompt] = useState("");
     const [references, setReferences] = useState<ReferenceImage[]>([]);
     const [results, setResults] = useState<GenerationResult[]>([]);
@@ -92,6 +100,8 @@ export default function ImagePage() {
     const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
     const [previewLog, setPreviewLog] = useState<GenerationLog | null>(null);
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+    const [historySource, setHistorySource] = useState<"local" | "cloud">("local");
+    const [cloudRefreshKey, setCloudRefreshKey] = useState(0);
 
     const model = effectiveConfig.imageModel || effectiveConfig.model;
     const textModel = effectiveConfig.textModel || effectiveConfig.model;
@@ -227,20 +237,41 @@ export default function ImagePage() {
                     return { ...image, dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
                 }),
             );
-            saveLog(
-                buildLog({
-                    prompt: text,
-                    model,
-                    config: { ...snapshot.config, count: String(generationCount) },
-                    references: snapshot.references,
-                    durationMs: performance.now() - batchStartedAt,
-                    successCount,
-                    failCount,
-                    status: successCount ? "成功" : "失败",
-                    images: logImages,
-                }),
-            );
-            successCount ? message.success("图片已生成") : message.error(batchResult.firstError || "生成失败");
+            const log = buildLog({
+                prompt: text,
+                model,
+                config: { ...snapshot.config, count: String(generationCount) },
+                references: snapshot.references,
+                durationMs: performance.now() - batchStartedAt,
+                successCount,
+                failCount,
+                status: successCount ? "成功" : "失败",
+                images: logImages,
+            });
+            const loggedIn = Boolean(useAuthStore.getState().user);
+            const logWithSync: GenerationLog = { ...log, cloudSync: successCount ? (loggedIn ? "pending" : "skipped") : undefined };
+            saveLog(logWithSync);
+            setLogs((value) => {
+                const exists = value.some((item) => item.id === logWithSync.id);
+                return exists ? value.map((item) => (item.id === logWithSync.id ? logWithSync : item)) : [logWithSync, ...value];
+            });
+            if (successCount) {
+                message.success("图片已生成");
+                if (loggedIn) {
+                    void syncImageLogToCloud(logWithSync).then((next) => {
+                        saveLog(next);
+                        setLogs((value) => value.map((item) => (item.id === next.id ? next : item)));
+                        if (next.cloudSync === "synced") {
+                            message.success("已同步到云端历史");
+                            setCloudRefreshKey((value) => value + 1);
+                        } else if (next.cloudSync === "failed") {
+                            message.warning("云端同步失败，可在本机记录中重试");
+                        }
+                    });
+                }
+            } else {
+                message.error(batchResult.firstError || "生成失败");
+            }
         } finally {
             setRunning(false);
         }
@@ -316,6 +347,7 @@ export default function ImagePage() {
 
     const saveResultToAssets = async (image: GeneratedImage, index: number) => {
         try {
+            // 1) 已有本地副本：直接进本机素材，与是否上云无关
             if (image.storageKey) {
                 const localUrl = await resolveImageUrl(image.storageKey, image.dataUrl);
                 addAsset({
@@ -334,13 +366,14 @@ export default function ImagePage() {
                     },
                     metadata: { source: "image-page", prompt },
                 });
-                message.success("已加入我的素材");
+                message.success("已加入我的素材（本机）");
                 return;
             }
 
+            // 2) 远程 imgen 等：uploadImage 会尝试 CORS → ai-proxy → 登录后服务端拉取
             const stored = await uploadImage(image.dataUrl);
             if (!stored.storageKey && stored.remote) {
-                message.error("这张生成图无法本地保存（远程临时地址不可读）。请先下载再导入素材");
+                message.error("这张生成图还不能进素材：远程临时地址浏览器读不到。请先登录后重试（服务端可代拉），或下载后本地导入");
                 return;
             }
             addAsset({
@@ -352,7 +385,7 @@ export default function ImagePage() {
                 data: { dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType },
                 metadata: { source: "image-page", prompt },
             });
-            message.success("已加入我的素材");
+            message.success("已加入我的素材（本机）");
         } catch (error) {
             message.error(error instanceof Error ? error.message : "加入素材失败");
         }
@@ -519,6 +552,26 @@ export default function ImagePage() {
         }
     };
 
+    const retryCloudSync = (log: GenerationLog) => {
+        if (!cloudUser) {
+            message.warning("请先登录后再同步到云端");
+            return;
+        }
+        const pending = { ...log, cloudSync: "pending" as const, cloudError: undefined };
+        saveLog(pending);
+        setLogs((value) => value.map((item) => (item.id === pending.id ? pending : item)));
+        void syncImageLogToCloud(pending).then((next) => {
+            saveLog(next);
+            setLogs((value) => value.map((item) => (item.id === next.id ? next : item)));
+            if (next.cloudSync === "synced") {
+                message.success("已同步到云端历史");
+                setCloudRefreshKey((value) => value + 1);
+            } else if (next.cloudSync === "failed") {
+                message.error(next.cloudError || "云端同步失败");
+            }
+        });
+    };
+
     const retryResult = (index: number) => {
         const snapshot = buildRequestSnapshot();
         if (!snapshot) return;
@@ -535,10 +588,15 @@ export default function ImagePage() {
                         logs={logs}
                         selectedLogIds={selectedLogIds}
                         activeLogId={previewLog?.id}
+                        historySource={historySource}
+                        cloudEnabled={Boolean(cloudUser)}
+                        cloudRefreshKey={cloudRefreshKey}
+                        onHistorySourceChange={setHistorySource}
                         onSelectedLogIdsChange={setSelectedLogIds}
                         onCreateSession={createSession}
                         onDeleteSelected={() => setDeleteConfirmOpen(true)}
                         onPreviewLog={(log) => void previewGenerationLog(log)}
+                        onRetryCloud={retryCloudSync}
                     />
                 </aside>
 
@@ -688,10 +746,15 @@ export default function ImagePage() {
                     logs={logs}
                     selectedLogIds={selectedLogIds}
                     activeLogId={previewLog?.id}
+                    historySource={historySource}
+                    cloudEnabled={Boolean(cloudUser)}
+                    cloudRefreshKey={cloudRefreshKey}
+                    onHistorySourceChange={setHistorySource}
                     onSelectedLogIdsChange={setSelectedLogIds}
                     onCreateSession={createSession}
                     onDeleteSelected={() => setDeleteConfirmOpen(true)}
                     onPreviewLog={(log) => void previewGenerationLog(log)}
+                    onRetryCloud={retryCloudSync}
                 />
             </Drawer>
             <Drawer title="参数" placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
@@ -814,21 +877,32 @@ function LogPanel({
     logs,
     selectedLogIds,
     activeLogId,
+    historySource = "local",
+    cloudEnabled = false,
+    cloudRefreshKey = 0,
+    onHistorySourceChange,
     onSelectedLogIdsChange,
     onCreateSession,
     onDeleteSelected,
     onPreviewLog,
+    onRetryCloud,
 }: {
     logs: GenerationLog[];
     selectedLogIds: string[];
     activeLogId?: string;
+    historySource?: "local" | "cloud";
+    cloudEnabled?: boolean;
+    cloudRefreshKey?: number;
+    onHistorySourceChange?: (value: "local" | "cloud") => void;
     onSelectedLogIdsChange: (ids: string[]) => void;
     onCreateSession: () => void;
     onDeleteSelected: () => void;
     onPreviewLog: (log: GenerationLog) => void;
+    onRetryCloud?: (log: GenerationLog) => void;
 }) {
     const allSelected = Boolean(logs.length) && selectedLogIds.length === logs.length;
     const toggleAll = () => onSelectedLogIdsChange(allSelected ? [] : logs.map((log) => log.id));
+    const showCloud = historySource === "cloud";
 
     return (
         <>
@@ -836,44 +910,74 @@ function LogPanel({
                 <div>
                     <h2 className="text-base font-semibold">生成记录</h2>
                 </div>
-                <Tag className="m-0">{logs.length}</Tag>
+                <Tag className="m-0">{showCloud ? "云端" : logs.length}</Tag>
             </div>
-            <div className="mb-4 flex flex-wrap gap-2">
-                <Button size="small" icon={<Plus className="size-3.5" />} onClick={onCreateSession}>
-                    新建
-                </Button>
-                <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!logs.length} onClick={toggleAll}>
-                    {allSelected ? "取消" : "全选"}
-                </Button>
-                <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedLogIds.length} onClick={onDeleteSelected}>
-                    删除
-                </Button>
-            </div>
-            <div className="space-y-3">
-                {logs.map((log) => (
-                    <LogCard
-                        key={log.id}
-                        log={log}
-                        selected={selectedLogIds.includes(log.id)}
-                        active={activeLogId === log.id}
-                        onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))}
-                        onClick={() => onPreviewLog(log)}
+            {onHistorySourceChange ? (
+                <div className="mb-3">
+                    <Segmented
+                        block
+                        size="small"
+                        value={historySource}
+                        onChange={(value) => onHistorySourceChange(value as "local" | "cloud")}
+                        options={[
+                            { label: "本机", value: "local" },
+                            { label: "云端", value: "cloud", disabled: !cloudEnabled },
+                        ]}
                     />
-                ))}
-                {!logs.length ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">暂无生成记录</div> : null}
-            </div>
+                    {!cloudEnabled ? <div className="mt-1.5 text-[11px] text-stone-400">登录后可查看云端历史</div> : null}
+                </div>
+            ) : null}
+            {showCloud ? (
+                <CloudHistoryPanel type="image" refreshKey={cloudRefreshKey} />
+            ) : (
+                <>
+                    <div className="mb-4 flex flex-wrap gap-2">
+                        <Button size="small" icon={<Plus className="size-3.5" />} onClick={onCreateSession}>
+                            新建
+                        </Button>
+                        <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!logs.length} onClick={toggleAll}>
+                            {allSelected ? "取消" : "全选"}
+                        </Button>
+                        <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedLogIds.length} onClick={onDeleteSelected}>
+                            删除
+                        </Button>
+                    </div>
+                    <div className="space-y-3">
+                        {logs.map((log) => (
+                            <LogCard
+                                key={log.id}
+                                log={log}
+                                selected={selectedLogIds.includes(log.id)}
+                                active={activeLogId === log.id}
+                                onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))}
+                                onClick={() => onPreviewLog(log)}
+                                onRetryCloud={onRetryCloud}
+                            />
+                        ))}
+                        {!logs.length ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">暂无生成记录</div> : null}
+                    </div>
+                </>
+            )}
         </>
     );
 }
 
-function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: GenerationLog; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void }) {
+function LogCard({ log, selected, active, onSelectedChange, onClick, onRetryCloud }: { log: GenerationLog; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void; onRetryCloud?: (log: GenerationLog) => void }) {
     const thumbnails = (log.thumbnails || []).filter(Boolean).slice(0, 4);
+    const syncLabel = cloudSyncLabel(log.cloudSync);
 
     return (
-        <button
-            type="button"
-            className={`block w-full rounded-lg border p-2 text-left transition ${active ? "border-stone-900 bg-blue-50 dark:border-stone-100 dark:bg-blue-950/20" : "border-stone-200 bg-background hover:bg-stone-50 dark:border-stone-800 dark:hover:bg-stone-900"}`}
+        <div
+            role="button"
+            tabIndex={0}
+            className={`block w-full cursor-pointer rounded-lg border p-2 text-left transition ${active ? "border-stone-900 bg-blue-50 dark:border-stone-100 dark:bg-blue-950/20" : "border-stone-200 bg-background hover:bg-stone-50 dark:border-stone-800 dark:hover:bg-stone-900"}`}
             onClick={onClick}
+            onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onClick();
+                }
+            }}
         >
             <div className="grid grid-cols-[minmax(128px,1fr)_auto] gap-2">
                 <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-2">
@@ -885,6 +989,13 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
                                 {thumbnails.map((image, index) => (
                                     <img key={`${log.id}-${index}`} src={image} alt="" className="size-8 shrink-0 rounded-md object-cover" />
                                 ))}
+                            </div>
+                        ) : null}
+                        {log.cloudSync === "failed" && onRetryCloud ? (
+                            <div className="mt-2" onClick={(event) => event.stopPropagation()}>
+                                <Button size="small" onClick={() => onRetryCloud(log)}>
+                                    重试上云
+                                </Button>
                             </div>
                         ) : null}
                     </div>
@@ -905,13 +1016,18 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
                         <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color="green">
                             {formatDuration(log.durationMs)}
                         </Tag>
+                        {syncLabel ? (
+                            <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color={cloudSyncColor(log.cloudSync)}>
+                                {syncLabel}
+                            </Tag>
+                        ) : null}
                     </div>
                     <div className="flex justify-end">
                         <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none">{log.time}</Tag>
                     </div>
                 </div>
             </div>
-        </button>
+        </div>
     );
 }
 
@@ -961,6 +1077,9 @@ async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog>
         status: log.status || "成功",
         images,
         thumbnails: images.map((image) => image.dataUrl).filter(Boolean),
+        cloudSync: normalizeCloudSyncStatus(log.cloudSync),
+        cloudJobIds: Array.isArray(log.cloudJobIds) ? log.cloudJobIds.filter((id): id is string => typeof id === "string") : undefined,
+        cloudError: typeof log.cloudError === "string" ? log.cloudError : undefined,
     };
 }
 
@@ -999,6 +1118,33 @@ function ReferenceOrderButtons({ index, total, onMove }: { index: number; total:
             <Button size="small" className="!h-6 !w-6 !min-w-6 !rounded-full !bg-white/85 !p-0 !shadow-sm" icon={<ArrowRight className="size-3" />} disabled={index >= total - 1} onClick={() => onMove(1)} />
         </div>
     );
+}
+
+
+async function syncImageLogToCloud(log: GenerationLog): Promise<GenerationLog> {
+    if (!useAuthStore.getState().user) {
+        return { ...log, cloudSync: "failed", cloudError: "未登录" };
+    }
+    if (!log.images?.length) {
+        return { ...log, cloudSync: "failed", cloudError: "没有可上传的图片" };
+    }
+    const saved = await Promise.all(
+        log.images.map((image) =>
+            saveImageToCloud({
+                dataUrl: image.dataUrl,
+                storageKey: image.storageKey,
+                prompt: log.prompt,
+                model: log.model,
+                width: image.width,
+                height: image.height,
+                clientLocalId: image.id,
+                params: { count: log.imageCount, size: log.size, quality: log.quality, localLogId: log.id },
+            }),
+        ),
+    );
+    const jobIds = saved.filter(Boolean).map((job) => job!.id);
+    if (!jobIds.length) return { ...log, cloudSync: "failed", cloudError: "上传失败" };
+    return { ...log, cloudSync: "synced", cloudJobIds: jobIds, cloudError: undefined };
 }
 
 function buildLog({

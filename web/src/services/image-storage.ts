@@ -40,6 +40,23 @@ export async function uploadImage(input: string | Blob): Promise<UploadedImage> 
     return storeImageBlob(blob);
 }
 
+/** Hosts known to allow <img> display but block browser JS fetch (CORS). */
+function isBrowserFetchBlockedHost(url: string) {
+    try {
+        const host = new URL(url).hostname.toLowerCase();
+        return (
+            host === "imgen.x.ai" ||
+            host.endsWith(".imgen.x.ai") ||
+            host === "vidgen.x.ai" ||
+            host.endsWith(".vidgen.x.ai") ||
+            host === "cdn.x.ai" ||
+            host.endsWith(".cdn.x.ai")
+        );
+    } catch {
+        return /imgen\.x\.ai|vidgen\.x\.ai|cdn\.x\.ai/i.test(url);
+    }
+}
+
 export async function resolveImageUrl(storageKey?: string, fallback = "") {
     if (!storageKey) return fallback;
     const cached = objectUrls.get(storageKey);
@@ -116,23 +133,72 @@ async function fetchImageBlob(input: string) {
         return (await fetch(input)).blob();
     }
 
-    try {
-        return await readBlobResponse(await fetch(input), "下载远程图片失败");
-    } catch (error) {
-        const proxyUrls = mediaProxyCandidates(input);
-        if (!proxyUrls.length) {
-            throw new Error(formatRemoteImageError(error, "远程图片下载失败（可能被 CORS 拦截）"));
+    // imgen/vidgen: skip direct browser fetch (always CORS noise + fails). Try same-origin helpers only.
+    let lastError: unknown = new Error("远程图需要同源代理或服务端代拉");
+    if (!isBrowserFetchBlockedHost(input)) {
+        try {
+            return await readBlobResponse(await fetch(input), "下载远程图片失败");
+        } catch (error) {
+            lastError = error;
         }
-        let lastError = error;
-        for (const proxyUrl of proxyUrls) {
-            try {
-                return await readBlobResponse(await fetch(proxyUrl), "通过媒体代理下载远程图片失败");
-            } catch (proxyError) {
-                lastError = proxyError;
-            }
-        }
-        throw new Error(formatRemoteImageError(lastError, "远程图片下载失败（可能被 CORS 拦截，或服务器无法访问该图片地址）"));
     }
+
+    // 1) optional ai-proxy media (only when current image channel is /ai-proxy)
+    const proxyUrls = mediaProxyCandidates(input);
+    for (const proxyUrl of proxyUrls) {
+        try {
+            return await readBlobResponse(await fetch(proxyUrl), "通过媒体代理下载远程图片失败");
+        } catch (proxyError) {
+            lastError = proxyError;
+        }
+    }
+    // 2) if logged into cloud API, try server allowlisted fetch.
+    // Note: many local Docker hosts cannot reach imgen.x.ai at all; then this still fails with a clear message.
+    try {
+        return await fetchRemoteImageViaCloudApi(input);
+    } catch (cloudError) {
+        lastError = cloudError;
+    }
+    const detail = lastError instanceof Error ? lastError.message : "";
+    throw new Error(
+        detail.includes("服务器无法连接") || detail.includes("网络不通") || detail.includes("出网")
+            ? `${detail}。也可：浏览器另开图片链接 → 另存为 → 素材页本地导入`
+            : formatRemoteImageError(lastError, "远程图片下载失败（imgen 禁止浏览器直读；请登录后由服务端代拉，或下载后本地导入）"),
+    );
+}
+
+/** Login-session server pull: POST /api/jobs/image/from-url then GET file blob. */
+async function fetchRemoteImageViaCloudApi(remoteUrl: string) {
+    const create = await fetch("/api/jobs/image/from-url", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            url: remoteUrl,
+            client_local_id: `asset-import:${hashShort(remoteUrl)}`,
+            prompt: "",
+            model: "",
+            params: { purpose: "local_asset_import" },
+        }),
+    });
+    const payload = (await create.json().catch(() => null)) as {
+        code?: number;
+        msg?: string;
+        data?: { file?: { url?: string; id?: string } | null; result_file_id?: string | null };
+    } | null;
+    if (!create.ok || !payload || payload.code !== 0) {
+        throw new Error(payload?.msg || `服务端拉取远程图失败（${create.status}）`);
+    }
+    const fileUrl = payload.data?.file?.url || (payload.data?.result_file_id ? `/api/files/${payload.data.result_file_id}` : "");
+    if (!fileUrl) throw new Error("服务端未返回文件");
+    const absolute = fileUrl.startsWith("http") ? fileUrl : fileUrl.startsWith("/api/") ? fileUrl : `/api${fileUrl.startsWith("/") ? fileUrl : `/${fileUrl}`}`;
+    return readBlobResponse(await fetch(absolute, { credentials: "include" }), "读取服务端落盘图片失败");
+}
+
+function hashShort(value: string) {
+    let h = 0;
+    for (let i = 0; i < value.length; i += 1) h = (Math.imul(31, h) + value.charCodeAt(i)) | 0;
+    return Math.abs(h).toString(36);
 }
 
 async function readBlobResponse(response: Response, fallback: string) {

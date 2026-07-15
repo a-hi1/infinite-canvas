@@ -9,3 +9,6 @@ description: 当前项目后续值得处理的事项
 
 - 本地 Agent 接入后续：按[本地 Agent 接入规划](/docs/progress/local-agent-integration-plan)把 Claude Code CLI Adapter 升级为 Claude Agent SDK Adapter，并完善工具队列体验。
 - AI 接口安全代理后续：已增加首版 `ai-proxy` 服务和前端代理渠道入口，后续继续完善多用户鉴权、额度控制、分渠道上游配置和更细粒度的接口白名单体验；公开多人使用前仍需补充更完整的用户体系。
+- 云端账号 P1：服务端代生成（`/api/generate/*`）+ 积分账本 + 支付；将 Grok/图视频渠道适配逐步下沉到服务端，平台 Key 不再依赖浏览器。
+- 云端账号 P1：服务端代生成（`/api/generate/*`）+ 积分账本 + 支付；扣费必须复用 `client_local_id` / 任务幂等键，避免与上传去重语义冲突。
+- 云端账号 P2：画布项目 / 素材库云同步；`api` 存储从 JSON 文件升级为 Postgres，文件后端抽象到 S3/MinIO。

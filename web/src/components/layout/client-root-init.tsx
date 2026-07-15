@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 import { App } from "antd";
 
 import { createModelChannel, useConfigStore } from "@/stores/use-config-store";
+import { useAuthStore } from "@/stores/use-auth-store";
 
 export function ClientRootInit({ children }: { children: ReactNode }) {
     const { message } = App.useApp();
@@ -10,6 +11,11 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const config = useConfigStore((state) => state.config);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
+    const hydrateAuth = useAuthStore((state) => state.hydrate);
+
+    useEffect(() => {
+        void hydrateAuth();
+    }, [hydrateAuth]);
 
     useEffect(() => {
         if (handledConfigParams.current) return;
