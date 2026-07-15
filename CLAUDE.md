@@ -83,10 +83,11 @@ docker compose -f docker-compose.local.yml up -d --build
 
 ```yaml
 ports:
-  - "3001:3000"
+  - "3001:3000"   # app
+# api 仅 expose 8080 到 compose 网络，不默认绑定宿主机 8080
 ```
 
-原因：服务器上已有其他成员服务占用 `3000`，不要抢占该端口。
+原因：服务器上已有其他成员服务占用 `3000`，不要抢占该端口；宿主机 `8080` 也可能被占用，api 经 Nginx `/api/` 同源访问即可。
 
 ### 服务器更新流程
 

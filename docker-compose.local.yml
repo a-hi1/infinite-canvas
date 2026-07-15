@@ -31,9 +31,13 @@ services:
       API_REMOTE_FETCH_TIMEOUT_MS: ${API_REMOTE_FETCH_TIMEOUT_MS:-}
     volumes:
       - ./data/api:/data
-    ports:
-      # 单独暴露 API，避免本机 3001 被其他进程（如 VS Code 端口转发）抢占导致 /api 405
-      - "8080:8080"
+    # 只在 compose 网络内提供 8080；浏览器经 app Nginx 同源 /api/ 访问。
+    # 不再默认映射宿主机 8080，避免与服务器其他服务抢端口导致 api 起不来。
+    # 本机排查如需直连 API，可临时取消下一行注释：
+    # ports:
+    #   - "8081:8080"
+    expose:
+      - "8080"
     restart: unless-stopped
 
   ai-proxy:

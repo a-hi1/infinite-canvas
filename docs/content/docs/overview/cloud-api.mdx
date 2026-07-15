@@ -48,7 +48,8 @@ sudo docker compose -f docker-compose.local.yml up -d --build
 ```
 
 - 站点：`http://服务器:3001`
-- API 另暴露：`8080`（便于本机排查；生产也可只走 nginx `/api/`）
+- API 默认**不**映射宿主机端口，只在 Docker 网络内 `api:8080`，由 Nginx 同源 `/api/` 转发（避免抢占服务器 8080）
+- 本机排查直连 API：可在 `docker-compose.local.yml` 临时打开 `8081:8080`
 
 ### 推荐环境变量
 
