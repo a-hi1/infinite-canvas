@@ -6,6 +6,7 @@ node_modules/
 !.env.proxy.example
 !.env.api.example
 data/
+backups/
 *.log
 *.tsbuildinfo
 .DS_Store

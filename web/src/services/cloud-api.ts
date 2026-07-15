@@ -7,6 +7,19 @@ export type CloudUser = {
     created_at?: string;
 };
 
+export type CloudUsage = {
+    used_bytes: number;
+    job_count: number;
+    image_job_count?: number;
+    video_job_count?: number;
+};
+
+export type CloudLimits = {
+    max_user_bytes: number;
+    max_image_bytes: number;
+    max_video_bytes: number;
+};
+
 export type CloudFile = {
     id: string;
     kind: string;
@@ -41,30 +54,61 @@ export type CloudJob = {
 
 type ApiEnvelope<T> = { code: number; data: T; msg: string };
 
+/** 带 HTTP 状态的云 API 错误，便于 401 清会话、413 展示容量不足 */
+export class CloudApiError extends Error {
+    status: number;
+    constructor(message: string, status = 500) {
+        super(message);
+        this.name = "CloudApiError";
+        this.status = status;
+    }
+}
+
+function notifyUnauthorized() {
+    // 松耦合：auth store 在 client-root 注册监听，避免 cloud-api ↔ store 循环依赖
+    if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("infinite-canvas:cloud-unauthorized"));
+    }
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers || {});
     if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
         headers.set("Content-Type", "application/json");
     }
-    const response = await fetch(`/api${path}`, {
-        ...init,
-        headers,
-        credentials: "include",
-    });
+    let response: Response;
+    try {
+        response = await fetch(`/api${path}`, {
+            ...init,
+            headers,
+            credentials: "include",
+        });
+    } catch {
+        throw new CloudApiError("无法连接云端服务", 0);
+    }
     let payload: ApiEnvelope<T> | null = null;
     try {
         payload = (await response.json()) as ApiEnvelope<T>;
     } catch {
         payload = null;
     }
+    if (response.status === 401) {
+        // /auth/me 未登录返回 200+user:null，这里 401 来自受保护接口
+        notifyUnauthorized();
+        throw new CloudApiError(payload?.msg || "请先登录", 401);
+    }
     if (!response.ok || !payload || payload.code !== 0) {
-        throw new Error(payload?.msg || `请求失败（${response.status}）`);
+        throw new CloudApiError(payload?.msg || `请求失败（${response.status}）`, response.status);
     }
     return payload.data;
 }
 
 export function getCloudMe() {
-    return request<{ user: CloudUser | null }>("/auth/me");
+    return request<{ user: CloudUser | null; usage?: CloudUsage | null; limits?: CloudLimits | null }>("/auth/me");
+}
+
+export function isCloudApiError(error: unknown): error is CloudApiError {
+    return error instanceof CloudApiError;
 }
 
 export function cloudRegister(input: { email: string; password: string; displayName?: string; inviteCode?: string }) {

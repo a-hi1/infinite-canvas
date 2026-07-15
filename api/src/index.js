@@ -224,7 +224,29 @@ function handleLogout(req, res) {
 
 function handleMe(req, res) {
     const { user } = getSessionUser(req);
-    json(res, 200, { user: publicUser(user) });
+    if (!user) {
+        json(res, 200, { user: null, usage: null, limits: publicLimits() });
+        return;
+    }
+    // usage 供前端账号区展示；limits 方便以后计费/套餐扩展而不改契约形态
+    json(res, 200, {
+        user: publicUser(user),
+        usage: {
+            used_bytes: db.countUserBytes(user.id),
+            job_count: db.countUserJobs(user.id),
+            image_job_count: db.countUserJobs(user.id, "image"),
+            video_job_count: db.countUserJobs(user.id, "video"),
+        },
+        limits: publicLimits(),
+    });
+}
+
+function publicLimits() {
+    return {
+        max_user_bytes: maxUserBytes,
+        max_image_bytes: maxImageBytes,
+        max_video_bytes: maxVideoBytes,
+    };
 }
 
 function issueSession(req, res, userId) {

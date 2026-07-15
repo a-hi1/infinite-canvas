@@ -16,6 +16,7 @@ export function CloudHistoryPanel({ type, refreshKey = 0 }: Props) {
     const { message, modal } = App.useApp();
     const user = useAuthStore((s) => s.user);
     const logout = useAuthStore((s) => s.logout);
+    const refreshUsage = useAuthStore((s) => s.refreshUsage);
     const [loading, setLoading] = useState(false);
     const [items, setItems] = useState<CloudJob[]>([]);
     const [total, setTotal] = useState(0);
@@ -60,6 +61,7 @@ export function CloudHistoryPanel({ type, refreshKey = 0 }: Props) {
                 await deleteCloudJob(job.id);
                 message.success("已删除云端记录");
                 await load();
+                void refreshUsage();
             },
         });
     };

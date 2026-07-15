@@ -19,7 +19,7 @@ import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "
 import { requestEdit, requestGeneration } from "@/services/api/image";
 import { CloudHistoryPanel } from "@/components/cloud-history-panel";
 import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyncStatus } from "@/lib/cloud-sync";
-import { saveImageToCloud } from "@/services/cloud-history";
+import { saveImageToCloudDetailed } from "@/services/cloud-history";
 import { deleteStoredImages, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useAuthStore } from "@/stores/use-auth-store";
@@ -264,10 +264,18 @@ export default function ImagePage() {
                         if (next.cloudSync === "synced") {
                             message.success("已同步到云端历史");
                             setCloudRefreshKey((value) => value + 1);
+                            void useAuthStore.getState().refreshUsage();
                         } else if (next.cloudSync === "failed") {
-                            message.warning("云端同步失败，可在本机记录中重试");
+                            const detail = next.cloudError || "";
+                            if (detail.includes("空间不足") || detail.includes("413")) {
+                                message.warning("云端空间不足，请删除部分云端历史后重试");
+                            } else {
+                                message.warning(detail ? `云端同步失败：${detail}` : "云端同步失败，可在本机记录中重试");
+                            }
                         }
                     });
+                } else {
+                    message.info("登录后可将结果同步到云端，跨设备回看", 2.5);
                 }
             } else {
                 message.error(batchResult.firstError || "生成失败");
@@ -1130,7 +1138,7 @@ async function syncImageLogToCloud(log: GenerationLog): Promise<GenerationLog> {
     }
     const saved = await Promise.all(
         log.images.map((image) =>
-            saveImageToCloud({
+            saveImageToCloudDetailed({
                 dataUrl: image.dataUrl,
                 storageKey: image.storageKey,
                 prompt: log.prompt,
@@ -1142,8 +1150,11 @@ async function syncImageLogToCloud(log: GenerationLog): Promise<GenerationLog> {
             }),
         ),
     );
-    const jobIds = saved.filter(Boolean).map((job) => job!.id);
-    if (!jobIds.length) return { ...log, cloudSync: "failed", cloudError: "上传失败" };
+    const jobIds = saved.map((item) => item.job?.id).filter(Boolean) as string[];
+    if (!jobIds.length) {
+        const firstError = saved.find((item) => item.error)?.error || "上传失败";
+        return { ...log, cloudSync: "failed", cloudError: firstError };
+    }
     return { ...log, cloudSync: "synced", cloudJobIds: jobIds, cloudError: undefined };
 }
 

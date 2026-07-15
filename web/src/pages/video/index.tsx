@@ -21,7 +21,7 @@ import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
 import { CloudHistoryPanel } from "@/components/cloud-history-panel";
 import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyncStatus } from "@/lib/cloud-sync";
-import { saveVideoToCloud } from "@/services/cloud-history";
+import { saveVideoToCloudDetailed } from "@/services/cloud-history";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useAuthStore } from "@/stores/use-auth-store";
 import { isAiProxyBaseUrl, modelOptionLabel, modelOptionName, resolveModelChannel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
@@ -416,10 +416,18 @@ export default function VideoPage() {
                             if (next.cloudSync === "synced") {
                                 message.success("已同步到云端历史");
                                 setCloudRefreshKey((value) => value + 1);
+                                void useAuthStore.getState().refreshUsage();
                             } else if (next.cloudSync === "failed") {
-                                message.warning("云端同步失败，可在本机记录中重试");
+                                const detail = next.cloudError || "";
+                                if (detail.includes("空间不足") || detail.includes("413")) {
+                                    message.warning("云端空间不足，请删除部分云端历史后重试");
+                                } else {
+                                    message.warning(detail ? `云端同步失败：${detail}` : "云端同步失败，可在本机记录中重试");
+                                }
                             }
                         });
+                    } else {
+                        message.info("登录后可将结果同步到云端，跨设备回看", 2.5);
                     }
                     return;
                 }
@@ -1037,7 +1045,7 @@ async function syncVideoLogToCloud(log: GenerationLog): Promise<GenerationLog> {
     if (!log.video?.url) {
         return { ...log, cloudSync: "failed", cloudError: "没有可上传的视频" };
     }
-    const saved = await saveVideoToCloud({
+    const saved = await saveVideoToCloudDetailed({
         url: log.video.url,
         storageKey: log.video.storageKey,
         prompt: log.prompt,
@@ -1049,8 +1057,8 @@ async function syncVideoLogToCloud(log: GenerationLog): Promise<GenerationLog> {
         provider: log.task?.provider,
         params: { size: log.size, seconds: log.seconds, resolution: log.resolution, localLogId: log.id },
     });
-    if (!saved) return { ...log, cloudSync: "failed", cloudError: "上传失败" };
-    return { ...log, cloudSync: "synced", cloudJobIds: [saved.id], cloudError: undefined };
+    if (!saved.job) return { ...log, cloudSync: "failed", cloudError: saved.error || "上传失败" };
+    return { ...log, cloudSync: "synced", cloudJobIds: [saved.job.id], cloudError: undefined };
 }
 
 function buildLog({ prompt, model, config, references, videoReferences, audioReferences, durationMs, status, task, video, error }: { prompt: string; model: string; config: AiConfig; references: ReferenceImage[]; videoReferences: ReferenceVideo[]; audioReferences: ReferenceAudio[]; durationMs: number; status: GenerationLog["status"]; task?: VideoGenerationTask; video?: GeneratedVideo; error?: string }): GenerationLog {

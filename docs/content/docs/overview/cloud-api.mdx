@@ -1,0 +1,122 @@
+---
+title: 云端账号与历史
+description: 可选 api 服务的部署、Cookie、备份与双轨说明
+---
+
+# 云端账号与历史
+
+云端账号是**可选增强**：未登录时本地画布、工作台、素材、提示词库仍完整可用。登录后，图片/视频工作台会在本地生成成功后，异步把结果同步到服务器历史。
+
+## 组成
+
+| 路径 | 说明 |
+| --- | --- |
+| `api/` | Node 22 业务 API：注册登录、jobs 上云、鉴权读文件 |
+| `docker-compose.local.yml` | `app` + `api` + `ai-proxy` |
+| `nginx.conf` | 同源转发 `/api/` 与 `/ai-proxy/` |
+| `.env.api.example` | API 环境变量示例 |
+
+数据默认落在宿主机 `./data/api`（容器内 `/data`），包含 JSON 库与 `uploads/`。
+
+## 本地开发
+
+1. 启动 API（示例）：
+
+```bash
+cd api
+# Windows / Linux 均可
+DATA_DIR=../data/api PORT=8080 node src/index.js
+```
+
+2. 前端 `web`：
+
+```bash
+cd web
+bun install
+bun run dev
+```
+
+Vite 将 `/api` 代理到 `http://127.0.0.1:8080`。浏览器只访问同源 `/api/*`，Cookie 可带上。
+
+## Docker 源码部署
+
+```bash
+# 可选：复制并编辑
+cp .env.api.example .env.api
+
+sudo docker compose -f docker-compose.local.yml up -d --build
+```
+
+- 站点：`http://服务器:3001`
+- API 另暴露：`8080`（便于本机排查；生产也可只走 nginx `/api/`）
+
+### 推荐环境变量
+
+见 `.env.api.example`：
+
+| 变量 | 含义 |
+| --- | --- |
+| `API_INVITE_CODE` | 非空则注册必须邀请码（防刷盘） |
+| `API_COOKIE_SECURE` | **公网 HTTPS 必须 `true`** |
+| `API_ALLOWED_ORIGINS` | 允许带 Cookie 的前端 Origin 白名单 |
+| `API_MAX_USER_BYTES` | 单用户云端容量上限 |
+| `API_MAX_IMAGE_BYTES` / `API_MAX_VIDEO_BYTES` | 单文件上限 |
+
+公网域名反代到 `127.0.0.1:3001` 时：
+
+1. 全站 HTTPS  
+2. `.env.api` 设 `API_COOKIE_SECURE=true`  
+3. `API_ALLOWED_ORIGINS` 写上真实前端源，例如 `https://canvas.example.com`  
+4. 重建 api 容器使环境变量生效  
+
+## 备份与恢复
+
+### 备份
+
+Linux / 服务器：
+
+```bash
+chmod +x scripts/backup-api-data.sh
+./scripts/backup-api-data.sh
+# 产物默认：backups/api/api-data-时间戳.tar.gz
+```
+
+Windows：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\backup-api-data.ps1
+```
+
+建议：每日 cron / 计划任务跑一次；备份目录勿提交 Git（`data/` 已忽略，`backups/` 也建议忽略）。
+
+### 恢复（示意）
+
+```bash
+# 先停 api
+sudo docker compose -f docker-compose.local.yml stop api
+
+# 解压覆盖 data/api（按你的备份路径调整）
+tar -xzf backups/api/api-data-YYYYMMDD-HHMMSS.tar.gz -C ./data
+
+sudo docker compose -f docker-compose.local.yml start api
+```
+
+恢复前请确认没有把错误备份盖到生产数据上。
+
+## 双轨原则
+
+| 场景 | 行为 |
+| --- | --- |
+| 未登录 | 仅本地；生成记录标「仅本机」 |
+| 已登录 | 本地成功后异步上云；失败可重试，不改写本地成功 |
+| API 挂了 | 本地创作不受影响 |
+| 清浏览器数据 | 重登后云端历史仍可看 |
+
+后续扩展（服务端代生成、画布同步、计费）应继续遵守：本地 store 不删，只加 cloud adapter；云资源一律带 `user_id`。
+
+## 安全注意
+
+- 不要提交真实 `.env.api`  
+- 开放注册务必设邀请码或后续邮箱验证  
+- 文件接口必须登录且校验归属（已实现）  
+- 以后平台上游 Key 只放服务端，不下发浏览器  

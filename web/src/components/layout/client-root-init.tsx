@@ -8,14 +8,32 @@ import { useAuthStore } from "@/stores/use-auth-store";
 export function ClientRootInit({ children }: { children: ReactNode }) {
     const { message } = App.useApp();
     const handledConfigParams = useRef(false);
+    const unauthorizedNotified = useRef(false);
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const config = useConfigStore((state) => state.config);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const hydrateAuth = useAuthStore((state) => state.hydrate);
+    const clearSession = useAuthStore((state) => state.clearSession);
 
     useEffect(() => {
         void hydrateAuth();
     }, [hydrateAuth]);
+
+    useEffect(() => {
+        // 受保护云接口 401 时统一清登录态，避免侧栏连环报错
+        const onUnauthorized = () => {
+            if (!useAuthStore.getState().user) return;
+            clearSession();
+            if (unauthorizedNotified.current) return;
+            unauthorizedNotified.current = true;
+            message.warning("登录已失效，请重新登录后使用云端功能");
+            window.setTimeout(() => {
+                unauthorizedNotified.current = false;
+            }, 3000);
+        };
+        window.addEventListener("infinite-canvas:cloud-unauthorized", onUnauthorized);
+        return () => window.removeEventListener("infinite-canvas:cloud-unauthorized", onUnauthorized);
+    }, [clearSession, message]);
 
     useEffect(() => {
         if (handledConfigParams.current) return;

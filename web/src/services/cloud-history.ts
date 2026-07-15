@@ -1,6 +1,6 @@
 import { getImageBlob } from "@/services/image-storage";
 import { getMediaBlob } from "@/services/file-storage";
-import { uploadCloudJob, blobFromUrl, type CloudJob } from "@/services/cloud-api";
+import { blobFromUrl, isCloudApiError, uploadCloudJob, type CloudJob } from "@/services/cloud-api";
 import { useAuthStore } from "@/stores/use-auth-store";
 
 function isRemoteHttpUrl(value: string) {
@@ -10,6 +10,11 @@ function isRemoteHttpUrl(value: string) {
 function isLocalObjectUrl(value: string) {
     return (value || "").startsWith("blob:") || (value || "").startsWith("data:");
 }
+
+export type CloudSaveResult = {
+    job: CloudJob | null;
+    error?: string;
+};
 
 async function uploadCloudJobFromUrl(input: {
     type: "image" | "video";
@@ -44,6 +49,10 @@ async function uploadCloudJobFromUrl(input: {
                 params: input.params || {},
             }),
         });
+        if (response.status === 401) {
+            window.dispatchEvent(new CustomEvent("infinite-canvas:cloud-unauthorized"));
+            throw new Error("请先登录");
+        }
         const payload = (await response.json().catch(() => null)) as { code?: number; data?: CloudJob; msg?: string } | null;
         if (!response.ok || !payload || payload.code !== 0 || !payload.data) {
             throw new Error(payload?.msg || `远程上云失败（${response.status}）`);
@@ -59,6 +68,12 @@ async function uploadCloudJobFromUrl(input: {
     }
 }
 
+function toSaveError(error: unknown, fallback: string) {
+    if (isCloudApiError(error)) return error.message || fallback;
+    if (error instanceof Error && error.message) return error.message;
+    return fallback;
+}
+
 /** Prefer local blob/storageKey; remote HTTP falls back to server-side allowlisted fetch. */
 export async function saveImageToCloud(input: {
     dataUrl: string;
@@ -70,7 +85,21 @@ export async function saveImageToCloud(input: {
     clientLocalId?: string;
     params?: Record<string, unknown>;
 }): Promise<CloudJob | null> {
-    if (!useAuthStore.getState().user) return null;
+    const result = await saveImageToCloudDetailed(input);
+    return result.job;
+}
+
+export async function saveImageToCloudDetailed(input: {
+    dataUrl: string;
+    storageKey?: string;
+    prompt: string;
+    model: string;
+    width?: number;
+    height?: number;
+    clientLocalId?: string;
+    params?: Record<string, unknown>;
+}): Promise<CloudSaveResult> {
+    if (!useAuthStore.getState().user) return { job: null, error: "未登录" };
     try {
         let blob: Blob | null = null;
         if (input.storageKey) {
@@ -80,7 +109,7 @@ export async function saveImageToCloud(input: {
             blob = await blobFromUrl(input.dataUrl);
         }
         if (blob && blob.size > 0) {
-            return await uploadCloudJob({
+            const job = await uploadCloudJob({
                 type: "image",
                 file: blob,
                 filename: "image.png",
@@ -91,9 +120,10 @@ export async function saveImageToCloud(input: {
                 clientLocalId: input.clientLocalId,
                 params: input.params,
             });
+            return { job };
         }
         if (isRemoteHttpUrl(input.dataUrl)) {
-            return await uploadCloudJobFromUrl({
+            const job = await uploadCloudJobFromUrl({
                 type: "image",
                 url: input.dataUrl,
                 prompt: input.prompt,
@@ -103,11 +133,12 @@ export async function saveImageToCloud(input: {
                 clientLocalId: input.clientLocalId,
                 params: input.params,
             });
+            return { job };
         }
-        return null;
+        return { job: null, error: "没有可上传的本地文件或远程地址" };
     } catch (error) {
         console.warn("cloud image save failed", error);
-        return null;
+        return { job: null, error: toSaveError(error, "上传失败") };
     }
 }
 
@@ -123,7 +154,23 @@ export async function saveVideoToCloud(input: {
     provider?: string;
     params?: Record<string, unknown>;
 }): Promise<CloudJob | null> {
-    if (!useAuthStore.getState().user) return null;
+    const result = await saveVideoToCloudDetailed(input);
+    return result.job;
+}
+
+export async function saveVideoToCloudDetailed(input: {
+    url: string;
+    storageKey?: string;
+    prompt: string;
+    model: string;
+    width?: number;
+    height?: number;
+    durationMs?: number;
+    clientLocalId?: string;
+    provider?: string;
+    params?: Record<string, unknown>;
+}): Promise<CloudSaveResult> {
+    if (!useAuthStore.getState().user) return { job: null, error: "未登录" };
     try {
         let blob: Blob | null = null;
         if (input.storageKey) {
@@ -133,7 +180,7 @@ export async function saveVideoToCloud(input: {
             blob = await blobFromUrl(input.url);
         }
         if (blob && blob.size > 0) {
-            return await uploadCloudJob({
+            const job = await uploadCloudJob({
                 type: "video",
                 file: blob,
                 filename: "video.mp4",
@@ -146,9 +193,10 @@ export async function saveVideoToCloud(input: {
                 provider: input.provider,
                 params: input.params,
             });
+            return { job };
         }
         if (isRemoteHttpUrl(input.url)) {
-            return await uploadCloudJobFromUrl({
+            const job = await uploadCloudJobFromUrl({
                 type: "video",
                 url: input.url,
                 prompt: input.prompt,
@@ -160,10 +208,11 @@ export async function saveVideoToCloud(input: {
                 provider: input.provider,
                 params: input.params,
             });
+            return { job };
         }
-        return null;
+        return { job: null, error: "没有可上传的本地文件或远程地址" };
     } catch (error) {
         console.warn("cloud video save failed", error);
-        return null;
+        return { job: null, error: toSaveError(error, "上传失败") };
     }
 }

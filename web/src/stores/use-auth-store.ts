@@ -1,45 +1,70 @@
 import { create } from "zustand";
 
-import { cloudLogin, cloudLogout, cloudRegister, getCloudMe, type CloudUser } from "@/services/cloud-api";
+import { cloudLogin, cloudLogout, cloudRegister, getCloudMe, type CloudLimits, type CloudUsage, type CloudUser } from "@/services/cloud-api";
 
 type AuthState = {
     hydrated: boolean;
     user: CloudUser | null;
+    usage: CloudUsage | null;
+    limits: CloudLimits | null;
     hydrate: () => Promise<void>;
+    refreshUsage: () => Promise<void>;
     login: (email: string, password: string) => Promise<void>;
     register: (input: { email: string; password: string; displayName?: string; inviteCode?: string }) => Promise<void>;
     logout: () => Promise<void>;
+    /** 会话失效时清本地登录态，不请求网络 */
+    clearSession: () => void;
 };
 
-export const useAuthStore = create<AuthState>((set) => ({
+async function loadMe() {
+    const data = await getCloudMe();
+    return {
+        user: data.user || null,
+        usage: data.usage || null,
+        limits: data.limits || null,
+    };
+}
+
+export const useAuthStore = create<AuthState>((set, get) => ({
     hydrated: false,
     user: null,
+    usage: null,
+    limits: null,
     hydrate: async () => {
         try {
-            const data = await getCloudMe();
-            set({ user: data.user || null, hydrated: true });
+            const me = await loadMe();
+            set({ ...me, hydrated: true });
         } catch {
             // API 不可用时保持未登录，不影响本地模式
-            set({ user: null, hydrated: true });
+            set({ user: null, usage: null, limits: null, hydrated: true });
+        }
+    },
+    refreshUsage: async () => {
+        if (!get().user) return;
+        try {
+            const me = await loadMe();
+            set({ user: me.user, usage: me.usage, limits: me.limits });
+        } catch {
+            // ignore transient errors
         }
     },
     login: async (email, password) => {
         const data = await cloudLogin({ email, password });
-        // 以 /auth/me 再确认一次 Cookie 会话，避免只信内存 user、刷新后像“掉登录”
+        // 以 /auth/me 再确认一次 Cookie 会话，并拉用量
         try {
-            const me = await getCloudMe();
-            set({ user: me.user || data.user, hydrated: true });
+            const me = await loadMe();
+            set({ user: me.user || data.user, usage: me.usage, limits: me.limits, hydrated: true });
         } catch {
-            set({ user: data.user, hydrated: true });
+            set({ user: data.user, usage: null, limits: null, hydrated: true });
         }
     },
     register: async (input) => {
         const data = await cloudRegister(input);
         try {
-            const me = await getCloudMe();
-            set({ user: me.user || data.user, hydrated: true });
+            const me = await loadMe();
+            set({ user: me.user || data.user, usage: me.usage, limits: me.limits, hydrated: true });
         } catch {
-            set({ user: data.user, hydrated: true });
+            set({ user: data.user, usage: null, limits: null, hydrated: true });
         }
     },
     logout: async () => {
@@ -48,6 +73,9 @@ export const useAuthStore = create<AuthState>((set) => ({
         } catch {
             // ignore network errors on logout
         }
-        set({ user: null });
+        set({ user: null, usage: null, limits: null });
+    },
+    clearSession: () => {
+        set({ user: null, usage: null, limits: null });
     },
 }));

@@ -38,6 +38,8 @@
 
 可选云端模式（`api` 服务）：用户注册登录后，图片/视频工作台在**本地生成成功之后**异步把结果上传到服务器（`POST /api/jobs/image|video`），文件按用户隔离存储，经 `GET /api/files/:id` 鉴权访问。工作台历史侧栏支持「本机 / 云端」切换查看云端列表（预览/下载/删除）。本机记录带 `cloudSync` 状态（pending/synced/failed/skipped），失败可在本机列表重试上云，且不得把本地生成成功改成失败。上云优先本地 blob/`storageKey`；若结果只是 `imgen.x.ai`/`vidgen.x.ai` 等远程 URL（浏览器 CORS 无法 fetch），走 `POST /api/jobs/{type}/from-url` 由服务端白名单拉取后落盘。上传幂等：同一用户 + 同一 `client_local_id` 重复提交返回已有任务（`deduped: true`），为后续计费防双扣预留。未登录时行为与原先一致；云 API 不可用时不得阻断本地功能。本地开发时 Vite 将 `/api` 代理到 `http://127.0.0.1:8080`。云端配置示例见 `.env.api.example`（邀请码 `API_INVITE_CODE`、Cookie Secure、来源白名单等）。
 
+P0.5 扫尾（运维与体验）：`GET /auth/me` 返回 `usage`（已用字节、任务数）与 `limits`（容量上限），供顶栏账号弹层展示；受保护接口 401 时前端统一清登录态（`infinite-canvas:cloud-unauthorized` 事件），避免连环报错；未登录生成成功轻提示「登录后可跨设备回看」；上云失败若为空间不足则明确提示。备份脚本：`scripts/backup-api-data.sh` / `scripts/backup-api-data.ps1`。更完整说明见 `docs/content/docs/overview/cloud-api.mdx`。公网 HTTPS 必须设 `API_COOKIE_SECURE=true` 并收紧 `API_ALLOWED_ORIGINS`。
+
 自部署公网共享同一个 Key 时，应优先配置同源 `/ai-proxy`：真实上游 Key 放服务器 `.env.proxy`，前端只保存代理访问令牌或留空。
 
 默认渠道预填为中转站 `https://www.codex2api.com`（名称“默认中转站”），API Key 不写死，由用户自行填写；同时仍支持新增自定义渠道和“服务器 AI 代理”渠道。不要把真实中转站 Key 写进源码或默认配置。
@@ -108,6 +110,15 @@ sudo docker compose -f docker-compose.local.yml logs -f
 ```
 
 当前部署访问端口是 `3001`。如需正式域名访问，建议用服务器现有 Caddy / Nginx 反代到 `127.0.0.1:3001`。
+
+云端 API 数据备份（服务器）：
+
+```bash
+cd ~/apps/infinite-canvas
+chmod +x scripts/backup-api-data.sh
+./scripts/backup-api-data.sh
+# 默认写出 backups/api/api-data-时间戳.tar.gz
+```
 
 ## Git / 远程仓库工作流
 
