@@ -118,6 +118,26 @@ export function createDb(dataDir) {
             return true;
         },
 
+        /**
+         * Drop expired / revoked sessions so JSON DB stays small before Postgres migration.
+         * Safe to call periodically; does not touch active sessions.
+         */
+        pruneSessions({ keepRevokedMs = 24 * 3600 * 1000 } = {}) {
+            const cutoff = Date.now();
+            const before = state.sessions.length;
+            state.sessions = state.sessions.filter((s) => {
+                if (s.revoked_at) {
+                    const revokedAt = new Date(s.revoked_at).getTime();
+                    return Number.isFinite(revokedAt) && cutoff - revokedAt < keepRevokedMs;
+                }
+                const exp = new Date(s.expires_at).getTime();
+                return Number.isFinite(exp) && exp > cutoff;
+            });
+            const removed = before - state.sessions.length;
+            if (removed > 0) schedulePersist();
+            return removed;
+        },
+
         createFile(record) {
             const file = {
                 id: randomId(),

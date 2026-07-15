@@ -52,22 +52,27 @@ sudo docker compose -f docker-compose.local.yml up -d --build
 
 ### 推荐环境变量
 
-见 `.env.api.example`：
+见 `.env.api.example`。Compose 从仓库根目录 **`.env`** 做变量插值（可 `cp .env.api.example .env` 后修改；**不要提交真实 `.env`**）。
 
 | 变量 | 含义 |
 | --- | --- |
 | `API_INVITE_CODE` | 非空则注册必须邀请码（防刷盘） |
 | `API_COOKIE_SECURE` | **公网 HTTPS 必须 `true`** |
-| `API_ALLOWED_ORIGINS` | 允许带 Cookie 的前端 Origin 白名单 |
+| `API_ALLOWED_ORIGINS` | 允许带 Cookie 的前端 Origin 白名单（**不要写 `*`**） |
 | `API_MAX_USER_BYTES` | 单用户云端容量上限 |
 | `API_MAX_IMAGE_BYTES` / `API_MAX_VIDEO_BYTES` | 单文件上限 |
+| `API_REMOTE_FETCH_TIMEOUT_MS` | 服务端拉取远程媒体超时（视频默认约 90s） |
+| `API_REMOTE_FETCH_MAX_REDIRECTS` | 远程拉取最大重定向次数（默认 3） |
 
 公网域名反代到 `127.0.0.1:3001` 时：
 
 1. 全站 HTTPS  
-2. `.env.api` 设 `API_COOKIE_SECURE=true`  
+2. 根目录 `.env` 设 `API_COOKIE_SECURE=true`  
 3. `API_ALLOWED_ORIGINS` 写上真实前端源，例如 `https://canvas.example.com`  
-4. 重建 api 容器使环境变量生效  
+4. 开放注册务必设 `API_INVITE_CODE`  
+5. 重建 api 容器使环境变量生效  
+
+远程上云 `from-url` 仅允许 https 白名单媒体域名，并在 DNS 解析后拒绝内网地址；这是后续服务端代生成前的 SSRF 底线，不要为了“方便”放开任意 URL。
 
 ## 备份与恢复
 

@@ -120,6 +120,37 @@ export function clientIp(req) {
     return forwarded || req.socket.remoteAddress || "";
 }
 
+/** IPv4 / IPv6 literals that must never be fetched server-side (SSRF). */
+export function isPrivateOrLocalHost(hostname) {
+    const host = String(hostname || "")
+        .trim()
+        .toLowerCase()
+        .replace(/^\[|\]$/g, "");
+    if (!host) return true;
+    if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal") || host.endsWith(".localhost")) return true;
+    // IPv4 literal
+    const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(host);
+    if (m) {
+        const a = Number(m[1]);
+        const b = Number(m[2]);
+        if (a === 10 || a === 127 || a === 0) return true;
+        if (a === 192 && b === 168) return true;
+        if (a === 172 && b >= 16 && b <= 31) return true;
+        if (a === 169 && b === 254) return true;
+        if (a >= 224) return true; // multicast / reserved
+        return false;
+    }
+    // Only treat colon-containing values as IPv6 (avoid false positives like hostnames starting with "fc")
+    if (host.includes(":")) {
+        if (host === "::1" || host === "0:0:0:0:0:0:0:1") return true;
+        if (host.startsWith("fc") || host.startsWith("fd")) return true; // unique local fc00::/7
+        if (host.startsWith("fe80")) return true; // link-local
+        if (host.startsWith("::ffff:")) return isPrivateOrLocalHost(host.slice("::ffff:".length));
+        if (host === "::" || host.startsWith("::")) return true;
+    }
+    return false;
+}
+
 export function isValidEmail(email) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }

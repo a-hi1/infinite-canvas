@@ -1,6 +1,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import dns from "node:dns/promises";
 import { URL } from "node:url";
 
 import { createDb, publicJob, publicUser } from "./db.js";
@@ -11,6 +12,7 @@ import {
     extForMime,
     fail,
     hashPassword,
+    isPrivateOrLocalHost,
     isValidEmail,
     json,
     parseCookies,
@@ -34,10 +36,13 @@ const maxBodyBytes = Number(process.env.API_MAX_BODY_BYTES || 220 * 1024 * 1024)
 const maxImageBytes = Number(process.env.API_MAX_IMAGE_BYTES || 20 * 1024 * 1024);
 const maxVideoBytes = Number(process.env.API_MAX_VIDEO_BYTES || 200 * 1024 * 1024);
 const maxUserBytes = Number(process.env.API_MAX_USER_BYTES || 5 * 1024 * 1024 * 1024);
+const maxRemoteRedirects = Math.min(5, Math.max(0, Number(process.env.API_REMOTE_FETCH_MAX_REDIRECTS || 3)));
 const allowedOrigins = String(process.env.API_ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001")
     .split(",")
     .map((s) => s.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    // Credentialed cookie API must never honor wildcard origins.
+    .filter((s) => s !== "*");
 
 const SESSION_COOKIE = "ic_session";
 const loginHits = new Map();
@@ -46,6 +51,20 @@ const uploadHits = new Map();
 
 ensureDir(uploadsDir);
 const db = createDb(dataDir);
+// Keep JSON session table small before Postgres; does not affect active logins.
+try {
+    const pruned = db.pruneSessions();
+    if (pruned > 0) console.log(`pruned ${pruned} expired/revoked sessions`);
+} catch (error) {
+    console.error("session prune failed", error);
+}
+setInterval(() => {
+    try {
+        db.pruneSessions();
+    } catch (error) {
+        console.error("session prune failed", error);
+    }
+}, 60 * 60 * 1000).unref?.();
 
 const server = http.createServer(async (req, res) => {
     const origin = req.headers.origin || "";
@@ -118,8 +137,8 @@ function setCors(res, origin) {
 }
 
 function isOriginAllowed(origin) {
+    // No Origin (same-origin navigation / curl / server-side) is allowed; browser cross-site needs exact match.
     if (!origin) return true;
-    if (allowedOrigins.includes("*")) return true;
     return allowedOrigins.includes(origin);
 }
 
@@ -532,30 +551,20 @@ async function handleUploadJobFromUrl(req, res, type) {
     json(res, 200, publicJob(job, fileRow, { deduped: false, source: "server_fetch" }), "已从远程拉取并保存到云端历史");
 }
 
-function isPrivateIp(hostname) {
-    // hostname may be IP literal
-    if (hostname === "localhost" || hostname.endsWith(".local") || hostname.endsWith(".internal")) return true;
-    const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(hostname);
-    if (!m) return false;
-    const a = Number(m[1]);
-    const b = Number(m[2]);
-    if (a === 10 || a === 127 || a === 0) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 169 && b === 254) return true;
-    return false;
-}
-
 function isAllowedMediaHost(hostname) {
-    const host = String(hostname || "").toLowerCase();
-    if (!host || isPrivateIp(host)) return false;
+    const host = String(hostname || "")
+        .toLowerCase()
+        .replace(/\.$/, "");
+    if (!host || isPrivateOrLocalHost(host)) return false;
     const exact = new Set(["imgen.x.ai", "vidgen.x.ai", "cdn.x.ai", "x.ai"]);
     if (exact.has(host)) return true;
+    // Keep CDN suffixes for temporary media; still blocked if DNS resolves private (assertPublicResolvedHost).
     const suffixes = [".imgen.x.ai", ".vidgen.x.ai", ".cdn.x.ai", ".x.ai", ".amazonaws.com", ".cloudfront.net", ".r2.dev"];
     return suffixes.some((s) => host.endsWith(s));
 }
 
-async function fetchAllowlistedMedia(remoteUrl, type) {
+/** Reject URL credentials and DNS that points at private networks (SSRF / rebinding). */
+async function assertSafeRemoteMediaUrl(remoteUrl) {
     let parsed;
     try {
         parsed = new URL(remoteUrl);
@@ -563,7 +572,32 @@ async function fetchAllowlistedMedia(remoteUrl, type) {
         throw Object.assign(new Error("远程地址无效"), { status: 400 });
     }
     if (parsed.protocol !== "https:") throw Object.assign(new Error("仅允许 https 远程媒体"), { status: 400 });
+    if (parsed.username || parsed.password) throw Object.assign(new Error("远程地址不允许携带账号信息"), { status: 400 });
     if (!isAllowedMediaHost(parsed.hostname)) throw Object.assign(new Error("远程媒体域名不在白名单"), { status: 403 });
+    await assertPublicResolvedHost(parsed.hostname);
+    return parsed;
+}
+
+async function assertPublicResolvedHost(hostname) {
+    if (isPrivateOrLocalHost(hostname)) {
+        throw Object.assign(new Error("远程媒体域名不在白名单"), { status: 403 });
+    }
+    let records;
+    try {
+        records = await dns.lookup(hostname, { all: true, verbatim: true });
+    } catch {
+        throw Object.assign(new Error("远程媒体域名无法解析"), { status: 502 });
+    }
+    if (!records?.length) throw Object.assign(new Error("远程媒体域名无法解析"), { status: 502 });
+    for (const record of records) {
+        if (isPrivateOrLocalHost(record.address)) {
+            throw Object.assign(new Error("远程媒体解析到内网地址，已拒绝"), { status: 403 });
+        }
+    }
+}
+
+async function fetchAllowlistedMedia(remoteUrl, type, redirectLeft = maxRemoteRedirects) {
+    const parsed = await assertSafeRemoteMediaUrl(remoteUrl);
 
     // 视频默认更长：能出网时尽量下完；出网不通则到点失败并给出可操作提示。
     // 可用环境变量覆盖：API_REMOTE_FETCH_TIMEOUT_MS
@@ -573,7 +607,7 @@ async function fetchAllowlistedMedia(remoteUrl, type) {
     const timer = setTimeout(() => controller.abort(), fetchTimeoutMs);
     let response;
     try {
-        response = await fetch(remoteUrl, {
+        response = await fetch(parsed.toString(), {
             method: "GET",
             redirect: "manual",
             signal: controller.signal,
@@ -598,20 +632,19 @@ async function fetchAllowlistedMedia(remoteUrl, type) {
         clearTimeout(timer);
     }
 
-    // Do not follow redirects to non-allowlisted hosts.
+    // Do not follow redirects to non-allowlisted / private hosts; hop-limited for safety.
     if (response.status >= 300 && response.status < 400) {
+        if (redirectLeft <= 0) throw Object.assign(new Error("远程媒体重定向次数过多"), { status: 502 });
         const location = response.headers.get("location") || "";
         if (!location) throw Object.assign(new Error("远程媒体重定向无效"), { status: 502 });
         let next;
         try {
-            next = new URL(location, remoteUrl);
+            next = new URL(location, parsed);
         } catch {
             throw Object.assign(new Error("远程媒体重定向无效"), { status: 502 });
         }
-        if (next.protocol !== "https:" || !isAllowedMediaHost(next.hostname)) {
-            throw Object.assign(new Error("远程媒体重定向目标不被允许"), { status: 403 });
-        }
-        return fetchAllowlistedMedia(next.toString(), type);
+        // Re-run full safety checks on every hop (host allowlist + DNS private reject).
+        return fetchAllowlistedMedia(next.toString(), type, redirectLeft - 1);
     }
 
     if (!response.ok) throw Object.assign(new Error(`远程媒体返回 ${response.status}`), { status: 502 });
