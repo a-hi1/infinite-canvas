@@ -1,8 +1,11 @@
 import { CanvasNodeType } from "@/types/canvas";
 
+type NodeTitleKind = CanvasNodeType | "text" | "image" | "video" | "audio";
+
 /** 生成结果节点的短标题，避免把整段提示词塞进节点名 */
-export function shortGenerationTitle(type: CanvasNodeType | "text" | "image" | "video" | "audio", prompt?: string) {
-    const base = type === CanvasNodeType.Video || type === "video" ? "视频" : type === CanvasNodeType.Audio || type === "audio" ? "音频" : type === CanvasNodeType.Image || type === "image" ? "图片" : type === CanvasNodeType.Text || type === "text" ? "文本" : "节点";
+export function shortGenerationTitle(type: NodeTitleKind, prompt?: string) {
+    const key = String(type);
+    const base = key === "video" ? "视频" : key === "audio" ? "音频" : key === "image" ? "图片" : key === "text" ? "文本" : "节点";
     const snippet = (prompt || "").replace(/\s+/g, " ").trim().slice(0, 10);
     return snippet ? `${base} · ${snippet}` : base;
 }
