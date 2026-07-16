@@ -153,6 +153,14 @@ sudo docker compose -f docker-compose.local.yml start api
 # Windows: scripts/check-cloud-stack.ps1
 ```
 
+`/api/health` 现在除 `ok` 外，还会返回 `allowedOriginCount`、`trustProxySameOrigin`、`envProxy` 等字段，便于确认当前是“仅白名单”还是“同源放行 + 容器代理出网”模式。  
+`/ai-proxy/health` 会返回 `upstreamConfigured`、`authRequired`、`envProxy`、`timeoutMs`，便于排查是上游未配、访问令牌还是容器出网问题。  
+更新了这部分代码后，记得重建对应容器再看 health 返回值：
+
+```bash
+docker compose -f docker-compose.local.yml up -d --build api ai-proxy
+```
+
 完整出门条件见 [P0.5c 验稳收口](/docs/progress/p05c-acceptance)。
 
 ## Grok / vidgen 说明

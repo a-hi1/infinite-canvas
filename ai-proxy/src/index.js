@@ -14,6 +14,14 @@ const rateLimitWindowMs = Number(process.env.AI_PROXY_RATE_LIMIT_WINDOW_MS || 60
 const rateLimitMax = Number(process.env.AI_PROXY_RATE_LIMIT_MAX || 120);
 const rateLimitBuckets = new Map();
 
+function requestIdOf(req) {
+    return String(req.headers["x-request-id"] || "").trim() || cryptoRandomId();
+}
+
+function cryptoRandomId() {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 const endpointRules = [
     /^\/v1\/images\/generations$/,
     /^\/v1\/images\/edits$/,
@@ -33,7 +41,9 @@ const endpointRules = [
 
 const server = http.createServer(async (req, res) => {
     const startedAt = Date.now();
+    const requestId = requestIdOf(req);
     const origin = req.headers.origin || "";
+    res.setHeader("X-Request-Id", requestId);
     setCorsHeaders(res, origin);
 
     if (req.method === "OPTIONS") {
@@ -43,7 +53,14 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.url === "/health") {
-        writeJson(res, 200, { ok: true, upstreamConfigured: Boolean(upstreamBaseUrl), authRequired: Boolean(proxyAccessToken) });
+        writeJson(res, 200, {
+            ok: true,
+            upstreamConfigured: Boolean(upstreamBaseUrl),
+            authRequired: Boolean(proxyAccessToken),
+            allowedOriginCount: allowedOrigins.length,
+            envProxy: Boolean(process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy),
+            timeoutMs,
+        });
         return;
     }
 
@@ -101,17 +118,17 @@ const server = http.createServer(async (req, res) => {
         } else {
             res.end();
         }
-        logRequest(req, path, upstreamResponse.status, Date.now() - startedAt);
+        logRequest(requestId, req, path, upstreamResponse.status, Date.now() - startedAt);
     } catch (error) {
         const status = error.status || 500;
         writeJson(res, status, { error: { message: error.publicMessage || "AI 代理请求失败" } });
-        logRequest(req, req.url || "", status, Date.now() - startedAt, error.publicMessage || sanitizeErrorMessage(error.message));
+        logRequest(requestId, req, req.url || "", status, Date.now() - startedAt, error.publicMessage || sanitizeErrorMessage(error.message));
     }
 });
 
 server.listen(port, "0.0.0.0", () => {
     console.log(`AI proxy listening on 0.0.0.0:${port}`);
-    console.log(`Upstream configured: ${upstreamBaseUrl ? "yes" : "no"}; access token required: ${proxyAccessToken ? "yes" : "no"}`);
+    console.log(`Upstream configured: ${upstreamBaseUrl ? "yes" : "no"}; access token required: ${proxyAccessToken ? "yes" : "no"}; env proxy: ${Boolean(process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy)}`);
 });
 
 function normalizeBaseUrl(value) {
@@ -379,10 +396,10 @@ function mediaFetchError(targetUrl, error) {
     return httpError(502, `AI 代理下载 ${host} 媒体失败`);
 }
 
-function logRequest(req, path, status, durationMs, error) {
+function logRequest(requestId, req, path, status, durationMs, error) {
     const method = req.method || "";
     const safePath = redactPath(path);
-    const message = `${method} ${safePath} -> ${status} ${durationMs}ms${error ? ` (${error})` : ""}`;
+    const message = `[ai-proxy][${requestId}] ${method} ${safePath} -> ${status} ${durationMs}ms${error ? ` (${error})` : ""}`;
     if (status >= 500) console.error(message);
     else if (status >= 400) console.warn(message);
     else console.log(message);

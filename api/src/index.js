@@ -53,6 +53,26 @@ const loginHits = new Map();
 const registerHits = new Map();
 const uploadHits = new Map();
 
+function requestIdOf(req) {
+    return String(req.headers["x-request-id"] || "").trim() || randomId();
+}
+
+function withRequestId(res, requestId) {
+    if (requestId) res.setHeader("X-Request-Id", requestId);
+}
+
+function logInfo(requestId, message, extra = undefined) {
+    console.log(`[api][${requestId}] ${message}${extra ? ` ${JSON.stringify(extra)}` : ""}`);
+}
+
+function logWarn(requestId, message, extra = undefined) {
+    console.warn(`[api][${requestId}] ${message}${extra ? ` ${JSON.stringify(extra)}` : ""}`);
+}
+
+function logError(requestId, message, extra = undefined) {
+    console.error(`[api][${requestId}] ${message}${extra ? ` ${JSON.stringify(extra)}` : ""}`);
+}
+
 ensureDir(uploadsDir);
 const db = createDb(dataDir);
 // Keep JSON session table small before Postgres; does not affect active logins.
@@ -71,6 +91,9 @@ setInterval(() => {
 }, 60 * 60 * 1000).unref?.();
 
 const server = http.createServer(async (req, res) => {
+    const startedAt = Date.now();
+    const requestId = requestIdOf(req);
+    withRequestId(res, requestId);
     const origin = req.headers.origin || "";
     setCors(res, origin, req);
 
@@ -82,6 +105,7 @@ const server = http.createServer(async (req, res) => {
 
     try {
         if (origin && !isOriginAllowed(origin, req)) {
+            logWarn(requestId, "origin rejected", { origin, publicOrigin: getRequestPublicOrigin(req), method: req.method, url: req.url });
             fail(res, 403, originRejectMessage(origin, req));
             return;
         }
@@ -90,7 +114,16 @@ const server = http.createServer(async (req, res) => {
         const pathname = url.pathname.replace(/\/+$/, "") || "/";
 
         if (req.method === "GET" && (pathname === "/health" || pathname === "/api/health")) {
-            json(res, 200, { ok: true, auth: true, inviteRequired: Boolean(inviteCode) });
+            json(res, 200, {
+                ok: true,
+                auth: true,
+                inviteRequired: Boolean(inviteCode),
+                dataDir,
+                uploadsDir,
+                allowedOriginCount: allowedOrigins.length,
+                trustProxySameOrigin,
+                envProxy: Boolean(process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy),
+            });
             return;
         }
 
@@ -115,18 +148,21 @@ const server = http.createServer(async (req, res) => {
         if (req.method === "GET" && route.startsWith("/files/")) return await handleGetFile(req, res, route.slice("/files/".length));
 
         fail(res, 404, "接口不存在");
+        logWarn(requestId, "route not found", { method: req.method, url: req.url, ms: Date.now() - startedAt });
     } catch (error) {
-        if (!res.headersSent) {
-            const status = error.status || 500;
-            fail(res, status, error.status ? error.message : "服务器错误");
+        const status = error.status || 500;
+        if (!res.headersSent) fail(res, status, error.status ? error.message : "服务器错误");
+        if (error.status) {
+            logWarn(requestId, "request failed", { status, method: req.method, url: req.url, ms: Date.now() - startedAt, message: error.message });
+        } else {
+            logError(requestId, "request crashed", { status, method: req.method, url: req.url, ms: Date.now() - startedAt, message: error?.message || String(error) });
         }
-        if (!error.status) console.error(error);
     }
 });
 
 server.listen(port, "0.0.0.0", () => {
     console.log(`API listening on 0.0.0.0:${port}`);
-    console.log(`data dir: ${dataDir}; invite required: ${Boolean(inviteCode)}`);
+    console.log(`data dir: ${dataDir}; invite required: ${Boolean(inviteCode)}; env proxy: ${Boolean(process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy)}`);
 });
 
 function setCors(res, origin, req) {

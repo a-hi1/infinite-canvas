@@ -66,6 +66,22 @@ try {
     Bad "api health request failed: $($_.Exception.Message)"
   }
 }
+
+try {
+  $proxy = Invoke-RestMethod -Uri "$BaseUrl/ai-proxy/health" -TimeoutSec 8
+  if ($proxy.ok -eq $true -or $proxy.data.ok -eq $true) {
+    Ok ("ai-proxy health ok: " + ($proxy | ConvertTo-Json -Compress))
+  } else {
+    Bad ("ai-proxy health unexpected: " + ($proxy | ConvertTo-Json -Compress))
+  }
+} catch {
+  try {
+    $raw = (Invoke-WebRequest -Uri "$BaseUrl/ai-proxy/health" -UseBasicParsing -TimeoutSec 8).Content
+    if ($raw -match '"ok"\s*:\s*true') { Ok "ai-proxy health ok: $raw" } else { Bad "ai-proxy health unexpected: $raw" }
+  } catch {
+    Bad "ai-proxy health request failed: $($_.Exception.Message)"
+  }
+}
 Note ""
 
 Note "-- env hygiene --"

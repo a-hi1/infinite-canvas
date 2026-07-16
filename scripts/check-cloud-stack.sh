@@ -65,6 +65,13 @@ if printf '%s' "$health_body" | grep -q '"ok":true'; then
 else
   bad "api health unexpected: ${health_body:-<empty>}"
 fi
+
+proxy_health="$(curl -sS --max-time 8 "$BASE_URL/ai-proxy/health" 2>/dev/null || true)"
+if printf '%s' "$proxy_health" | grep -q '"ok":true'; then
+  ok "ai-proxy health ok: $proxy_health"
+else
+  bad "ai-proxy health unexpected: ${proxy_health:-<empty>}"
+fi
 note ""
 
 note "-- env hygiene (optional .env) --"
