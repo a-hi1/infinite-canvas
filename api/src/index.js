@@ -5,6 +5,10 @@ import dns from "node:dns/promises";
 import { URL } from "node:url";
 
 import { createDb, publicJob, publicUser } from "./db.js";
+import { createUsersRepo } from "./repositories/users-repo.js";
+import { createSessionsRepo } from "./repositories/sessions-repo.js";
+import { createJobsRepo } from "./repositories/jobs-repo.js";
+import { createFilesRepo } from "./repositories/files-repo.js";
 import {
     clearCookie,
     clientIp,
@@ -75,16 +79,20 @@ function logError(requestId, message, extra = undefined) {
 
 ensureDir(uploadsDir);
 const db = createDb(dataDir);
+const usersRepo = createUsersRepo(db);
+const sessionsRepo = createSessionsRepo(db);
+const jobsRepo = createJobsRepo(db);
+const filesRepo = createFilesRepo(db);
 // Keep JSON session table small before Postgres; does not affect active logins.
 try {
-    const pruned = db.pruneSessions();
+    const pruned = sessionsRepo.pruneExpired();
     if (pruned > 0) console.log(`pruned ${pruned} expired/revoked sessions`);
 } catch (error) {
     console.error("session prune failed", error);
 }
 setInterval(() => {
     try {
-        db.pruneSessions();
+        sessionsRepo.pruneExpired();
     } catch (error) {
         console.error("session prune failed", error);
     }
@@ -246,9 +254,9 @@ function getSessionUser(req) {
     const cookies = parseCookies(req.headers.cookie || "");
     const token = cookies[SESSION_COOKIE];
     if (!token) return { user: null, token: "" };
-    const session = db.findSessionByToken(token);
+    const session = sessionsRepo.findByToken(token);
     if (!session) return { user: null, token };
-    const user = db.findUserById(session.user_id);
+    const user = usersRepo.findById(session.user_id);
     if (!user || user.status !== "active") return { user: null, token };
     return { user, token };
 }
@@ -275,10 +283,10 @@ async function handleRegister(req, res) {
     if (!isValidEmail(email)) return fail(res, 400, "邮箱格式不正确", "invalid_email");
     if (password.length < 8) return fail(res, 400, "密码至少 8 位", "weak_password");
     if (inviteCode && code !== inviteCode) return fail(res, 403, "邀请码无效", "invite_code_invalid");
-    if (db.findUserByEmail(email)) return fail(res, 409, "该邮箱已注册", "email_already_registered");
+    if (usersRepo.findByEmail(email)) return fail(res, 409, "该邮箱已注册", "email_already_registered");
 
     const passwordHash = await hashPassword(password);
-    const user = db.createUser({ email, passwordHash, displayName });
+    const user = usersRepo.create({ email, passwordHash, displayName });
     const token = issueSession(req, res, user.id);
     json(res, 200, { user: publicUser(user), session: Boolean(token) }, "注册成功");
 }
@@ -290,7 +298,7 @@ async function handleLogin(req, res) {
     const body = await readJson(req);
     const email = String(body.email || "").trim().toLowerCase();
     const password = String(body.password || "");
-    const user = db.findUserByEmail(email);
+    const user = usersRepo.findByEmail(email);
     if (!user) return fail(res, 401, "邮箱或密码错误", "login_invalid_credentials");
     if (user.status !== "active") return fail(res, 403, "账号不可用", "account_disabled");
     if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) return fail(res, 429, "账号暂时锁定，请稍后再试", "account_temporarily_locked");
@@ -302,20 +310,20 @@ async function handleLogin(req, res) {
             user.locked_until = new Date(Date.now() + 15 * 60 * 1000).toISOString();
             user.failed_login_count = 0;
         }
-        db.updateUser(user);
+        usersRepo.update(user);
         return fail(res, 401, "邮箱或密码错误", "login_invalid_credentials");
     }
 
     user.failed_login_count = 0;
     user.locked_until = null;
-    db.updateUser(user);
+    usersRepo.update(user);
     issueSession(req, res, user.id);
     json(res, 200, { user: publicUser(user) }, "登录成功");
 }
 
 function handleLogout(req, res) {
     const { token } = getSessionUser(req);
-    if (token) db.revokeSessionByToken(token);
+    if (token) sessionsRepo.revokeByToken(token);
     clearCookie(res, SESSION_COOKIE, { secure: cookieSecure });
     json(res, 200, { ok: true }, "已退出");
 }
@@ -330,10 +338,10 @@ function handleMe(req, res) {
     json(res, 200, {
         user: publicUser(user),
         usage: {
-            used_bytes: db.countUserBytes(user.id),
-            job_count: db.countUserJobs(user.id),
-            image_job_count: db.countUserJobs(user.id, "image"),
-            video_job_count: db.countUserJobs(user.id, "video"),
+            used_bytes: filesRepo.countUserBytes(user.id),
+            job_count: jobsRepo.countForUser(user.id),
+            image_job_count: jobsRepo.countForUser(user.id, "image"),
+            video_job_count: jobsRepo.countForUser(user.id, "video"),
         },
         limits: publicLimits(),
     });
@@ -349,7 +357,7 @@ function publicLimits() {
 
 function issueSession(req, res, userId) {
     const token = randomToken(32);
-    db.createSession({
+    sessionsRepo.create({
         userId,
         token,
         ip: clientIp(req),
@@ -374,9 +382,9 @@ function handleListJobs(req, res, url) {
     const type = url.searchParams.get("type") || "";
     const page = Math.max(1, Number(url.searchParams.get("page") || 1));
     const pageSize = Math.min(50, Math.max(1, Number(url.searchParams.get("page_size") || 20)));
-    const result = db.listJobsForUser(auth.user.id, { type: type || undefined, page, pageSize });
+    const result = jobsRepo.listForUser(auth.user.id, { type: type || undefined, page, pageSize });
     const items = result.items.map((job) => {
-        const file = job.result_file_id ? db.findFileForUser(job.result_file_id, auth.user.id) : null;
+        const file = job.result_file_id ? filesRepo.findForUser(job.result_file_id, auth.user.id) : null;
         return publicJob(job, file);
     });
     json(res, 200, { ...result, items });
@@ -385,20 +393,20 @@ function handleListJobs(req, res, url) {
 function handleGetJob(req, res, jobId) {
     const auth = requireUser(req, res);
     if (!auth) return;
-    const job = db.findJobForUser(jobId, auth.user.id);
+    const job = jobsRepo.findForUser(jobId, auth.user.id);
     if (!job) return fail(res, 404, "任务不存在");
-    const file = job.result_file_id ? db.findFileForUser(job.result_file_id, auth.user.id) : null;
+    const file = job.result_file_id ? filesRepo.findForUser(job.result_file_id, auth.user.id) : null;
     json(res, 200, publicJob(job, file));
 }
 
 function handleDeleteJob(req, res, jobId) {
     const auth = requireUser(req, res);
     if (!auth) return;
-    const job = db.findJobForUser(jobId, auth.user.id);
+    const job = jobsRepo.findForUser(jobId, auth.user.id);
     if (!job) return fail(res, 404, "任务不存在");
     const fileIds = [job.result_file_id, job.cover_file_id].filter(Boolean);
-    const storageKeys = fileIds.map((id) => db.findFileForUser(id, auth.user.id)?.storage_key).filter(Boolean);
-    db.deleteJobForUser(jobId, auth.user.id);
+    const storageKeys = fileIds.map((id) => filesRepo.findForUser(id, auth.user.id)?.storage_key).filter(Boolean);
+    jobsRepo.deleteForUser(jobId, auth.user.id);
     for (const key of storageKeys) {
         try {
             const abs = safeJoin(uploadsDir, ...String(key).split("/"));
@@ -443,9 +451,9 @@ async function handleUploadJob(req, res, type) {
     const clientLocalId = String(fields.client_local_id || "").trim();
     // Idempotent retry: same user + type + client_local_id returns existing job (no double disk / future double charge).
     if (clientLocalId) {
-        const existing = db.findJobByClientLocalId(auth.user.id, type, clientLocalId);
+        const existing = jobsRepo.findByClientLocalId(auth.user.id, type, clientLocalId);
         if (existing) {
-            const existingFile = existing.result_file_id ? db.findFileForUser(existing.result_file_id, auth.user.id) : null;
+            const existingFile = existing.result_file_id ? filesRepo.findForUser(existing.result_file_id, auth.user.id) : null;
             if (existingFile) {
                 // verify blob still on disk
                 try {
@@ -458,7 +466,7 @@ async function handleUploadJob(req, res, type) {
                 }
             }
             // Job row exists but file missing: rewrite file and relink (still one logical job).
-            if (db.countUserBytes(auth.user.id) + file.data.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", "storage_quota_exceeded");
+            if (filesRepo.countUserBytes(auth.user.id) + file.data.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", "storage_quota_exceeded");
             const repaired = writeUserFile({
                 userId: auth.user.id,
                 type,
@@ -470,15 +478,15 @@ async function handleUploadJob(req, res, type) {
                 filename: file.filename,
             });
             repaired.job_id = existing.id;
-            db.updateJobResultFile(existing.id, auth.user.id, repaired.id);
-            if (existingFile) db.softDeleteFile(existingFile.id, auth.user.id);
+            jobsRepo.updateResultFile(existing.id, auth.user.id, repaired.id);
+            if (existingFile) filesRepo.softDeleteForUser(existingFile.id, auth.user.id);
             db.flush();
-            const job = db.findJobForUser(existing.id, auth.user.id);
+            const job = jobsRepo.findForUser(existing.id, auth.user.id);
             return json(res, 200, publicJob(job, repaired, { deduped: true, repaired: true }), "已修复云端文件");
         }
     }
 
-    if (db.countUserBytes(auth.user.id) + file.data.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", "storage_quota_exceeded");
+    if (filesRepo.countUserBytes(auth.user.id) + file.data.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", "storage_quota_exceeded");
 
     const fileRow = writeUserFile({
         userId: auth.user.id,
@@ -491,7 +499,7 @@ async function handleUploadJob(req, res, type) {
         filename: file.filename,
     });
 
-    const job = db.createJob({
+    const job = jobsRepo.create({
         userId: auth.user.id,
         type,
         status: "success",
@@ -517,7 +525,7 @@ function writeUserFile({ userId, type, sniffed, bytes, width, height, durationMs
     const abs = safeJoin(uploadsDir, ...relKey.split("/"));
     ensureDir(path.dirname(abs));
     fs.writeFileSync(abs, bytes);
-    return db.createFile({
+    return filesRepo.create({
         userId,
         kind: type,
         storageKey: relKey,
@@ -549,9 +557,9 @@ async function handleUploadJobFromUrl(req, res, type) {
     if (!remoteUrl) return fail(res, 400, "缺少 url");
 
     if (clientLocalId) {
-        const existing = db.findJobByClientLocalId(auth.user.id, type, clientLocalId);
+        const existing = jobsRepo.findByClientLocalId(auth.user.id, type, clientLocalId);
         if (existing) {
-            const existingFile = existing.result_file_id ? db.findFileForUser(existing.result_file_id, auth.user.id) : null;
+            const existingFile = existing.result_file_id ? filesRepo.findForUser(existing.result_file_id, auth.user.id) : null;
             if (existingFile) {
                 try {
                     const absExisting = safeJoin(uploadsDir, ...String(existingFile.storage_key).split("/"));
@@ -566,13 +574,13 @@ async function handleUploadJobFromUrl(req, res, type) {
     }
 
     const fetched = await fetchAllowlistedMedia(remoteUrl, type);
-    if (db.countUserBytes(auth.user.id) + fetched.bytes.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", "storage_quota_exceeded");
+    if (filesRepo.countUserBytes(auth.user.id) + fetched.bytes.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", "storage_quota_exceeded");
 
     // re-check dedupe after fetch in case concurrent upload finished
     if (clientLocalId) {
-        const existing = db.findJobByClientLocalId(auth.user.id, type, clientLocalId);
+        const existing = jobsRepo.findByClientLocalId(auth.user.id, type, clientLocalId);
         if (existing) {
-            const existingFile = existing.result_file_id ? db.findFileForUser(existing.result_file_id, auth.user.id) : null;
+            const existingFile = existing.result_file_id ? filesRepo.findForUser(existing.result_file_id, auth.user.id) : null;
             if (existingFile) {
                 try {
                     const absExisting = safeJoin(uploadsDir, ...String(existingFile.storage_key).split("/"));
@@ -594,10 +602,10 @@ async function handleUploadJobFromUrl(req, res, type) {
                 filename: fetched.filename,
             });
             repaired.job_id = existing.id;
-            db.updateJobResultFile(existing.id, auth.user.id, repaired.id);
-            if (existingFile) db.softDeleteFile(existingFile.id, auth.user.id);
+            jobsRepo.updateResultFile(existing.id, auth.user.id, repaired.id);
+            if (existingFile) filesRepo.softDeleteForUser(existingFile.id, auth.user.id);
             db.flush();
-            const job = db.findJobForUser(existing.id, auth.user.id);
+            const job = jobsRepo.findForUser(existing.id, auth.user.id);
             return json(res, 200, publicJob(job, repaired, { deduped: true, repaired: true, source: "server_fetch" }), "已修复云端文件");
         }
     }
@@ -612,7 +620,7 @@ async function handleUploadJobFromUrl(req, res, type) {
         durationMs,
         filename: fetched.filename,
     });
-    const job = db.createJob({
+    const job = jobsRepo.create({
         userId: auth.user.id,
         type,
         status: "success",
@@ -762,7 +770,7 @@ function handleGetFile(req, res, fileId) {
     const auth = requireUser(req, res);
     if (!auth) return;
     const id = fileId.split(/[/?#]/)[0];
-    const file = db.findFileForUser(id, auth.user.id);
+    const file = filesRepo.findForUser(id, auth.user.id);
     if (!file) return fail(res, 404, "文件不存在");
 
     const abs = safeJoin(uploadsDir, ...String(file.storage_key).split("/"));
