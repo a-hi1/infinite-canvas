@@ -725,7 +725,13 @@ function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedV
             ) : (
                 <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 bg-black px-4 text-center text-sm text-white/70">
                     <span>{previewError ? "视频预览失败" : "视频预览不可用"}</span>
-                    <span className="text-xs text-white/50">{isRemote ? "若视频地址有效，请检查网络是否可访问该 CDN；也可尝试下载后本地播放" : isProxy ? "代理预览失败，可尝试下载后本地播放" : "可尝试下载后本地播放"}</span>
+                    <span className="text-xs text-white/50">
+                        {isProxy
+                            ? "本机代理拉不到远端 CDN（常见于 vidgen 出网超时）。生成可能已成功：请用新标签打开原始视频链接，或换可访问外网的网络后重试"
+                            : isRemote
+                              ? "远端视频地址无法在当前网络播放。可新标签打开链接，或下载后本地播放"
+                              : "可尝试下载后本地播放"}
+                    </span>
                 </div>
             )}
             <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-200 px-3 py-2.5 dark:border-stone-800">

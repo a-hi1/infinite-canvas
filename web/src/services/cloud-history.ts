@@ -287,7 +287,7 @@ export async function saveVideoToCloudDetailed(input: {
                     error:
                         toSaveError(
                             fromUrlError,
-                            "视频可播放但无法上云：浏览器 CORS 读不到 vidgen，且服务端也拉不到该地址。请确保 Docker 的 ai-proxy 可访问外网后重试生成（会尽量落盘），或手动下载视频后导入",
+                            "视频可播放但无法上云：浏览器代理不等于 Docker 出网。ai-proxy/api 容器拉不到 vidgen 时会 502。可：① 给容器配置 HTTP_PROXY/HTTPS_PROXY（host.docker.internal:本地代理端口）后重建 api/ai-proxy；② 浏览器下载视频后本地导入再上云；③ 生成时尽量先落盘到本机 storageKey",
                         ),
                 };
             }

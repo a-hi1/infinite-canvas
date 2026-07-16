@@ -31,6 +31,14 @@ services:
       API_MAX_VIDEO_BYTES: ${API_MAX_VIDEO_BYTES:-209715200}
       API_SESSION_TTL_SEC: ${API_SESSION_TTL_SEC:-604800}
       API_REMOTE_FETCH_TIMEOUT_MS: ${API_REMOTE_FETCH_TIMEOUT_MS:-}
+      # 本机浏览器代理 ≠ 容器出网。若 vidgen 仅系统/Clash 可访问，在根目录 .env 写：
+      # HTTP_PROXY/HTTPS_PROXY=http://host.docker.internal:7890（端口改成你的本地代理端口）
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,api,ai-proxy,app}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,api,ai-proxy,app}
     volumes:
       - ./data/api:/data
     # 只在 compose 网络内提供 8080；浏览器经 app Nginx 同源 /api/ 访问。
@@ -41,6 +49,8 @@ services:
     expose:
       - "8080"
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   ai-proxy:
     image: infinite-canvas-ai-proxy:local
@@ -49,6 +59,15 @@ services:
       dockerfile: Dockerfile
     env_file:
       - .env.proxy
+    environment:
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,api,ai-proxy,app}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,api,ai-proxy,app}
     expose:
       - "3002"
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

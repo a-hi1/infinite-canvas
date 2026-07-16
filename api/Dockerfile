@@ -7,6 +7,8 @@ COPY src ./src
 ENV NODE_ENV=production
 ENV PORT=8080
 ENV DATA_DIR=/data
+# Make global fetch honor HTTP(S)_PROXY for from-url CDN pulls (Node 22+ experimental).
+ENV NODE_USE_ENV_PROXY=1
 EXPOSE 8080
 
 CMD ["npm", "start"]

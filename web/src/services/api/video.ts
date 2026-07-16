@@ -126,7 +126,10 @@ export async function storeGeneratedVideo(result: VideoGenerationResult, config?
     if (result.url) {
         // 尽量落本地 blob，便于上云；失败时保留 URL 给 <video src> 直接播放
         // （vidgen.x.ai 常允许 <video> 播，但禁止浏览器 JS fetch）。
-        const candidates = videoDownloadCandidates(result.url, config);
+        // 注意：不要在代理下载已失败后，仍把 /ai-proxy/media 写成最终播放地址——
+        // 那会让预览必定 502；应回退到原始远端 URL 交给 <video> 直连尝试。
+        const originalUrl = unwrapMediaProxyUrl(result.url) || result.url;
+        const candidates = videoDownloadCandidates(originalUrl, config);
         for (const candidate of candidates) {
             try {
                 const blob = await downloadVideoBlob(candidate);
@@ -135,10 +138,8 @@ export async function storeGeneratedVideo(result: VideoGenerationResult, config?
                 // try next
             }
         }
-        // 仍可能播放：优先同源媒体代理 URL（若可用），否则原始远程 URL
-        const playable = mediaProxyCandidates(result.url, config)[0] || sameOriginMediaProxyUrl(result.url) || result.url;
         return {
-            url: playable,
+            url: originalUrl,
             storageKey: "",
             bytes: 0,
             mimeType: result.mimeType || "video/mp4",
@@ -706,26 +707,32 @@ async function resolveSeedanceAudioUrl(audio: ReferenceAudio) {
 }
 
 async function videoResultFromUrl(url: string, options?: RequestOptions, config?: AiConfig, waitUntilReady = false): Promise<VideoGenerationResult> {
-    // 与旧实现一致：仅当前渠道是 /ai-proxy 时走媒体代理；否则直接用远程 URL。
-    // vidgen.x.ai 通常禁止 JS fetch（CORS），但 <video src> 可以直接播放。
-    const playableUrl = mediaProxyUrl(url, config) || url;
+    // 落盘优先走代理；最终预览失败时回退原始远端 URL（<video> 有时比 JS fetch/代理更能播）。
+    const originalUrl = unwrapMediaProxyUrl(url) || url;
     if (waitUntilReady) {
+        // 就绪探测不要强依赖本机 ai-proxy 出网；优先用原始 URL / 非 CORS 封锁路径
         try {
-            await assertRemoteVideoReady(playableUrl, options);
-            return { url: playableUrl, mimeType: "video/mp4" };
+            if (!isBrowserCorsBlockedVideoHost(originalUrl)) {
+                await assertRemoteVideoReady(originalUrl, options);
+            }
+            return { url: originalUrl, mimeType: "video/mp4" };
         } catch {
             throw new VideoOutputNotReadyError();
         }
     }
 
-    try {
-        const blob = await downloadVideoBlob(playableUrl, options);
-        return { blob: ensureVideoBlob(blob), mimeType: "video/mp4" };
-    } catch (error) {
-        if (axios.isCancel(error) || options?.signal?.aborted) throw error;
-        // 下载失败不判失败：把 URL 交给页面 <video> 播放
-        return { url: playableUrl, mimeType: "video/mp4" };
+    const candidates = videoDownloadCandidates(originalUrl, config);
+    for (const candidate of candidates) {
+        try {
+            const blob = await downloadVideoBlob(candidate, options);
+            return { blob: ensureVideoBlob(blob), mimeType: "video/mp4" };
+        } catch (error) {
+            if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+            // try next candidate
+        }
     }
+    // 全部下载失败：仍返回原始远端 URL，避免把必 502 的 /ai-proxy/media 写进播放器
+    return { url: originalUrl, mimeType: "video/mp4" };
 }
 
 async function downloadVideoBlob(url: string, options?: RequestOptions) {
@@ -795,6 +802,18 @@ function mediaProxyUrl(url: string, config?: AiConfig) {
 function sameOriginMediaProxyUrl(url: string) {
     if (!isPublicMediaUrl(url) || !isBrowserCorsBlockedVideoHost(url)) return "";
     return `${AI_PROXY_BASE_URL}/media?${new URLSearchParams({ url }).toString()}`;
+}
+
+/** 若传入已是 /ai-proxy/media?url=...，还原出原始远端媒体地址 */
+function unwrapMediaProxyUrl(url: string) {
+    if (!url) return "";
+    try {
+        const parsed = url.startsWith("http") ? new URL(url) : new URL(url, "http://local.invalid");
+        if (!parsed.pathname.includes("/ai-proxy/media") && !parsed.pathname.endsWith("/media")) return "";
+        return parsed.searchParams.get("url") || "";
+    } catch {
+        return "";
+    }
 }
 
 function isBrowserCorsBlockedVideoHost(url: string) {

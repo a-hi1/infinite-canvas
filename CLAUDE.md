@@ -41,6 +41,8 @@
 `dev-host` 叠加把 app 再映射 `3011`，避开 Windows 上 VS Code「端口转发」抢占的 `127.0.0.1:3001`/`8080`（否则会误打到远端/其它服务，出现上云 `501` 或登录「来源不被允许」）。  
 不要假设宿主机 `8080` 一定是本项目 api。云端配置示例见 `.env.api.example`。
 
+**浏览器代理 ≠ Docker 出网**：系统/Clash 美国代理只影响浏览器。视频上云若走 `/ai-proxy/media` 或 `api` 的 `from-url`，是容器去拉 `vidgen.x.ai`；容器访问超时时会 502。本机可在根目录 `.env` 设置 `HTTP_PROXY`/`HTTPS_PROXY=http://host.docker.internal:代理端口` 后重建 `api` 与 `ai-proxy`。
+
 P0.5 扫尾（运维与体验）：`GET /auth/me` 返回 `usage`（已用字节、任务数）与 `limits`（容量上限），供顶栏账号弹层展示；受保护接口 401 时前端统一清登录态（`infinite-canvas:cloud-unauthorized` 事件），避免连环报错；未登录生成成功轻提示「登录后可跨设备回看」；上云失败若为空间不足则明确提示。备份脚本：`scripts/backup-api-data.sh` / `scripts/backup-api-data.ps1`。更完整说明见 `docs/content/docs/overview/cloud-api.mdx`。公网 HTTPS 必须设 `API_COOKIE_SECURE=true` 并收紧 `API_ALLOWED_ORIGINS`（禁止 `*`）。
 
 P0.5b 安全/部署加固（为 P1 铺路，不改本地生成主路径）：`from-url` 白名单域名在 DNS 解析后拒绝内网地址、限制重定向跳数、拒绝 URL 内嵌账号；过期/吊销会话定期清理；`docker-compose.local.yml` 透传 Cookie Secure / 邀请码 / 容量等变量（Compose 从仓库根 `.env` 插值，示例见 `.env.api.example`）。同源自部署默认 `API_TRUST_PROXY_SAME_ORIGIN=true`：浏览器 Origin 与 `Host`/`X-Forwarded-Host`+协议一致时放行（解决 `http://公网IP:3001` 登录 403），跨站仍靠显式白名单；可设 `false` 回到仅白名单。**当前优先真机验收云端出门条件，勿跳过验收直接做计费或画布全量同步。**
