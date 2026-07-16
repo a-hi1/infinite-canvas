@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { ensureDir, randomId, sha256 } from "./util.js";
+import { FILE_STORAGE_BACKEND, JOB_STATUS, JOB_SOURCE, SAVE_STATUS } from "./model/cloud-domain.js";
 
 /**
  * Lightweight JSON-file database.
@@ -144,7 +145,7 @@ export function createDb(dataDir) {
                 user_id: record.userId,
                 job_id: record.jobId || null,
                 kind: record.kind,
-                storage_backend: "local",
+                storage_backend: FILE_STORAGE_BACKEND.LOCAL,
                 storage_key: record.storageKey,
                 mime: record.mime,
                 bytes: record.bytes || 0,
@@ -176,7 +177,7 @@ export function createDb(dataDir) {
                 id: randomId(),
                 user_id: record.userId,
                 type: record.type,
-                status: record.status || "success",
+                status: record.status || JOB_STATUS.SUCCESS,
                 prompt: record.prompt || "",
                 model: record.model || "",
                 params_json: record.params || {},
@@ -184,10 +185,10 @@ export function createDb(dataDir) {
                 result_file_id: record.resultFileId || null,
                 cover_file_id: record.coverFileId || null,
                 client_local_id: record.clientLocalId || "",
-                source: record.source || "client_upload",
+                source: record.source || JOB_SOURCE.CLIENT_UPLOAD,
                 provider: record.provider || "",
                 upstream_task_id: record.upstreamTaskId || "",
-                save_status: record.saveStatus || "stored",
+                save_status: record.saveStatus || SAVE_STATUS.STORED,
                 created_at: now(),
                 finished_at: record.finishedAt || now(),
                 expires_at: record.expiresAt || null,
@@ -198,7 +199,7 @@ export function createDb(dataDir) {
         },
 
         listJobsForUser(userId, { type, page = 1, pageSize = 20 } = {}) {
-            let rows = state.jobs.filter((j) => j.user_id === userId && j.status !== "deleted");
+            let rows = state.jobs.filter((j) => j.user_id === userId && j.status !== JOB_STATUS.DELETED);
             if (type) rows = rows.filter((j) => j.type === type);
             const total = rows.length;
             const start = Math.max(0, (page - 1) * pageSize);
@@ -207,7 +208,7 @@ export function createDb(dataDir) {
         },
 
         findJobForUser(jobId, userId) {
-            return state.jobs.find((j) => j.id === jobId && j.user_id === userId && j.status !== "deleted") || null;
+            return state.jobs.find((j) => j.id === jobId && j.user_id === userId && j.status !== JOB_STATUS.DELETED) || null;
         },
 
         /** Idempotency for client re-upload / retry: same user + type + client_local_id. */
@@ -216,7 +217,7 @@ export function createDb(dataDir) {
             if (!key) return null;
             return (
                 state.jobs.find(
-                    (j) => j.user_id === userId && j.type === type && j.status !== "deleted" && String(j.client_local_id || "").trim() === key,
+                    (j) => j.user_id === userId && j.type === type && j.status !== JOB_STATUS.DELETED && String(j.client_local_id || "").trim() === key,
                 ) || null
             );
         },
@@ -225,7 +226,7 @@ export function createDb(dataDir) {
             const job = this.findJobForUser(jobId, userId);
             if (!job) return null;
             job.result_file_id = resultFileId;
-            job.save_status = "stored";
+            job.save_status = SAVE_STATUS.STORED;
             job.finished_at = now();
             schedulePersist();
             return job;
@@ -234,8 +235,8 @@ export function createDb(dataDir) {
         deleteJobForUser(jobId, userId) {
             const job = this.findJobForUser(jobId, userId);
             if (!job) return null;
-            job.status = "deleted";
-            job.error_message = job.error_message || "deleted";
+            job.status = JOB_STATUS.DELETED;
+            job.error_message = job.error_message || JOB_STATUS.DELETED;
             if (job.result_file_id) this.softDeleteFile(job.result_file_id, userId);
             if (job.cover_file_id) this.softDeleteFile(job.cover_file_id, userId);
             schedulePersist();
@@ -247,7 +248,7 @@ export function createDb(dataDir) {
         },
 
         countUserJobs(userId, type) {
-            return state.jobs.filter((j) => j.user_id === userId && j.status !== "deleted" && (!type || j.type === type)).length;
+            return state.jobs.filter((j) => j.user_id === userId && j.status !== JOB_STATUS.DELETED && (!type || j.type === type)).length;
         },
     };
 }
@@ -279,7 +280,7 @@ export function publicJob(job, file, extra = {}) {
         client_local_id: job.client_local_id || "",
         source: job.source,
         provider: job.provider || "",
-        save_status: job.save_status || "stored",
+        save_status: job.save_status || SAVE_STATUS.STORED,
         created_at: job.created_at,
         finished_at: job.finished_at,
         expires_at: job.expires_at,

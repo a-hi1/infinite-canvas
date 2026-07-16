@@ -5,6 +5,7 @@ import dns from "node:dns/promises";
 import { URL } from "node:url";
 
 import { createDb, publicJob, publicUser } from "./db.js";
+import { CLOUD_ERROR_REASON, JOB_SOURCE, JOB_STATUS, SAVE_STATUS } from "./model/cloud-domain.js";
 import { createUsersRepo } from "./repositories/users-repo.js";
 import { createSessionsRepo } from "./repositories/sessions-repo.js";
 import { createJobsRepo } from "./repositories/jobs-repo.js";
@@ -114,7 +115,7 @@ const server = http.createServer(async (req, res) => {
     try {
         if (origin && !isOriginAllowed(origin, req)) {
             logWarn(requestId, "origin rejected", { origin, publicOrigin: getRequestPublicOrigin(req), method: req.method, url: req.url });
-            fail(res, 403, originRejectMessage(origin, req), "origin_not_allowed");
+            fail(res, 403, originRejectMessage(origin, req), CLOUD_ERROR_REASON.ORIGIN_NOT_ALLOWED);
             return;
         }
 
@@ -264,7 +265,7 @@ function getSessionUser(req) {
 function requireUser(req, res) {
     const { user, token } = getSessionUser(req);
     if (!user) {
-        fail(res, 401, "请先登录", "auth_required");
+        fail(res, 401, "请先登录", CLOUD_ERROR_REASON.AUTH_REQUIRED);
         return null;
     }
     return { user, token };
@@ -272,7 +273,7 @@ function requireUser(req, res) {
 
 async function handleRegister(req, res) {
     const ip = clientIp(req);
-    if (!rateLimit(registerHits, ip, 5, 60 * 60 * 1000)) return fail(res, 429, "注册过于频繁，请稍后再试", "register_rate_limited");
+    if (!rateLimit(registerHits, ip, 5, 60 * 60 * 1000)) return fail(res, 429, "注册过于频繁，请稍后再试", CLOUD_ERROR_REASON.REGISTER_RATE_LIMITED);
 
     const body = await readJson(req);
     const email = String(body.email || "").trim().toLowerCase();
@@ -280,10 +281,10 @@ async function handleRegister(req, res) {
     const displayName = String(body.display_name || body.displayName || "").trim();
     const code = String(body.invite_code || body.inviteCode || "").trim();
 
-    if (!isValidEmail(email)) return fail(res, 400, "邮箱格式不正确", "invalid_email");
-    if (password.length < 8) return fail(res, 400, "密码至少 8 位", "weak_password");
-    if (inviteCode && code !== inviteCode) return fail(res, 403, "邀请码无效", "invite_code_invalid");
-    if (usersRepo.findByEmail(email)) return fail(res, 409, "该邮箱已注册", "email_already_registered");
+    if (!isValidEmail(email)) return fail(res, 400, "邮箱格式不正确", CLOUD_ERROR_REASON.INVALID_EMAIL);
+    if (password.length < 8) return fail(res, 400, "密码至少 8 位", CLOUD_ERROR_REASON.WEAK_PASSWORD);
+    if (inviteCode && code !== inviteCode) return fail(res, 403, "邀请码无效", CLOUD_ERROR_REASON.INVITE_CODE_INVALID);
+    if (usersRepo.findByEmail(email)) return fail(res, 409, "该邮箱已注册", CLOUD_ERROR_REASON.EMAIL_ALREADY_REGISTERED);
 
     const passwordHash = await hashPassword(password);
     const user = usersRepo.create({ email, passwordHash, displayName });
@@ -293,15 +294,15 @@ async function handleRegister(req, res) {
 
 async function handleLogin(req, res) {
     const ip = clientIp(req);
-    if (!rateLimit(loginHits, ip, 10, 60 * 1000)) return fail(res, 429, "登录过于频繁，请稍后再试", "login_rate_limited");
+    if (!rateLimit(loginHits, ip, 10, 60 * 1000)) return fail(res, 429, "登录过于频繁，请稍后再试", CLOUD_ERROR_REASON.LOGIN_RATE_LIMITED);
 
     const body = await readJson(req);
     const email = String(body.email || "").trim().toLowerCase();
     const password = String(body.password || "");
     const user = usersRepo.findByEmail(email);
-    if (!user) return fail(res, 401, "邮箱或密码错误", "login_invalid_credentials");
-    if (user.status !== "active") return fail(res, 403, "账号不可用", "account_disabled");
-    if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) return fail(res, 429, "账号暂时锁定，请稍后再试", "account_temporarily_locked");
+    if (!user) return fail(res, 401, "邮箱或密码错误", CLOUD_ERROR_REASON.LOGIN_INVALID_CREDENTIALS);
+    if (user.status !== "active") return fail(res, 403, "账号不可用", CLOUD_ERROR_REASON.ACCOUNT_DISABLED);
+    if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) return fail(res, 429, "账号暂时锁定，请稍后再试", CLOUD_ERROR_REASON.ACCOUNT_TEMPORARILY_LOCKED);
 
     const ok = await verifyPassword(password, user.password_hash);
     if (!ok) {
@@ -311,7 +312,7 @@ async function handleLogin(req, res) {
             user.failed_login_count = 0;
         }
         usersRepo.update(user);
-        return fail(res, 401, "邮箱或密码错误", "login_invalid_credentials");
+        return fail(res, 401, "邮箱或密码错误", CLOUD_ERROR_REASON.LOGIN_INVALID_CREDENTIALS);
     }
 
     user.failed_login_count = 0;
@@ -422,7 +423,7 @@ async function handleUploadJob(req, res, type) {
     const auth = requireUser(req, res);
     if (!auth) return;
     const ip = clientIp(req);
-    if (!rateLimit(uploadHits, `${auth.user.id}:${ip}`, 60, 60 * 60 * 1000)) return fail(res, 429, "上传过于频繁", "upload_rate_limited");
+    if (!rateLimit(uploadHits, `${auth.user.id}:${ip}`, 60, 60 * 60 * 1000)) return fail(res, 429, "上传过于频繁", CLOUD_ERROR_REASON.UPLOAD_RATE_LIMITED);
 
     const contentType = String(req.headers["content-type"] || "");
     if (!contentType.includes("multipart/form-data")) return fail(res, 400, "请使用 multipart 上传");
@@ -466,7 +467,7 @@ async function handleUploadJob(req, res, type) {
                 }
             }
             // Job row exists but file missing: rewrite file and relink (still one logical job).
-            if (filesRepo.countUserBytes(auth.user.id) + file.data.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", "storage_quota_exceeded");
+            if (filesRepo.countUserBytes(auth.user.id) + file.data.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", CLOUD_ERROR_REASON.STORAGE_QUOTA_EXCEEDED);
             const repaired = writeUserFile({
                 userId: auth.user.id,
                 type,
@@ -486,7 +487,7 @@ async function handleUploadJob(req, res, type) {
         }
     }
 
-    if (filesRepo.countUserBytes(auth.user.id) + file.data.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", "storage_quota_exceeded");
+    if (filesRepo.countUserBytes(auth.user.id) + file.data.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", CLOUD_ERROR_REASON.STORAGE_QUOTA_EXCEEDED);
 
     const fileRow = writeUserFile({
         userId: auth.user.id,
@@ -502,15 +503,15 @@ async function handleUploadJob(req, res, type) {
     const job = jobsRepo.create({
         userId: auth.user.id,
         type,
-        status: "success",
+        status: JOB_STATUS.SUCCESS,
         prompt: String(fields.prompt || ""),
         model: String(fields.model || ""),
         params,
         resultFileId: fileRow.id,
         clientLocalId,
-        source: "client_upload",
+        source: JOB_SOURCE.CLIENT_UPLOAD,
         provider: String(fields.provider || ""),
-        saveStatus: "stored",
+        saveStatus: SAVE_STATUS.STORED,
     });
     fileRow.job_id = job.id;
     db.flush();
@@ -541,7 +542,7 @@ async function handleUploadJobFromUrl(req, res, type) {
     const auth = requireUser(req, res);
     if (!auth) return;
     const ip = clientIp(req);
-    if (!rateLimit(uploadHits, `${auth.user.id}:${ip}`, 60, 60 * 60 * 1000)) return fail(res, 429, "上传过于频繁", "upload_rate_limited");
+    if (!rateLimit(uploadHits, `${auth.user.id}:${ip}`, 60, 60 * 60 * 1000)) return fail(res, 429, "上传过于频繁", CLOUD_ERROR_REASON.UPLOAD_RATE_LIMITED);
 
     const body = await readJson(req);
     const remoteUrl = String(body.url || body.remote_url || "").trim();
@@ -574,7 +575,7 @@ async function handleUploadJobFromUrl(req, res, type) {
     }
 
     const fetched = await fetchAllowlistedMedia(remoteUrl, type);
-    if (filesRepo.countUserBytes(auth.user.id) + fetched.bytes.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", "storage_quota_exceeded");
+    if (filesRepo.countUserBytes(auth.user.id) + fetched.bytes.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", CLOUD_ERROR_REASON.STORAGE_QUOTA_EXCEEDED);
 
     // re-check dedupe after fetch in case concurrent upload finished
     if (clientLocalId) {
@@ -606,7 +607,7 @@ async function handleUploadJobFromUrl(req, res, type) {
             if (existingFile) filesRepo.softDeleteForUser(existingFile.id, auth.user.id);
             db.flush();
             const job = jobsRepo.findForUser(existing.id, auth.user.id);
-            return json(res, 200, publicJob(job, repaired, { deduped: true, repaired: true, source: "server_fetch" }), "已修复云端文件");
+            return json(res, 200, publicJob(job, repaired, { deduped: true, repaired: true, source: JOB_SOURCE.SERVER_FETCH }), "已修复云端文件");
         }
     }
 
@@ -623,19 +624,19 @@ async function handleUploadJobFromUrl(req, res, type) {
     const job = jobsRepo.create({
         userId: auth.user.id,
         type,
-        status: "success",
+        status: JOB_STATUS.SUCCESS,
         prompt,
         model,
         params: { ...params, remote_url: remoteUrl },
         resultFileId: fileRow.id,
         clientLocalId,
-        source: "server_fetch",
+        source: JOB_SOURCE.SERVER_FETCH,
         provider,
-        saveStatus: "stored",
+        saveStatus: SAVE_STATUS.STORED,
     });
     fileRow.job_id = job.id;
     db.flush();
-    json(res, 200, publicJob(job, fileRow, { deduped: false, source: "server_fetch" }), "已从远程拉取并保存到云端历史");
+    json(res, 200, publicJob(job, fileRow, { deduped: false, source: JOB_SOURCE.SERVER_FETCH }), "已从远程拉取并保存到云端历史");
 }
 
 function isAllowedMediaHost(hostname) {
