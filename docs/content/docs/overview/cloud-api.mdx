@@ -60,16 +60,23 @@ sudo docker compose -f docker-compose.local.yml up -d --build
 | `API_INVITE_CODE` | 非空则注册必须邀请码（防刷盘） |
 | `API_COOKIE_SECURE` | **公网 HTTPS 必须 `true`** |
 | `API_ALLOWED_ORIGINS` | 允许带 Cookie 的前端 Origin 白名单（**不要写 `*`**） |
+| `API_TRUST_PROXY_SAME_ORIGIN` | 默认 `true`：浏览器同源经 Nginx 访问时，若 `Origin` 与 `Host`/`X-Forwarded-Host`+协议一致则放行（适合 `http://公网IP:3001`）；跨站仍只靠白名单。仅白名单模式可设 `false` |
 | `API_MAX_USER_BYTES` | 单用户云端容量上限 |
 | `API_MAX_IMAGE_BYTES` / `API_MAX_VIDEO_BYTES` | 单文件上限 |
 | `API_REMOTE_FETCH_TIMEOUT_MS` | 服务端拉取远程媒体超时（视频默认约 90s） |
 | `API_REMOTE_FETCH_MAX_REDIRECTS` | 远程拉取最大重定向次数（默认 3） |
 
+### 访问地址与登录 403
+
+浏览器打开 `http://服务器IP:3001` 时，登录请求会带 `Origin: http://服务器IP:3001`。  
+默认开启 `API_TRUST_PROXY_SAME_ORIGIN=true` 后，经同源 Nginx `/api/` 转发时会把该 Origin 与请求 Host 对齐放行，**不必**再为每个 IP 手写白名单。  
+若关闭该开关，或使用真正的跨站前端域名，仍须把完整 Origin 写入 `API_ALLOWED_ORIGINS`。
+
 公网域名反代到 `127.0.0.1:3001` 时：
 
 1. 全站 HTTPS  
 2. 根目录 `.env` 设 `API_COOKIE_SECURE=true`  
-3. `API_ALLOWED_ORIGINS` 写上真实前端源，例如 `https://canvas.example.com`  
+3. `API_ALLOWED_ORIGINS` 写上真实前端源，例如 `https://canvas.example.com`（跨站时必填）  
 4. 开放注册务必设 `API_INVITE_CODE`  
 5. 重建 api 容器使环境变量生效  
 

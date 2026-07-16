@@ -43,6 +43,10 @@ const allowedOrigins = String(process.env.API_ALLOWED_ORIGINS || "http://localho
     .filter(Boolean)
     // Credentialed cookie API must never honor wildcard origins.
     .filter((s) => s !== "*");
+// When true (default), browser same-origin calls via reverse proxy are allowed if
+// Origin matches Host / X-Forwarded-Host + X-Forwarded-Proto. Explicit whitelist still wins.
+// Disable only for hardened multi-host setups that rely solely on API_ALLOWED_ORIGINS.
+const trustProxySameOrigin = String(process.env.API_TRUST_PROXY_SAME_ORIGIN || "true").toLowerCase() !== "false";
 
 const SESSION_COOKIE = "ic_session";
 const loginHits = new Map();
@@ -68,17 +72,17 @@ setInterval(() => {
 
 const server = http.createServer(async (req, res) => {
     const origin = req.headers.origin || "";
-    setCors(res, origin);
+    setCors(res, origin, req);
 
     if (req.method === "OPTIONS") {
-        res.writeHead(isOriginAllowed(origin) ? 204 : 403);
+        res.writeHead(isOriginAllowed(origin, req) ? 204 : 403);
         res.end();
         return;
     }
 
     try {
-        if (origin && !isOriginAllowed(origin)) {
-            fail(res, 403, "来源不被允许");
+        if (origin && !isOriginAllowed(origin, req)) {
+            fail(res, 403, originRejectMessage(origin, req));
             return;
         }
 
@@ -125,8 +129,8 @@ server.listen(port, "0.0.0.0", () => {
     console.log(`data dir: ${dataDir}; invite required: ${Boolean(inviteCode)}`);
 });
 
-function setCors(res, origin) {
-    if (origin && isOriginAllowed(origin)) {
+function setCors(res, origin, req) {
+    if (origin && isOriginAllowed(origin, req)) {
         res.setHeader("Access-Control-Allow-Origin", origin);
         res.setHeader("Access-Control-Allow-Credentials", "true");
     }
@@ -136,10 +140,49 @@ function setCors(res, origin) {
     res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-function isOriginAllowed(origin) {
-    // No Origin (same-origin navigation / curl / server-side) is allowed; browser cross-site needs exact match.
+/** First value of a possibly comma-stacked proxy header. */
+function firstHeaderValue(value) {
+    return String(value || "")
+        .split(",")[0]
+        .trim();
+}
+
+/**
+ * Rebuild the browser-facing origin from reverse-proxy headers.
+ * Nginx/Caddy should pass X-Forwarded-Proto / Host (see nginx.conf).
+ */
+function getRequestPublicOrigin(req) {
+    if (!req?.headers) return "";
+    const xfHost = firstHeaderValue(req.headers["x-forwarded-host"]);
+    const host = xfHost || firstHeaderValue(req.headers.host);
+    if (!host) return "";
+    // Basic host sanity: no spaces / scheme injection
+    if (/[\s/]/.test(host) || host.includes("://")) return "";
+    const xfProto = firstHeaderValue(req.headers["x-forwarded-proto"]).toLowerCase();
+    const proto = xfProto === "https" || xfProto === "http" ? xfProto : "http";
+    return `${proto}://${host}`;
+}
+
+function isOriginAllowed(origin, req) {
+    // No Origin (same-origin form navigation / curl / server-side) is allowed.
     if (!origin) return true;
-    return allowedOrigins.includes(origin);
+    if (allowedOrigins.includes(origin)) return true;
+    // Same-origin SPA → /api via reverse proxy (typical self-host: http://IP:3001).
+    // Still rejects true cross-site Origins that don't match this request's public Host.
+    if (trustProxySameOrigin && req) {
+        const publicOrigin = getRequestPublicOrigin(req);
+        if (publicOrigin && publicOrigin === origin) return true;
+    }
+    return false;
+}
+
+function originRejectMessage(origin, req) {
+    const publicOrigin = req ? getRequestPublicOrigin(req) : "";
+    const received = String(origin || "").slice(0, 200);
+    if (publicOrigin && received && publicOrigin !== received) {
+        return `来源不被允许（Origin: ${received}；当前 Host 视角: ${publicOrigin}）。请用与地址栏一致的网址访问，或把该 Origin 写入服务器 API_ALLOWED_ORIGINS 后重启 api`;
+    }
+    return `来源不被允许（Origin: ${received || "空"}）。自部署请确认经同源 /api 访问；或将浏览器地址栏的协议+主机+端口写入 API_ALLOWED_ORIGINS 后执行 docker compose up -d api`;
 }
 
 function rateLimit(map, key, limit, windowMs) {

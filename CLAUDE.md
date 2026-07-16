@@ -40,7 +40,7 @@
 
 P0.5 扫尾（运维与体验）：`GET /auth/me` 返回 `usage`（已用字节、任务数）与 `limits`（容量上限），供顶栏账号弹层展示；受保护接口 401 时前端统一清登录态（`infinite-canvas:cloud-unauthorized` 事件），避免连环报错；未登录生成成功轻提示「登录后可跨设备回看」；上云失败若为空间不足则明确提示。备份脚本：`scripts/backup-api-data.sh` / `scripts/backup-api-data.ps1`。更完整说明见 `docs/content/docs/overview/cloud-api.mdx`。公网 HTTPS 必须设 `API_COOKIE_SECURE=true` 并收紧 `API_ALLOWED_ORIGINS`（禁止 `*`）。
 
-P0.5b 安全/部署加固（为 P1 铺路，不改本地生成主路径）：`from-url` 白名单域名在 DNS 解析后拒绝内网地址、限制重定向跳数、拒绝 URL 内嵌账号；过期/吊销会话定期清理；`docker-compose.local.yml` 透传 Cookie Secure / 邀请码 / 容量等变量（Compose 从仓库根 `.env` 插值，示例见 `.env.api.example`）。**当前优先真机验收云端出门条件，勿跳过验收直接做计费或画布全量同步。**
+P0.5b 安全/部署加固（为 P1 铺路，不改本地生成主路径）：`from-url` 白名单域名在 DNS 解析后拒绝内网地址、限制重定向跳数、拒绝 URL 内嵌账号；过期/吊销会话定期清理；`docker-compose.local.yml` 透传 Cookie Secure / 邀请码 / 容量等变量（Compose 从仓库根 `.env` 插值，示例见 `.env.api.example`）。同源自部署默认 `API_TRUST_PROXY_SAME_ORIGIN=true`：浏览器 Origin 与 `Host`/`X-Forwarded-Host`+协议一致时放行（解决 `http://公网IP:3001` 登录 403），跨站仍靠显式白名单；可设 `false` 回到仅白名单。**当前优先真机验收云端出门条件，勿跳过验收直接做计费或画布全量同步。**
 
 自部署公网共享同一个 Key 时，应优先配置同源 `/ai-proxy`：真实上游 Key 放服务器 `.env.proxy`，前端只保存代理访问令牌或留空。
 

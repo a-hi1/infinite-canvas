@@ -1,7 +1,20 @@
 import { useState } from "react";
 import { App, Form, Input, Modal, Tabs } from "antd";
 
+import { isCloudApiError } from "@/services/cloud-api";
 import { useAuthStore } from "@/stores/use-auth-store";
+
+function authErrorText(error: unknown, fallback: string) {
+    if (isCloudApiError(error)) {
+        if (error.status === 403 && /来源不被允许/.test(error.message)) {
+            return error.message;
+        }
+        if (error.status === 0) return "无法连接云端服务，请稍后重试；未登录仍可本地使用";
+        return error.message || fallback;
+    }
+    if (error instanceof Error && error.message) return error.message;
+    return fallback;
+}
 
 export function AuthModal({ open, onClose }: { open: boolean; onClose: () => void }) {
     const { message } = App.useApp();
@@ -20,7 +33,7 @@ export function AuthModal({ open, onClose }: { open: boolean; onClose: () => voi
             message.success("登录成功");
             onClose();
         } catch (error) {
-            message.error(error instanceof Error ? error.message : "登录失败");
+            message.error(authErrorText(error, "登录失败"));
         } finally {
             setLoading(false);
         }
@@ -39,7 +52,7 @@ export function AuthModal({ open, onClose }: { open: boolean; onClose: () => voi
             message.success("注册成功");
             onClose();
         } catch (error) {
-            message.error(error instanceof Error ? error.message : "注册失败");
+            message.error(authErrorText(error, "注册失败"));
         } finally {
             setLoading(false);
         }
