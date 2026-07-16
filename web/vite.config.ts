@@ -22,15 +22,16 @@ export default defineConfig({
         __APP_RELEASES__: JSON.stringify(parseChangelog(localChangelog)),
     },
     server: {
-        // 本地 dev：/api 直连宿主机 8080 上的 api 容器，避免 3001 被 VS Code 等占用导致 405
-        // /ai-proxy 仍走 Docker app(nginx) 的 3001；若 3001 异常可改用 http://127.0.0.1:8080 仅测账号
+        // 本地 dev（localhost:3000）同源代理到 Docker app(nginx):3001。
+        // api 默认不再映射宿主机 8080（避免抢端口）；浏览器 / Vite 都经 Nginx 的 /api/、/ai-proxy/。
+        // 覆盖：VITE_DEV_PROXY_TARGET=http://127.0.0.1:8081（若你临时打开了 8081:8080）
         proxy: {
             "/api": {
-                target: "http://127.0.0.1:8080",
+                target: process.env.VITE_DEV_PROXY_TARGET || "http://127.0.0.1:3001",
                 changeOrigin: true,
             },
             "/ai-proxy": {
-                target: "http://127.0.0.1:3001",
+                target: process.env.VITE_DEV_PROXY_TARGET || "http://127.0.0.1:3001",
                 changeOrigin: true,
             },
         },

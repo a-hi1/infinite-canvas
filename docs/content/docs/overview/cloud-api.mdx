@@ -36,7 +36,9 @@ bun install
 bun run dev
 ```
 
-Vite 将 `/api` 代理到 `http://127.0.0.1:8080`。浏览器只访问同源 `/api/*`，Cookie 可带上。
+Vite 将 `/api` 与 `/ai-proxy` 代理到 `http://127.0.0.1:3001`（Docker `app` 的 Nginx，再转发到 `api` / `ai-proxy` 容器）。  
+请先 `docker compose -f docker-compose.local.yml up -d`，再 `cd web && bun run dev`。  
+浏览器只访问同源 `/api/*`，Cookie 可带上。若你临时映射了 `8081:8080`，可设环境变量 `VITE_DEV_PROXY_TARGET=http://127.0.0.1:8081` 仅把 API 直连过去（一般不需要）。
 
 ## Docker 源码部署
 
