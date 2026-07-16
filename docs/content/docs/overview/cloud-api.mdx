@@ -36,9 +36,17 @@ bun install
 bun run dev
 ```
 
-Vite 将 `/api` 与 `/ai-proxy` 代理到 `http://127.0.0.1:3001`（Docker `app` 的 Nginx，再转发到 `api` / `ai-proxy` 容器）。  
-请先 `docker compose -f docker-compose.local.yml up -d`，再 `cd web && bun run dev`。  
-浏览器只访问同源 `/api/*`，Cookie 可带上。若你临时映射了 `8081:8080`，可设环境变量 `VITE_DEV_PROXY_TARGET=http://127.0.0.1:8081` 仅把 API 直连过去（一般不需要）。
+Windows 本机开发推荐（避开 VS Code 抢占 `127.0.0.1:3001`/`8080`）：
+
+```bash
+docker compose -f docker-compose.local.yml -f docker-compose.dev-host.yml up -d
+cd web && bun run dev
+# 浏览器：http://localhost:3000
+# Vite 默认把 /api、/ai-proxy 转到 http://127.0.0.1:3011（dev-host 映射）
+```
+
+也可用仅 `docker-compose.local.yml`（站点 `3001`），此时设置 `VITE_DEV_PROXY_TARGET=http://127.0.0.1:3001`。  
+浏览器只访问同源 `/api/*`，Cookie 可带上。本机上云数据在**本机** `./data/api`，与服务器磁盘无关。
 
 ## Docker 源码部署
 
@@ -129,9 +137,38 @@ sudo docker compose -f docker-compose.local.yml start api
 
 后续扩展（服务端代生成、画布同步、计费）应继续遵守：本地 store 不删，只加 cloud adapter；云资源一律带 `user_id`。
 
+## 本机 dev 与服务器（勿混）
+
+| | 本机开发 | 服务器部署 |
+| --- | --- | --- |
+| 用户入口 | `http://localhost:3000` | `http://IP:3001` 或 HTTPS 域名 |
+| 数据目录 | 本机 `./data/api` | 服务器 `./data/api` |
+| 可选 HTTP_PROXY | 可指向本机 Clash（如 `host.docker.internal:7897`） | **默认不要**抄本机代理端口 |
+| 端口 3011 | 仅 dev-host 给 Vite 用 | 访客不需要 |
+
+健康检查：
+
+```bash
+./scripts/check-cloud-stack.sh
+# Windows: scripts/check-cloud-stack.ps1
+```
+
+完整出门条件见 [P0.5c 验稳收口](/docs/progress/p05c-acceptance)。
+
+## Grok / vidgen 说明
+
+中转站生成成功后，结果常是 `https://vidgen.x.ai/...` 临时链。
+
+- **生成**走中转站，不依赖本机/服务器能否打开 vidgen  
+- **代理预览 / media 落盘 / from-url 上云**依赖运行 `ai-proxy`/`api` 的环境访问该 CDN  
+- 浏览器开系统代理 ≠ Docker 容器自动出网；容器需单独 `HTTP_PROXY` 或机房直连  
+- 已有本地 `storageKey`/blob 的上云不依赖再次访问 vidgen  
+
 ## 安全注意
 
-- 不要提交真实 `.env.api`  
+- 不要提交真实 `.env` / `.env.api` / `.env.proxy`  
 - 开放注册务必设邀请码或后续邮箱验证  
 - 文件接口必须登录且校验归属（已实现）  
 - 以后平台上游 Key 只放服务端，不下发浏览器  
+- `API_ALLOWED_ORIGINS` 禁止 `*`；`from-url` 保持 SSRF 白名单  
+
