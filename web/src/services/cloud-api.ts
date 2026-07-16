@@ -52,15 +52,17 @@ export type CloudJob = {
     repaired?: boolean;
 };
 
-type ApiEnvelope<T> = { code: number; data: T; msg: string };
+type ApiEnvelope<T> = { code: number; data: T; msg: string; reason?: string };
 
-/** 带 HTTP 状态的云 API 错误，便于 401 清会话、413 展示容量不足 */
+/** 带 HTTP 状态与稳定 reason 的云 API 错误，避免前端长期靠中文文案做判断 */
 export class CloudApiError extends Error {
     status: number;
-    constructor(message: string, status = 500) {
+    reason?: string;
+    constructor(message: string, status = 500, reason?: string) {
         super(message);
         this.name = "CloudApiError";
         this.status = status;
+        this.reason = reason;
     }
 }
 
@@ -95,10 +97,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (response.status === 401) {
         // /auth/me 未登录返回 200+user:null，这里 401 来自受保护接口
         notifyUnauthorized();
-        throw new CloudApiError(payload?.msg || "请先登录", 401);
+        throw new CloudApiError(payload?.msg || "请先登录", 401, payload?.reason);
     }
     if (!response.ok || !payload || payload.code !== 0) {
-        throw new CloudApiError(payload?.msg || `请求失败（${response.status}）`, response.status);
+        throw new CloudApiError(payload?.msg || `请求失败（${response.status}）`, response.status, payload?.reason);
     }
     return payload.data;
 }

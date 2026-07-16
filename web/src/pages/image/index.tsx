@@ -267,7 +267,7 @@ export default function ImagePage() {
                             void useAuthStore.getState().refreshUsage();
                         } else if (next.cloudSync === "failed") {
                             const detail = next.cloudError || "";
-                            if (detail.includes("空间不足") || detail.includes("413")) {
+                            if (detail.includes("空间不足") || detail.includes("413") || detail.includes("storage_quota_exceeded")) {
                                 message.warning("云端空间不足，请删除部分云端历史后重试");
                             } else {
                                 message.warning(detail ? `云端同步失败：${detail}` : "云端同步失败，可在本机记录中重试");

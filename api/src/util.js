@@ -2,8 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-export function json(res, status, data, msg = "ok") {
-    const body = JSON.stringify({ code: status >= 400 ? status : 0, data, msg });
+export function json(res, status, data, msg = "ok", meta = undefined) {
+    const body = JSON.stringify({ code: status >= 400 ? status : 0, data, msg, ...(meta && typeof meta === "object" ? meta : {}) });
     res.writeHead(status, {
         "Content-Type": "application/json; charset=utf-8",
         "Content-Length": Buffer.byteLength(body),
@@ -11,8 +11,8 @@ export function json(res, status, data, msg = "ok") {
     res.end(body);
 }
 
-export function fail(res, status, msg) {
-    json(res, status, null, msg);
+export function fail(res, status, msg, reason = undefined) {
+    json(res, status, null, msg, reason ? { reason } : undefined);
 }
 
 export function readBody(req, maxBytes) {

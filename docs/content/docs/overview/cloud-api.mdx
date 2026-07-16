@@ -172,6 +172,26 @@ docker compose -f docker-compose.local.yml up -d --build api ai-proxy
 - 浏览器开系统代理 ≠ Docker 容器自动出网；容器需单独 `HTTP_PROXY` 或机房直连  
 - 已有本地 `storageKey`/blob 的上云不依赖再次访问 vidgen  
 
+## 错误 reason code（前后端稳定契约）
+
+云端 API 现在会在错误 envelope 里附带 `reason` 字段，前端应优先使用它做行为判断，不再长期依赖中文文案匹配。
+
+当前已落地的代表性 reason：
+
+| reason | 场景 |
+| --- | --- |
+| `auth_required` | 受保护接口未登录 |
+| `origin_not_allowed` | Origin / Host 同源校验失败 |
+| `storage_quota_exceeded` | 单用户云端容量不足 |
+| `invite_code_invalid` | 注册邀请码无效 |
+| `email_already_registered` | 注册邮箱已存在 |
+| `login_invalid_credentials` | 登录邮箱或密码错误 |
+| `account_temporarily_locked` | 登录失败过多暂时锁定 |
+| `upload_rate_limited` | 上传过于频繁 |
+| `login_rate_limited` / `register_rate_limited` | 登录/注册频率限制 |
+
+后续 P1/P2 新错误应继续沿用：**HTTP 状态 + 稳定 reason + 用户可读 msg**。
+
 ## 安全注意
 
 - 不要提交真实 `.env` / `.env.api` / `.env.proxy`  

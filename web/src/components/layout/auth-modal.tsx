@@ -6,9 +6,10 @@ import { useAuthStore } from "@/stores/use-auth-store";
 
 function authErrorText(error: unknown, fallback: string) {
     if (isCloudApiError(error)) {
-        if (error.status === 403 && /来源不被允许/.test(error.message)) {
-            return error.message;
-        }
+        if (error.reason === "origin_not_allowed") return error.message;
+        if (error.reason === "invite_code_invalid") return "邀请码无效，请检查服务器邀请码配置";
+        if (error.reason === "email_already_registered") return "该邮箱已注册，请直接登录";
+        if (error.reason === "account_temporarily_locked") return "登录失败次数过多，账号已暂时锁定，请稍后再试";
         if (error.status === 0) return "无法连接云端服务，请稍后重试；未登录仍可本地使用";
         return error.message || fallback;
     }

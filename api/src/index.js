@@ -106,7 +106,7 @@ const server = http.createServer(async (req, res) => {
     try {
         if (origin && !isOriginAllowed(origin, req)) {
             logWarn(requestId, "origin rejected", { origin, publicOrigin: getRequestPublicOrigin(req), method: req.method, url: req.url });
-            fail(res, 403, originRejectMessage(origin, req));
+            fail(res, 403, originRejectMessage(origin, req), "origin_not_allowed");
             return;
         }
 
@@ -256,7 +256,7 @@ function getSessionUser(req) {
 function requireUser(req, res) {
     const { user, token } = getSessionUser(req);
     if (!user) {
-        fail(res, 401, "请先登录");
+        fail(res, 401, "请先登录", "auth_required");
         return null;
     }
     return { user, token };
@@ -264,7 +264,7 @@ function requireUser(req, res) {
 
 async function handleRegister(req, res) {
     const ip = clientIp(req);
-    if (!rateLimit(registerHits, ip, 5, 60 * 60 * 1000)) return fail(res, 429, "注册过于频繁，请稍后再试");
+    if (!rateLimit(registerHits, ip, 5, 60 * 60 * 1000)) return fail(res, 429, "注册过于频繁，请稍后再试", "register_rate_limited");
 
     const body = await readJson(req);
     const email = String(body.email || "").trim().toLowerCase();
@@ -272,10 +272,10 @@ async function handleRegister(req, res) {
     const displayName = String(body.display_name || body.displayName || "").trim();
     const code = String(body.invite_code || body.inviteCode || "").trim();
 
-    if (!isValidEmail(email)) return fail(res, 400, "邮箱格式不正确");
-    if (password.length < 8) return fail(res, 400, "密码至少 8 位");
-    if (inviteCode && code !== inviteCode) return fail(res, 403, "邀请码无效");
-    if (db.findUserByEmail(email)) return fail(res, 409, "该邮箱已注册");
+    if (!isValidEmail(email)) return fail(res, 400, "邮箱格式不正确", "invalid_email");
+    if (password.length < 8) return fail(res, 400, "密码至少 8 位", "weak_password");
+    if (inviteCode && code !== inviteCode) return fail(res, 403, "邀请码无效", "invite_code_invalid");
+    if (db.findUserByEmail(email)) return fail(res, 409, "该邮箱已注册", "email_already_registered");
 
     const passwordHash = await hashPassword(password);
     const user = db.createUser({ email, passwordHash, displayName });
@@ -285,15 +285,15 @@ async function handleRegister(req, res) {
 
 async function handleLogin(req, res) {
     const ip = clientIp(req);
-    if (!rateLimit(loginHits, ip, 10, 60 * 1000)) return fail(res, 429, "登录过于频繁，请稍后再试");
+    if (!rateLimit(loginHits, ip, 10, 60 * 1000)) return fail(res, 429, "登录过于频繁，请稍后再试", "login_rate_limited");
 
     const body = await readJson(req);
     const email = String(body.email || "").trim().toLowerCase();
     const password = String(body.password || "");
     const user = db.findUserByEmail(email);
-    if (!user) return fail(res, 401, "邮箱或密码错误");
-    if (user.status !== "active") return fail(res, 403, "账号不可用");
-    if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) return fail(res, 429, "账号暂时锁定，请稍后再试");
+    if (!user) return fail(res, 401, "邮箱或密码错误", "login_invalid_credentials");
+    if (user.status !== "active") return fail(res, 403, "账号不可用", "account_disabled");
+    if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) return fail(res, 429, "账号暂时锁定，请稍后再试", "account_temporarily_locked");
 
     const ok = await verifyPassword(password, user.password_hash);
     if (!ok) {
@@ -303,7 +303,7 @@ async function handleLogin(req, res) {
             user.failed_login_count = 0;
         }
         db.updateUser(user);
-        return fail(res, 401, "邮箱或密码错误");
+        return fail(res, 401, "邮箱或密码错误", "login_invalid_credentials");
     }
 
     user.failed_login_count = 0;
@@ -414,7 +414,7 @@ async function handleUploadJob(req, res, type) {
     const auth = requireUser(req, res);
     if (!auth) return;
     const ip = clientIp(req);
-    if (!rateLimit(uploadHits, `${auth.user.id}:${ip}`, 60, 60 * 60 * 1000)) return fail(res, 429, "上传过于频繁");
+    if (!rateLimit(uploadHits, `${auth.user.id}:${ip}`, 60, 60 * 60 * 1000)) return fail(res, 429, "上传过于频繁", "upload_rate_limited");
 
     const contentType = String(req.headers["content-type"] || "");
     if (!contentType.includes("multipart/form-data")) return fail(res, 400, "请使用 multipart 上传");
@@ -458,7 +458,7 @@ async function handleUploadJob(req, res, type) {
                 }
             }
             // Job row exists but file missing: rewrite file and relink (still one logical job).
-            if (db.countUserBytes(auth.user.id) + file.data.length > maxUserBytes) return fail(res, 413, "云端存储空间不足");
+            if (db.countUserBytes(auth.user.id) + file.data.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", "storage_quota_exceeded");
             const repaired = writeUserFile({
                 userId: auth.user.id,
                 type,
@@ -478,7 +478,7 @@ async function handleUploadJob(req, res, type) {
         }
     }
 
-    if (db.countUserBytes(auth.user.id) + file.data.length > maxUserBytes) return fail(res, 413, "云端存储空间不足");
+    if (db.countUserBytes(auth.user.id) + file.data.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", "storage_quota_exceeded");
 
     const fileRow = writeUserFile({
         userId: auth.user.id,
@@ -533,7 +533,7 @@ async function handleUploadJobFromUrl(req, res, type) {
     const auth = requireUser(req, res);
     if (!auth) return;
     const ip = clientIp(req);
-    if (!rateLimit(uploadHits, `${auth.user.id}:${ip}`, 60, 60 * 60 * 1000)) return fail(res, 429, "上传过于频繁");
+    if (!rateLimit(uploadHits, `${auth.user.id}:${ip}`, 60, 60 * 60 * 1000)) return fail(res, 429, "上传过于频繁", "upload_rate_limited");
 
     const body = await readJson(req);
     const remoteUrl = String(body.url || body.remote_url || "").trim();
@@ -566,7 +566,7 @@ async function handleUploadJobFromUrl(req, res, type) {
     }
 
     const fetched = await fetchAllowlistedMedia(remoteUrl, type);
-    if (db.countUserBytes(auth.user.id) + fetched.bytes.length > maxUserBytes) return fail(res, 413, "云端存储空间不足");
+    if (db.countUserBytes(auth.user.id) + fetched.bytes.length > maxUserBytes) return fail(res, 413, "云端存储空间不足", "storage_quota_exceeded");
 
     // re-check dedupe after fetch in case concurrent upload finished
     if (clientLocalId) {
