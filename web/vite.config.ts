@@ -22,16 +22,17 @@ export default defineConfig({
         __APP_RELEASES__: JSON.stringify(parseChangelog(localChangelog)),
     },
     server: {
-        // 本地 dev（localhost:3000）同源代理到 Docker app(nginx):3001。
-        // api 默认不再映射宿主机 8080（避免抢端口）；浏览器 / Vite 都经 Nginx 的 /api/、/ai-proxy/。
-        // 覆盖：VITE_DEV_PROXY_TARGET=http://127.0.0.1:8081（若你临时打开了 8081:8080）
+        // 本地 dev（localhost:3000）把 /api、/ai-proxy 转到 Docker app(nginx)。
+        // 默认 3011：配合 docker-compose.dev-host.yml，避开 VS Code 端口转发占用的 127.0.0.1:3001/8080
+        //（转发常指向远端旧服务，会出现 501 / 来源不被允许）。
+        // 覆盖：VITE_DEV_PROXY_TARGET=http://127.0.0.1:3001
         proxy: {
             "/api": {
-                target: process.env.VITE_DEV_PROXY_TARGET || "http://127.0.0.1:3001",
+                target: process.env.VITE_DEV_PROXY_TARGET || "http://127.0.0.1:3011",
                 changeOrigin: true,
             },
             "/ai-proxy": {
-                target: process.env.VITE_DEV_PROXY_TARGET || "http://127.0.0.1:3001",
+                target: process.env.VITE_DEV_PROXY_TARGET || "http://127.0.0.1:3011",
                 changeOrigin: true,
             },
         },

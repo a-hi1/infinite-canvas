@@ -1,0 +1,10 @@
+# 本机 Windows 开发叠加配置：避免 VS Code「端口转发」抢占 127.0.0.1:3001 / 8080。
+# 用法：
+#   docker compose -f docker-compose.local.yml -f docker-compose.dev-host.yml up -d
+# 然后 web 开发：
+#   cd web && bun run dev
+# 浏览器仍打开 http://localhost:3000 ；API/代理经 Vite 转到本机 3011 → Docker app。
+services:
+  app:
+    ports:
+      - "3011:3000"

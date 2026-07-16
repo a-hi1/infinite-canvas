@@ -36,7 +36,10 @@
 
 主应用默认仍可由浏览器前端直接请求用户配置的 AI Base URL。AI API Key、Base URL、画布项目、素材和生成记录默认保存在浏览器本地。
 
-可选云端模式（`api` 服务）：用户注册登录后，图片/视频工作台在**本地生成成功之后**异步把结果上传到服务器（`POST /api/jobs/image|video`），文件按用户隔离存储，经 `GET /api/files/:id` 鉴权访问。工作台历史侧栏支持「本机 / 云端」切换查看云端列表（预览/下载/删除）。本机记录带 `cloudSync` 状态（pending/synced/failed/skipped），失败可在本机列表重试上云，且不得把本地生成成功改成失败。上云优先本地 blob/`storageKey`；若结果只是 `imgen.x.ai`/`vidgen.x.ai` 等远程 URL（浏览器 CORS 无法 fetch），走 `POST /api/jobs/{type}/from-url` 由服务端白名单拉取后落盘。上传幂等：同一用户 + 同一 `client_local_id` 重复提交返回已有任务（`deduped: true`），为后续计费防双扣预留。未登录时行为与原先一致；云 API 不可用时不得阻断本地功能。本地开发时 Vite 将 `/api` 与 `/ai-proxy` 代理到 `http://127.0.0.1:3001`（需先起 `docker compose -f docker-compose.local.yml` 的 app/api/ai-proxy）；不要再默认假设宿主机 `8080` 上有 api（compose 为避免抢端口默认不映射 8080）。云端配置示例见 `.env.api.example`（邀请码 `API_INVITE_CODE`、Cookie Secure、来源白名单等）。
+可选云端模式（`api` 服务）：用户注册登录后，图片/视频工作台在**本地生成成功之后**异步把结果上传到服务器（`POST /api/jobs/image|video`），文件按用户隔离存储，经 `GET /api/files/:id` 鉴权访问。工作台历史侧栏支持「本机 / 云端」切换查看云端列表（预览/下载/删除）。本机记录带 `cloudSync` 状态（pending/synced/failed/skipped），失败可在本机列表重试上云，且不得把本地生成成功改成失败。上云优先本地 blob/`storageKey`；若结果只是 `imgen.x.ai`/`vidgen.x.ai` 等远程 URL（浏览器 CORS 无法 fetch），走 `POST /api/jobs/{type}/from-url` 由服务端白名单拉取后落盘。上传幂等：同一用户 + 同一 `client_local_id` 重复提交返回已有任务（`deduped: true`），为后续计费防双扣预留。未登录时行为与原先一致；云 API 不可用时不得阻断本地功能。本地开发时 Vite 将 `/api` 与 `/ai-proxy` 默认代理到 `http://127.0.0.1:3011`（需先起  
+`docker compose -f docker-compose.local.yml -f docker-compose.dev-host.yml up -d`）。  
+`dev-host` 叠加把 app 再映射 `3011`，避开 Windows 上 VS Code「端口转发」抢占的 `127.0.0.1:3001`/`8080`（否则会误打到远端/其它服务，出现上云 `501` 或登录「来源不被允许」）。  
+不要假设宿主机 `8080` 一定是本项目 api。云端配置示例见 `.env.api.example`。
 
 P0.5 扫尾（运维与体验）：`GET /auth/me` 返回 `usage`（已用字节、任务数）与 `limits`（容量上限），供顶栏账号弹层展示；受保护接口 401 时前端统一清登录态（`infinite-canvas:cloud-unauthorized` 事件），避免连环报错；未登录生成成功轻提示「登录后可跨设备回看」；上云失败若为空间不足则明确提示。备份脚本：`scripts/backup-api-data.sh` / `scripts/backup-api-data.ps1`。更完整说明见 `docs/content/docs/overview/cloud-api.mdx`。公网 HTTPS 必须设 `API_COOKIE_SECURE=true` 并收紧 `API_ALLOWED_ORIGINS`（禁止 `*`）。
 
