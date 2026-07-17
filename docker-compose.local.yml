@@ -21,7 +21,8 @@ services:
       DATA_DIR: /data
       # Compose 从仓库根目录 `.env` 做变量插值（推荐 cp .env.api.example .env 后按需改）。
       # 公网 HTTPS 务必：API_COOKIE_SECURE=true，并收紧 API_ALLOWED_ORIGINS；开放注册设 API_INVITE_CODE。
-      API_ALLOWED_ORIGINS: ${API_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001}
+      # 含 dev-host 3011；公网请在根目录 .env 收紧为实际域名/IP，禁止 *
+      API_ALLOWED_ORIGINS: ${API_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:3001,http://localhost:3011,http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:3011}
       # 同源反代默认放行（Origin == X-Forwarded-Host/Host + Proto）；跨站仍靠白名单
       API_TRUST_PROXY_SAME_ORIGIN: ${API_TRUST_PROXY_SAME_ORIGIN:-true}
       API_COOKIE_SECURE: ${API_COOKIE_SECURE:-false}

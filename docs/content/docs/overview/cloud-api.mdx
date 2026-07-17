@@ -70,7 +70,7 @@ sudo docker compose -f docker-compose.local.yml up -d --build
 | `API_INVITE_CODE` | 非空则注册必须邀请码（防刷盘） |
 | `API_COOKIE_SECURE` | **公网 HTTPS 必须 `true`** |
 | `API_ALLOWED_ORIGINS` | 允许带 Cookie 的前端 Origin 白名单（**不要写 `*`**） |
-| `API_TRUST_PROXY_SAME_ORIGIN` | 默认 `true`：浏览器同源经 Nginx 访问时，若 `Origin` 与 `Host`/`X-Forwarded-Host`+协议一致则放行（适合 `http://公网IP:3001`）；跨站仍只靠白名单。仅白名单模式可设 `false` |
+| `API_TRUST_PROXY_SAME_ORIGIN` | 默认 `true`：浏览器同源经 Nginx 访问时，若 `Origin` 与 `Host`/`X-Forwarded-Host`+协议一致则放行（适合 `http://公网IP:3001`）；跨站仍只靠白名单。仅白名单模式可设 `false`。Nginx 必须转发 `$http_host`（保留端口）与 `X-Forwarded-Host`，不要只用会丢端口的 `$host`，否则 `http://IP:3001` 会被算成 `http://IP` 导致登录 403 |
 | `API_MAX_USER_BYTES` | 单用户云端容量上限 |
 | `API_MAX_IMAGE_BYTES` / `API_MAX_VIDEO_BYTES` | 单文件上限 |
 | `API_REMOTE_FETCH_TIMEOUT_MS` | 服务端拉取远程媒体超时（视频默认约 90s） |
