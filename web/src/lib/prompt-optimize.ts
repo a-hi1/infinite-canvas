@@ -53,10 +53,14 @@ export async function optimizeGenerationPrompt(config: AiConfig, prompt: string,
     const textModel = (config.textModel || config.model || "").trim();
     if (!textModel) throw new Error("请先在配置中选择文本模型，用于优化提示词");
 
+    // 关键：保留 channelId::model 归属，不要只把解析后的裸 model 传下去。
+    // 否则下游再次 resolve 时，若多个渠道都有同名模型（如 grok-4.5），会回退到第一个匹配渠道，
+    // 出现 UI 选了“内网grok”，请求却打到默认 codex2api 的现象。
     const requestConfig = resolveModelRequestConfig(
         {
             ...config,
             model: textModel,
+            textModel,
         },
         textModel,
     );
@@ -67,6 +71,9 @@ export async function optimizeGenerationPrompt(config: AiConfig, prompt: string,
     const answer = await requestImageQuestion(
         {
             ...requestConfig,
+            // 再次明确保留原始 textModel 选择，避免 requestImageQuestion 二次解析时丢失渠道归属。
+            model: textModel,
+            textModel,
             systemPrompt: meta.instruction,
         },
         [{ role: "user", content: `请优化以下${meta.label}提示词：\n${source}` }],
