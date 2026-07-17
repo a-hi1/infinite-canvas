@@ -75,6 +75,23 @@ sudo docker compose -f docker-compose.local.yml up -d --build
 | `API_MAX_IMAGE_BYTES` / `API_MAX_VIDEO_BYTES` | 单文件上限 |
 | `API_REMOTE_FETCH_TIMEOUT_MS` | 服务端拉取远程媒体超时（视频默认约 90s） |
 | `API_REMOTE_FETCH_MAX_REDIRECTS` | 远程拉取最大重定向次数（默认 3） |
+| `API_ADMIN_TOKEN` | 可选。非空时允许 `POST /api/admin/credits/grant` 手工加额（Header：`X-Admin-Token` 或 `Authorization: Bearer`）；空则该接口 503。**勿提交真实令牌** |
+
+### 积分账本（P1.0-C）
+
+- 存储：`data/api/db.json` 的 `credit_ledger`（只追加）+ 用户字段 `credit_balance_cents`（缓存）
+- 单位：整数分（`cny_cents`），避免浮点
+- 用户：`GET /api/auth/me` 的 `credits.balance_cents`；`GET /api/credits/ledger` 查自己流水
+- 管理员手工加额（运维，非前端入口）：
+
+```bash
+curl -sS -X POST http://127.0.0.1:3011/api/admin/credits/grant \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Token: $API_ADMIN_TOKEN" \
+  -d '{"email":"user@example.com","amount_yuan":10,"note":"试用赠送","idempotency_key":"trial-2026-07-17-user"}'
+```
+
+- 默认 `platform_billing_enabled=false`：生成仍走用户自己的 Key；扣费要等后续图片网关 + 显式开关
 
 ### 访问地址与登录 403
 

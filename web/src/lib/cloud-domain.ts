@@ -71,6 +71,10 @@ export const CLOUD_ERROR_REASON = {
     REMOTE_FETCH_FAILED: "remote_fetch_failed",
     REMOTE_FETCH_BAD_GATEWAY: "remote_fetch_bad_gateway",
     REMOTE_FETCH_NOT_READY: "remote_fetch_not_ready",
+    ADMIN_UNAUTHORIZED: "admin_unauthorized",
+    ADMIN_NOT_CONFIGURED: "admin_not_configured",
+    CREDITS_INSUFFICIENT: "credits_insufficient",
+    USER_NOT_FOUND: "user_not_found",
     INTERNAL_ERROR: "internal_error",
 } as const;
 

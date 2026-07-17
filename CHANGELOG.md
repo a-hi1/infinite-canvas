@@ -2,6 +2,7 @@
 
 ## Unreleased
 
++ [新增] P1.0-C：积分账本（append-only）与管理员手工加额接口；`/auth/me` 返回积分余额展示，默认不开启平台代生成扣费。
 + [调整] P1.0-B：收口云端 jobs/files/user/error 领域常量；remote-fetch 与通用失败透传稳定 `reason`；前端镜像常量并以 reason 判断登录/容量错误。
 + [修复] Nginx 反代 `/api` 改用 `$http_host` / `X-Forwarded-Host` 保留端口，修复 `http://127.0.0.1:3011` 等带端口同源登录被误判 Origin 的问题。
 + [修复] 文本问答 / 工具调用 / AI 提示词优化优先使用 `textModel`，并保留 `channelId::model` 渠道归属，避免多渠道同名模型时请求打错渠道。

@@ -16,11 +16,17 @@ function formatBytes(bytes: number) {
     return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
 }
 
+function formatYuanFromCents(cents: number) {
+    if (!Number.isFinite(cents)) return "¥0.00";
+    return `¥${(cents / 100).toFixed(2)}`;
+}
+
 export function AccountPopover() {
     const { message } = App.useApp();
     const user = useAuthStore((state) => state.user);
     const usage = useAuthStore((state) => state.usage);
     const limits = useAuthStore((state) => state.limits);
+    const credits = useAuthStore((state) => state.credits);
     const logout = useAuthStore((state) => state.logout);
     const refreshUsage = useAuthStore((state) => state.refreshUsage);
     const [open, setOpen] = useState(false);
@@ -37,6 +43,8 @@ export function AccountPopover() {
     const max = limits?.max_user_bytes || 0;
     const percent = max > 0 ? Math.min(100, Math.round((used / max) * 1000) / 10) : 0;
     const nearFull = max > 0 && used / max >= 0.9;
+    const balanceCents = credits?.balance_cents ?? user.credit_balance_cents ?? 0;
+    const platformBilling = Boolean(credits?.platform_billing_enabled);
 
     const content = (
         <div className="w-72 space-y-3">
@@ -44,6 +52,16 @@ export function AccountPopover() {
                 <div className="text-sm font-medium text-stone-900 dark:text-stone-100">{user.display_name || "已登录账号"}</div>
                 <div className="mt-0.5 break-all text-xs text-stone-500 dark:text-stone-400">{user.email}</div>
                 {user.plan_code ? <div className="mt-1 text-[11px] text-stone-400">套餐 {user.plan_code}</div> : null}
+            </div>
+
+            <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
+                <div className="mb-1 flex items-center justify-between gap-2 text-xs text-stone-500 dark:text-stone-400">
+                    <span>平台积分余额</span>
+                    <span className="font-medium text-stone-700 dark:text-stone-200">{formatYuanFromCents(balanceCents)}</span>
+                </div>
+                <div className="text-[11px] leading-5 text-stone-400">
+                    {platformBilling ? "平台代生成已开启，扣费将走账本。" : "默认仍用你自己的 API Key 生成；积分仅预留后续平台代生成，手工加额由管理员操作。"}
+                </div>
             </div>
 
             <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">

@@ -37,6 +37,25 @@ export const USER_STATUS = {
 };
 
 /**
+ * Credit ledger entry types (append-only).
+ * grant/adjust: manual admin ops now.
+ * charge/refund/reserve: reserved for P1 server-side generation billing.
+ */
+export const CREDIT_LEDGER_TYPE = {
+    GRANT: "grant",
+    ADJUST: "adjust",
+    CHARGE: "charge",
+    REFUND: "refund",
+    RESERVE: "reserve",
+    RELEASE: "release",
+};
+
+/** Currency unit stored as integer cents to avoid float drift. */
+export const CREDIT_CURRENCY = {
+    CNY_CENTS: "cny_cents",
+};
+
+/**
  * Stable machine-readable error reasons for API envelope `{ reason }`.
  * Frontend should prefer these over Chinese `msg` when branching.
  */
@@ -70,5 +89,9 @@ export const CLOUD_ERROR_REASON = {
     REMOTE_FETCH_FAILED: "remote_fetch_failed",
     REMOTE_FETCH_BAD_GATEWAY: "remote_fetch_bad_gateway",
     REMOTE_FETCH_NOT_READY: "remote_fetch_not_ready",
+    ADMIN_UNAUTHORIZED: "admin_unauthorized",
+    ADMIN_NOT_CONFIGURED: "admin_not_configured",
+    CREDITS_INSUFFICIENT: "credits_insufficient",
+    USER_NOT_FOUND: "user_not_found",
     INTERNAL_ERROR: "internal_error",
 };

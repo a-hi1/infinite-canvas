@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { ensureDir, randomId, sha256 } from "./util.js";
-import { FILE_STORAGE_BACKEND, JOB_STATUS, JOB_SOURCE, SAVE_STATUS, USER_STATUS } from "./model/cloud-domain.js";
+import { CLOUD_ERROR_REASON, CREDIT_CURRENCY, CREDIT_LEDGER_TYPE, FILE_STORAGE_BACKEND, JOB_STATUS, JOB_SOURCE, SAVE_STATUS, USER_STATUS } from "./model/cloud-domain.js";
 
 /**
  * Lightweight JSON-file database.
@@ -11,8 +11,8 @@ import { FILE_STORAGE_BACKEND, JOB_STATUS, JOB_SOURCE, SAVE_STATUS, USER_STATUS 
 export function createDb(dataDir) {
     ensureDir(dataDir);
     const dbPath = path.join(dataDir, "db.json");
-    /** @type {{ users: any[], sessions: any[], jobs: any[], files: any[] }} */
-    let state = { users: [], sessions: [], jobs: [], files: [] };
+    /** @type {{ users: any[], sessions: any[], jobs: any[], files: any[], credit_ledger: any[] }} */
+    let state = { users: [], sessions: [], jobs: [], files: [], credit_ledger: [] };
 
     if (fs.existsSync(dbPath)) {
         try {
@@ -21,6 +21,7 @@ export function createDb(dataDir) {
             state.sessions ||= [];
             state.jobs ||= [];
             state.files ||= [];
+            state.credit_ledger ||= [];
         } catch {
             // keep empty state if corrupt; operator can restore from backup
         }
@@ -71,6 +72,8 @@ export function createDb(dataDir) {
                 display_name: displayName || "",
                 status: USER_STATUS.ACTIVE,
                 plan_code: "free",
+                // Denormalized credit cache; source of truth is credit_ledger.
+                credit_balance_cents: 0,
                 failed_login_count: 0,
                 locked_until: null,
                 created_at: now(),
@@ -250,6 +253,98 @@ export function createDb(dataDir) {
         countUserJobs(userId, type) {
             return state.jobs.filter((j) => j.user_id === userId && j.status !== JOB_STATUS.DELETED && (!type || j.type === type)).length;
         },
+
+        getUserCreditBalanceCents(userId) {
+            const user = this.findUserById(userId);
+            if (!user) return 0;
+            if (typeof user.credit_balance_cents === "number" && Number.isFinite(user.credit_balance_cents)) {
+                return Math.trunc(user.credit_balance_cents);
+            }
+            // Legacy users / missing cache: recompute once from ledger.
+            const sum = state.credit_ledger
+                .filter((row) => row.user_id === userId)
+                .reduce((acc, row) => acc + (Number(row.amount_cents) || 0), 0);
+            user.credit_balance_cents = Math.trunc(sum);
+            schedulePersist();
+            return user.credit_balance_cents;
+        },
+
+        findCreditLedgerByIdempotency(userId, key) {
+            const idem = String(key || "").trim();
+            if (!idem) return null;
+            return (
+                state.credit_ledger.find(
+                    (row) => row.user_id === userId && String(row.idempotency_key || "").trim() === idem,
+                ) || null
+            );
+        },
+
+        listCreditLedgerForUser(userId, { page = 1, pageSize = 20 } = {}) {
+            const rows = state.credit_ledger.filter((row) => row.user_id === userId);
+            // newest first
+            const sorted = [...rows].sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+            const total = sorted.length;
+            const start = Math.max(0, (page - 1) * pageSize);
+            return { items: sorted.slice(start, start + pageSize), total, page, page_size: pageSize };
+        },
+
+        /**
+         * Append-only credit movement. amountCents may be negative for future charges.
+         * Rejects if resulting balance would go below zero (no silent debt).
+         */
+        appendCreditLedger({
+            userId,
+            amountCents,
+            type = CREDIT_LEDGER_TYPE.GRANT,
+            note = "",
+            operator = "system",
+            idempotencyKey = "",
+            refType = "",
+            refId = "",
+            allowNegativeBalance = false,
+        }) {
+            const user = this.findUserById(userId);
+            if (!user) return null;
+            const amount = Math.trunc(Number(amountCents) || 0);
+            if (!amount) {
+                const err = new Error("amount_cents 不能为 0");
+                err.status = 400;
+                err.reason = CLOUD_ERROR_REASON.BAD_REQUEST;
+                throw err;
+            }
+            const idem = String(idempotencyKey || "").trim();
+            if (idem) {
+                const existing = this.findCreditLedgerByIdempotency(userId, idem);
+                if (existing) return { entry: existing, user, deduped: true };
+            }
+            const before = this.getUserCreditBalanceCents(userId);
+            const after = before + amount;
+            if (!allowNegativeBalance && after < 0) {
+                const err = new Error("积分不足");
+                err.status = 402;
+                err.reason = CLOUD_ERROR_REASON.CREDITS_INSUFFICIENT;
+                throw err;
+            }
+            const entry = {
+                id: randomId(),
+                user_id: userId,
+                amount_cents: amount,
+                balance_after_cents: after,
+                currency: CREDIT_CURRENCY.CNY_CENTS,
+                type: type || CREDIT_LEDGER_TYPE.GRANT,
+                note: String(note || "").slice(0, 500),
+                operator: String(operator || "system").slice(0, 120),
+                idempotency_key: idem,
+                ref_type: String(refType || "").slice(0, 64),
+                ref_id: String(refId || "").slice(0, 128),
+                created_at: now(),
+            };
+            state.credit_ledger.unshift(entry);
+            user.credit_balance_cents = after;
+            user.updated_at = now();
+            schedulePersist();
+            return { entry, user, deduped: false };
+        },
     };
 }
 
@@ -262,6 +357,24 @@ export function publicUser(user) {
         plan_code: user.plan_code,
         status: user.status,
         created_at: user.created_at,
+        credit_balance_cents: typeof user.credit_balance_cents === "number" ? Math.trunc(user.credit_balance_cents) : 0,
+    };
+}
+
+export function publicCreditLedgerEntry(entry) {
+    if (!entry) return null;
+    return {
+        id: entry.id,
+        amount_cents: entry.amount_cents,
+        balance_after_cents: entry.balance_after_cents,
+        currency: entry.currency || CREDIT_CURRENCY.CNY_CENTS,
+        type: entry.type,
+        note: entry.note || "",
+        operator: entry.operator || "",
+        idempotency_key: entry.idempotency_key || "",
+        ref_type: entry.ref_type || "",
+        ref_id: entry.ref_id || "",
+        created_at: entry.created_at,
     };
 }
 

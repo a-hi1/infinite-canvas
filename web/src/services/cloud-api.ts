@@ -5,6 +5,7 @@ export type CloudUser = {
     plan_code?: string;
     status?: string;
     created_at?: string;
+    credit_balance_cents?: number;
 };
 
 export type CloudUsage = {
@@ -18,6 +19,13 @@ export type CloudLimits = {
     max_user_bytes: number;
     max_image_bytes: number;
     max_video_bytes: number;
+};
+
+/** Platform credit wallet (integer cents). Billing generation is still off by default. */
+export type CloudCredits = {
+    balance_cents: number;
+    currency?: string;
+    platform_billing_enabled?: boolean;
 };
 
 export type CloudFile = {
@@ -108,7 +116,35 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export function getCloudMe() {
-    return request<{ user: CloudUser | null; usage?: CloudUsage | null; limits?: CloudLimits | null }>("/auth/me");
+    return request<{
+        user: CloudUser | null;
+        usage?: CloudUsage | null;
+        limits?: CloudLimits | null;
+        credits?: CloudCredits | null;
+    }>("/auth/me");
+}
+
+export function listCloudCreditLedger(input?: { page?: number; pageSize?: number }) {
+    const params = new URLSearchParams();
+    if (input?.page) params.set("page", String(input.page));
+    if (input?.pageSize) params.set("page_size", String(input.pageSize));
+    const qs = params.toString();
+    return request<{
+        items: Array<{
+            id: string;
+            amount_cents: number;
+            balance_after_cents: number;
+            currency?: string;
+            type: string;
+            note?: string;
+            operator?: string;
+            created_at?: string;
+        }>;
+        total: number;
+        page: number;
+        page_size: number;
+        credits?: CloudCredits | null;
+    }>(`/credits/ledger${qs ? `?${qs}` : ""}`);
 }
 
 export function isCloudApiError(error: unknown): error is CloudApiError {

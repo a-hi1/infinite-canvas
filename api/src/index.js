@@ -4,12 +4,13 @@ import path from "node:path";
 import dns from "node:dns/promises";
 import { URL } from "node:url";
 
-import { createDb, publicJob, publicUser } from "./db.js";
-import { CLOUD_ERROR_REASON, JOB_SOURCE, JOB_STATUS, JOB_TYPE, SAVE_STATUS, USER_STATUS } from "./model/cloud-domain.js";
+import { createDb, publicCreditLedgerEntry, publicJob, publicUser } from "./db.js";
+import { CLOUD_ERROR_REASON, CREDIT_LEDGER_TYPE, JOB_SOURCE, JOB_STATUS, JOB_TYPE, SAVE_STATUS, USER_STATUS } from "./model/cloud-domain.js";
 import { createUsersRepo } from "./repositories/users-repo.js";
 import { createSessionsRepo } from "./repositories/sessions-repo.js";
 import { createJobsRepo } from "./repositories/jobs-repo.js";
 import { createFilesRepo } from "./repositories/files-repo.js";
+import { createCreditsRepo } from "./repositories/credits-repo.js";
 import {
     clearCookie,
     clientIp,
@@ -36,6 +37,8 @@ const port = Number(process.env.PORT || 8080);
 const dataDir = process.env.DATA_DIR || path.resolve("data");
 const uploadsDir = path.join(dataDir, "uploads");
 const inviteCode = String(process.env.API_INVITE_CODE || "").trim();
+// Optional admin token for manual credit grant only. Empty = admin routes disabled (404/not configured).
+const adminToken = String(process.env.API_ADMIN_TOKEN || "").trim();
 const sessionTtlSec = Number(process.env.API_SESSION_TTL_SEC || 7 * 24 * 3600);
 const cookieSecure = String(process.env.API_COOKIE_SECURE || "").toLowerCase() === "true";
 const maxBodyBytes = Number(process.env.API_MAX_BODY_BYTES || 220 * 1024 * 1024);
@@ -85,6 +88,7 @@ const usersRepo = createUsersRepo(db);
 const sessionsRepo = createSessionsRepo(db);
 const jobsRepo = createJobsRepo(db);
 const filesRepo = createFilesRepo(db);
+const creditsRepo = createCreditsRepo(db);
 // Keep JSON session table small before Postgres; does not affect active logins.
 try {
     const pruned = sessionsRepo.pruneExpired();
@@ -156,6 +160,10 @@ const server = http.createServer(async (req, res) => {
         if (req.method === "POST" && route === "/jobs/video/from-url") return await handleUploadJobFromUrl(req, res, JOB_TYPE.VIDEO);
 
         if (req.method === "GET" && route.startsWith("/files/")) return await handleGetFile(req, res, route.slice("/files/".length));
+
+        // Credits: user can list own ledger; admin token can grant/adjust (no payment gateway yet).
+        if (req.method === "GET" && route === "/credits/ledger") return await handleListOwnCredits(req, res, url);
+        if (req.method === "POST" && route === "/admin/credits/grant") return await handleAdminCreditGrant(req, res);
 
         fail(res, 404, "接口不存在", CLOUD_ERROR_REASON.NOT_FOUND);
         logWarn(requestId, "route not found", { method: req.method, url: req.url, ms: Date.now() - startedAt });
@@ -334,10 +342,13 @@ function handleLogout(req, res) {
 function handleMe(req, res) {
     const { user } = getSessionUser(req);
     if (!user) {
-        json(res, 200, { user: null, usage: null, limits: publicLimits() });
+        json(res, 200, { user: null, usage: null, limits: publicLimits(), credits: null });
         return;
     }
     // usage 供前端账号区展示；limits 方便以后计费/套餐扩展而不改契约形态
+    // credits 仅展示余额；扣费尚未接入生成路径（默认仍 BYOK）
+    const balance = creditsRepo.getBalanceCents(user.id);
+    if (typeof user.credit_balance_cents !== "number") user.credit_balance_cents = balance;
     json(res, 200, {
         user: publicUser(user),
         usage: {
@@ -347,6 +358,7 @@ function handleMe(req, res) {
             video_job_count: jobsRepo.countForUser(user.id, JOB_TYPE.VIDEO),
         },
         limits: publicLimits(),
+        credits: publicCredits(user.id),
     });
 }
 
@@ -356,6 +368,103 @@ function publicLimits() {
         max_image_bytes: maxImageBytes,
         max_video_bytes: maxVideoBytes,
     };
+}
+
+function publicCredits(userId) {
+    return {
+        balance_cents: creditsRepo.getBalanceCents(userId),
+        currency: "cny_cents",
+        // Explicit: platform generation billing is off until later switch.
+        platform_billing_enabled: false,
+    };
+}
+
+function handleListOwnCredits(req, res, url) {
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const page = Math.max(1, Number(url.searchParams.get("page") || 1) || 1);
+    const pageSize = Math.min(50, Math.max(1, Number(url.searchParams.get("page_size") || url.searchParams.get("pageSize") || 20) || 20));
+    const result = creditsRepo.listForUser(auth.user.id, { page, pageSize });
+    json(res, 200, {
+        items: result.items.map(publicCreditLedgerEntry),
+        total: result.total,
+        page: result.page,
+        page_size: result.page_size,
+        credits: publicCredits(auth.user.id),
+    });
+}
+
+/**
+ * Admin-only manual credit grant/adjust.
+ * Auth: Authorization: Bearer <API_ADMIN_TOKEN> or X-Admin-Token header.
+ * Does not use user session cookie — avoids elevating any browser session.
+ */
+async function handleAdminCreditGrant(req, res) {
+    if (!adminToken) {
+        return fail(res, 503, "未配置 API_ADMIN_TOKEN，手工加额不可用", CLOUD_ERROR_REASON.ADMIN_NOT_CONFIGURED);
+    }
+    const headerToken =
+        String(req.headers["x-admin-token"] || "").trim() ||
+        String(req.headers.authorization || "")
+            .replace(/^Bearer\s+/i, "")
+            .trim();
+    if (!headerToken || headerToken !== adminToken) {
+        return fail(res, 401, "管理员令牌无效", CLOUD_ERROR_REASON.ADMIN_UNAUTHORIZED);
+    }
+
+    const body = await readJson(req);
+    const email = String(body.email || "").trim().toLowerCase();
+    const userId = String(body.user_id || body.userId || "").trim();
+    let user = null;
+    if (userId) user = usersRepo.findById(userId);
+    else if (email) user = usersRepo.findByEmail(email);
+    if (!user) return fail(res, 404, "用户不存在", CLOUD_ERROR_REASON.USER_NOT_FOUND);
+
+    // Prefer amount_cents; accept amount_yuan for operator convenience (converted to integer cents).
+    let amountCents = body.amount_cents ?? body.amountCents;
+    if (amountCents === undefined || amountCents === null || amountCents === "") {
+        const yuan = body.amount_yuan ?? body.amountYuan;
+        if (yuan !== undefined && yuan !== null && yuan !== "") {
+            amountCents = Math.round(Number(yuan) * 100);
+        }
+    }
+    amountCents = Math.trunc(Number(amountCents));
+    if (!Number.isFinite(amountCents) || amountCents === 0) {
+        return fail(res, 400, "请提供非 0 的 amount_cents 或 amount_yuan", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    // Hard cap single grant to reduce fat-finger disasters (100000 yuan).
+    if (Math.abs(amountCents) > 10_000_000) {
+        return fail(res, 400, "单次加额/调账超过上限（±100000 元）", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+
+    const typeRaw = String(body.type || CREDIT_LEDGER_TYPE.GRANT).trim().toLowerCase();
+    const type = typeRaw === CREDIT_LEDGER_TYPE.ADJUST ? CREDIT_LEDGER_TYPE.ADJUST : CREDIT_LEDGER_TYPE.GRANT;
+    const note = String(body.note || body.reason || "").trim();
+    const operator = String(body.operator || "admin").trim() || "admin";
+    const idempotencyKey = String(body.idempotency_key || body.idempotencyKey || "").trim();
+
+    const result = creditsRepo.append({
+        userId: user.id,
+        amountCents,
+        type,
+        note,
+        operator,
+        idempotencyKey,
+        refType: "admin_grant",
+        refId: idempotencyKey || "",
+    });
+    db.flush();
+    json(
+        res,
+        200,
+        {
+            user: publicUser(result.user),
+            entry: publicCreditLedgerEntry(result.entry),
+            credits: publicCredits(user.id),
+            deduped: Boolean(result.deduped),
+        },
+        result.deduped ? "已存在相同幂等加额，未重复记账" : "已记账",
+    );
 }
 
 function issueSession(req, res, userId) {
