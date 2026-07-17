@@ -5,7 +5,7 @@ import dns from "node:dns/promises";
 import { URL } from "node:url";
 
 import { createDb, publicJob, publicUser } from "./db.js";
-import { CLOUD_ERROR_REASON, JOB_SOURCE, JOB_STATUS, SAVE_STATUS } from "./model/cloud-domain.js";
+import { CLOUD_ERROR_REASON, JOB_SOURCE, JOB_STATUS, JOB_TYPE, SAVE_STATUS, USER_STATUS } from "./model/cloud-domain.js";
 import { createUsersRepo } from "./repositories/users-repo.js";
 import { createSessionsRepo } from "./repositories/sessions-repo.js";
 import { createJobsRepo } from "./repositories/jobs-repo.js";
@@ -17,6 +17,7 @@ import {
     extForMime,
     fail,
     hashPassword,
+    httpError,
     isPrivateOrLocalHost,
     isValidEmail,
     json,
@@ -148,21 +149,22 @@ const server = http.createServer(async (req, res) => {
         if (req.method === "GET" && route === "/jobs") return await handleListJobs(req, res, url);
         if (req.method === "GET" && route.startsWith("/jobs/")) return await handleGetJob(req, res, route.slice("/jobs/".length));
         if (req.method === "DELETE" && route.startsWith("/jobs/")) return await handleDeleteJob(req, res, route.slice("/jobs/".length));
-        if (req.method === "POST" && route === "/jobs/image") return await handleUploadJob(req, res, "image");
-        if (req.method === "POST" && route === "/jobs/video") return await handleUploadJob(req, res, "video");
+        if (req.method === "POST" && route === "/jobs/image") return await handleUploadJob(req, res, JOB_TYPE.IMAGE);
+        if (req.method === "POST" && route === "/jobs/video") return await handleUploadJob(req, res, JOB_TYPE.VIDEO);
         // Browser cannot fetch imgen/vidgen due to CORS; server pulls allowlisted URL then stores.
-        if (req.method === "POST" && route === "/jobs/image/from-url") return await handleUploadJobFromUrl(req, res, "image");
-        if (req.method === "POST" && route === "/jobs/video/from-url") return await handleUploadJobFromUrl(req, res, "video");
+        if (req.method === "POST" && route === "/jobs/image/from-url") return await handleUploadJobFromUrl(req, res, JOB_TYPE.IMAGE);
+        if (req.method === "POST" && route === "/jobs/video/from-url") return await handleUploadJobFromUrl(req, res, JOB_TYPE.VIDEO);
 
         if (req.method === "GET" && route.startsWith("/files/")) return await handleGetFile(req, res, route.slice("/files/".length));
 
-        fail(res, 404, "接口不存在");
+        fail(res, 404, "接口不存在", CLOUD_ERROR_REASON.NOT_FOUND);
         logWarn(requestId, "route not found", { method: req.method, url: req.url, ms: Date.now() - startedAt });
     } catch (error) {
         const status = error.status || 500;
-        if (!res.headersSent) fail(res, status, error.status ? error.message : "服务器错误");
+        const reason = error.reason || (error.status ? undefined : CLOUD_ERROR_REASON.INTERNAL_ERROR);
+        if (!res.headersSent) fail(res, status, error.status ? error.message : "服务器错误", reason);
         if (error.status) {
-            logWarn(requestId, "request failed", { status, method: req.method, url: req.url, ms: Date.now() - startedAt, message: error.message });
+            logWarn(requestId, "request failed", { status, method: req.method, url: req.url, ms: Date.now() - startedAt, message: error.message, reason });
         } else {
             logError(requestId, "request crashed", { status, method: req.method, url: req.url, ms: Date.now() - startedAt, message: error?.message || String(error) });
         }
@@ -247,7 +249,7 @@ async function readJson(req) {
     try {
         return JSON.parse(raw.toString("utf8"));
     } catch {
-        throw Object.assign(new Error("JSON 无效"), { status: 400 });
+        throw httpError("JSON 无效", 400, CLOUD_ERROR_REASON.BAD_REQUEST);
     }
 }
 
@@ -258,7 +260,7 @@ function getSessionUser(req) {
     const session = sessionsRepo.findByToken(token);
     if (!session) return { user: null, token };
     const user = usersRepo.findById(session.user_id);
-    if (!user || user.status !== "active") return { user: null, token };
+    if (!user || user.status !== USER_STATUS.ACTIVE) return { user: null, token };
     return { user, token };
 }
 
@@ -301,7 +303,7 @@ async function handleLogin(req, res) {
     const password = String(body.password || "");
     const user = usersRepo.findByEmail(email);
     if (!user) return fail(res, 401, "邮箱或密码错误", CLOUD_ERROR_REASON.LOGIN_INVALID_CREDENTIALS);
-    if (user.status !== "active") return fail(res, 403, "账号不可用", CLOUD_ERROR_REASON.ACCOUNT_DISABLED);
+    if (user.status !== USER_STATUS.ACTIVE) return fail(res, 403, "账号不可用", CLOUD_ERROR_REASON.ACCOUNT_DISABLED);
     if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) return fail(res, 429, "账号暂时锁定，请稍后再试", CLOUD_ERROR_REASON.ACCOUNT_TEMPORARILY_LOCKED);
 
     const ok = await verifyPassword(password, user.password_hash);
@@ -341,8 +343,8 @@ function handleMe(req, res) {
         usage: {
             used_bytes: filesRepo.countUserBytes(user.id),
             job_count: jobsRepo.countForUser(user.id),
-            image_job_count: jobsRepo.countForUser(user.id, "image"),
-            video_job_count: jobsRepo.countForUser(user.id, "video"),
+            image_job_count: jobsRepo.countForUser(user.id, JOB_TYPE.IMAGE),
+            video_job_count: jobsRepo.countForUser(user.id, JOB_TYPE.VIDEO),
         },
         limits: publicLimits(),
     });
@@ -395,7 +397,7 @@ function handleGetJob(req, res, jobId) {
     const auth = requireUser(req, res);
     if (!auth) return;
     const job = jobsRepo.findForUser(jobId, auth.user.id);
-    if (!job) return fail(res, 404, "任务不存在");
+    if (!job) return fail(res, 404, "任务不存在", CLOUD_ERROR_REASON.NOT_FOUND);
     const file = job.result_file_id ? filesRepo.findForUser(job.result_file_id, auth.user.id) : null;
     json(res, 200, publicJob(job, file));
 }
@@ -404,7 +406,7 @@ function handleDeleteJob(req, res, jobId) {
     const auth = requireUser(req, res);
     if (!auth) return;
     const job = jobsRepo.findForUser(jobId, auth.user.id);
-    if (!job) return fail(res, 404, "任务不存在");
+    if (!job) return fail(res, 404, "任务不存在", CLOUD_ERROR_REASON.NOT_FOUND);
     const fileIds = [job.result_file_id, job.cover_file_id].filter(Boolean);
     const storageKeys = fileIds.map((id) => filesRepo.findForUser(id, auth.user.id)?.storage_key).filter(Boolean);
     jobsRepo.deleteForUser(jobId, auth.user.id);
@@ -426,21 +428,18 @@ async function handleUploadJob(req, res, type) {
     if (!rateLimit(uploadHits, `${auth.user.id}:${ip}`, 60, 60 * 60 * 1000)) return fail(res, 429, "上传过于频繁", CLOUD_ERROR_REASON.UPLOAD_RATE_LIMITED);
 
     const contentType = String(req.headers["content-type"] || "");
-    if (!contentType.includes("multipart/form-data")) return fail(res, 400, "请使用 multipart 上传");
+    if (!contentType.includes("multipart/form-data")) return fail(res, 400, "请使用 multipart 上传", CLOUD_ERROR_REASON.BAD_REQUEST);
 
     const raw = await readBody(req, maxBodyBytes);
     const { fields, file } = parseMultipart(raw, contentType);
-    if (!file?.data?.length) return fail(res, 400, "缺少文件");
+    if (!file?.data?.length) return fail(res, 400, "缺少文件", CLOUD_ERROR_REASON.BAD_REQUEST);
 
     const sniffed = sniffMime(file.data) || file.mime || "";
-    const allowed =
-        type === "image"
-            ? ["image/jpeg", "image/png", "image/webp"]
-            : ["video/mp4", "video/webm"];
-    if (!allowed.includes(sniffed)) return fail(res, 400, `不支持的文件类型: ${sniffed || "unknown"}`);
+    const allowed = type === JOB_TYPE.IMAGE ? ["image/jpeg", "image/png", "image/webp"] : ["video/mp4", "video/webm"];
+    if (!allowed.includes(sniffed)) return fail(res, 400, `不支持的文件类型: ${sniffed || "unknown"}`, CLOUD_ERROR_REASON.UNSUPPORTED_MEDIA_TYPE);
 
-    const maxBytes = type === "image" ? maxImageBytes : maxVideoBytes;
-    if (file.data.length > maxBytes) return fail(res, 413, "文件过大");
+    const maxBytes = type === JOB_TYPE.IMAGE ? maxImageBytes : maxVideoBytes;
+    if (file.data.length > maxBytes) return fail(res, 413, "文件过大", CLOUD_ERROR_REASON.PAYLOAD_TOO_LARGE);
 
     let params = {};
     try {
@@ -521,8 +520,8 @@ async function handleUploadJob(req, res, type) {
 
 function writeUserFile({ userId, type, sniffed, bytes, width, height, durationMs, filename }) {
     const fileId = randomId();
-    const ext = extForMime(sniffed) || path.extname(filename || "") || (type === "image" ? ".png" : ".mp4");
-    const relKey = path.posix.join(userId, type === "image" ? "images" : "videos", `${fileId}${ext}`);
+    const ext = extForMime(sniffed) || path.extname(filename || "") || (type === JOB_TYPE.IMAGE ? ".png" : ".mp4");
+    const relKey = path.posix.join(userId, type === JOB_TYPE.IMAGE ? "images" : "videos", `${fileId}${ext}`);
     const abs = safeJoin(uploadsDir, ...relKey.split("/"));
     ensureDir(path.dirname(abs));
     fs.writeFileSync(abs, bytes);
@@ -555,7 +554,7 @@ async function handleUploadJobFromUrl(req, res, type) {
     const durationMs = Number(body.duration_ms || body.durationMs || 0) || 0;
     let params = body.params && typeof body.params === "object" ? body.params : {};
 
-    if (!remoteUrl) return fail(res, 400, "缺少 url");
+    if (!remoteUrl) return fail(res, 400, "缺少 url", CLOUD_ERROR_REASON.BAD_REQUEST);
 
     if (clientLocalId) {
         const existing = jobsRepo.findByClientLocalId(auth.user.id, type, clientLocalId);
@@ -657,29 +656,29 @@ async function assertSafeRemoteMediaUrl(remoteUrl) {
     try {
         parsed = new URL(remoteUrl);
     } catch {
-        throw Object.assign(new Error("远程地址无效"), { status: 400 });
+        throw httpError("远程地址无效", 400, CLOUD_ERROR_REASON.REMOTE_FETCH_INVALID_URL);
     }
-    if (parsed.protocol !== "https:") throw Object.assign(new Error("仅允许 https 远程媒体"), { status: 400 });
-    if (parsed.username || parsed.password) throw Object.assign(new Error("远程地址不允许携带账号信息"), { status: 400 });
-    if (!isAllowedMediaHost(parsed.hostname)) throw Object.assign(new Error("远程媒体域名不在白名单"), { status: 403 });
+    if (parsed.protocol !== "https:") throw httpError("仅允许 https 远程媒体", 400, CLOUD_ERROR_REASON.REMOTE_FETCH_INVALID_URL);
+    if (parsed.username || parsed.password) throw httpError("远程地址不允许携带账号信息", 400, CLOUD_ERROR_REASON.REMOTE_FETCH_INVALID_URL);
+    if (!isAllowedMediaHost(parsed.hostname)) throw httpError("远程媒体域名不在白名单", 403, CLOUD_ERROR_REASON.REMOTE_FETCH_FORBIDDEN_HOST);
     await assertPublicResolvedHost(parsed.hostname);
     return parsed;
 }
 
 async function assertPublicResolvedHost(hostname) {
     if (isPrivateOrLocalHost(hostname)) {
-        throw Object.assign(new Error("远程媒体域名不在白名单"), { status: 403 });
+        throw httpError("远程媒体域名不在白名单", 403, CLOUD_ERROR_REASON.REMOTE_FETCH_FORBIDDEN_HOST);
     }
     let records;
     try {
         records = await dns.lookup(hostname, { all: true, verbatim: true });
     } catch {
-        throw Object.assign(new Error("远程媒体域名无法解析"), { status: 502 });
+        throw httpError("远程媒体域名无法解析", 502, CLOUD_ERROR_REASON.REMOTE_FETCH_DNS_FAILED);
     }
-    if (!records?.length) throw Object.assign(new Error("远程媒体域名无法解析"), { status: 502 });
+    if (!records?.length) throw httpError("远程媒体域名无法解析", 502, CLOUD_ERROR_REASON.REMOTE_FETCH_DNS_FAILED);
     for (const record of records) {
         if (isPrivateOrLocalHost(record.address)) {
-            throw Object.assign(new Error("远程媒体解析到内网地址，已拒绝"), { status: 403 });
+            throw httpError("远程媒体解析到内网地址，已拒绝", 403, CLOUD_ERROR_REASON.REMOTE_FETCH_PRIVATE_TARGET);
         }
     }
 }
@@ -689,7 +688,7 @@ async function fetchAllowlistedMedia(remoteUrl, type, redirectLeft = maxRemoteRe
 
     // 视频默认更长：能出网时尽量下完；出网不通则到点失败并给出可操作提示。
     // 可用环境变量覆盖：API_REMOTE_FETCH_TIMEOUT_MS
-    const defaultTimeout = type === "video" ? 90000 : 15000;
+    const defaultTimeout = type === JOB_TYPE.VIDEO ? 90000 : 15000;
     const fetchTimeoutMs = Number(process.env.API_REMOTE_FETCH_TIMEOUT_MS || defaultTimeout);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), fetchTimeoutMs);
@@ -700,7 +699,7 @@ async function fetchAllowlistedMedia(remoteUrl, type, redirectLeft = maxRemoteRe
             redirect: "manual",
             signal: controller.signal,
             headers: {
-                Accept: type === "image" ? "image/*,*/*" : "video/*,*/*",
+                Accept: type === JOB_TYPE.IMAGE ? "image/*,*/*" : "video/*,*/*",
                 // 部分 CDN 对无 UA 请求不友好
                 "User-Agent": "infinite-canvas-api/0.1",
             },
@@ -710,61 +709,64 @@ async function fetchAllowlistedMedia(remoteUrl, type, redirectLeft = maxRemoteRe
         const code = String(cause?.code || error?.code || "");
         const name = String(error?.name || "");
         let msg = "拉取远程媒体失败";
+        let reason = CLOUD_ERROR_REASON.REMOTE_FETCH_FAILED;
         if (name === "AbortError" || code.includes("TIMEOUT") || code.includes("ABORT")) {
             msg = `拉取远程媒体超时（${Math.round(fetchTimeoutMs / 1000)}s）。本机/容器访问不了 imgen/vidgen 时会失败：可配置 ai-proxy 出网后重试生成以落盘，或浏览器打开视频链接下载后导入`;
+            reason = CLOUD_ERROR_REASON.REMOTE_FETCH_TIMEOUT;
         } else if (code.includes("ECONNREFUSED") || code.includes("ENOTFOUND") || code.includes("ECONNRESET") || code.includes("UND_ERR") || code.includes("EAI_AGAIN")) {
             msg = "服务器无法连接远程媒体（DNS/出网失败）。中转站视频链在浏览器也因 CORS 无法直读；请启动可访问外网的 ai-proxy 后重试，或手动下载导入";
+            reason = CLOUD_ERROR_REASON.REMOTE_FETCH_BAD_GATEWAY;
         }
-        throw Object.assign(new Error(msg), { status: 502 });
+        throw httpError(msg, 502, reason);
     } finally {
         clearTimeout(timer);
     }
 
     // Do not follow redirects to non-allowlisted / private hosts; hop-limited for safety.
     if (response.status >= 300 && response.status < 400) {
-        if (redirectLeft <= 0) throw Object.assign(new Error("远程媒体重定向次数过多"), { status: 502 });
+        if (redirectLeft <= 0) throw httpError("远程媒体重定向次数过多", 502, CLOUD_ERROR_REASON.REMOTE_FETCH_TOO_MANY_REDIRECTS);
         const location = response.headers.get("location") || "";
-        if (!location) throw Object.assign(new Error("远程媒体重定向无效"), { status: 502 });
+        if (!location) throw httpError("远程媒体重定向无效", 502, CLOUD_ERROR_REASON.REMOTE_FETCH_BAD_GATEWAY);
         let next;
         try {
             next = new URL(location, parsed);
         } catch {
-            throw Object.assign(new Error("远程媒体重定向无效"), { status: 502 });
+            throw httpError("远程媒体重定向无效", 502, CLOUD_ERROR_REASON.REMOTE_FETCH_BAD_GATEWAY);
         }
         // Re-run full safety checks on every hop (host allowlist + DNS private reject).
         return fetchAllowlistedMedia(next.toString(), type, redirectLeft - 1);
     }
 
-    if (!response.ok) throw Object.assign(new Error(`远程媒体返回 ${response.status}`), { status: 502 });
+    if (!response.ok) throw httpError(`远程媒体返回 ${response.status}`, 502, CLOUD_ERROR_REASON.REMOTE_FETCH_BAD_GATEWAY);
 
-    const maxBytes = type === "image" ? maxImageBytes : maxVideoBytes;
+    const maxBytes = type === JOB_TYPE.IMAGE ? maxImageBytes : maxVideoBytes;
     const len = Number(response.headers.get("content-length") || 0);
-    if (len && len > maxBytes) throw Object.assign(new Error("远程文件过大"), { status: 413 });
+    if (len && len > maxBytes) throw httpError("远程文件过大", 413, CLOUD_ERROR_REASON.REMOTE_FETCH_TOO_LARGE);
 
     const ab = await response.arrayBuffer();
     const buf = Buffer.from(ab);
-    if (!buf.length) throw Object.assign(new Error("远程文件为空"), { status: 502 });
-    if (buf.length > maxBytes) throw Object.assign(new Error("远程文件过大"), { status: 413 });
+    if (!buf.length) throw httpError("远程文件为空", 502, CLOUD_ERROR_REASON.REMOTE_FETCH_EMPTY);
+    if (buf.length > maxBytes) throw httpError("远程文件过大", 413, CLOUD_ERROR_REASON.REMOTE_FETCH_TOO_LARGE);
 
     const contentType = String(response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
     const sniffed = sniffMime(buf) || contentType;
-    const allowed = type === "image" ? ["image/jpeg", "image/png", "image/webp"] : ["video/mp4", "video/webm"];
+    const allowed = type === JOB_TYPE.IMAGE ? ["image/jpeg", "image/png", "image/webp"] : ["video/mp4", "video/webm"];
     // CDN 常返回 application/octet-stream；扩展名 .mp4 时按视频接受
     let mime = allowed.includes(sniffed) ? sniffed : sniffMime(buf);
-    if (!allowed.includes(mime) && type === "video") {
+    if (!allowed.includes(mime) && type === JOB_TYPE.VIDEO) {
         if (contentType === "application/octet-stream" || contentType === "binary/octet-stream" || !contentType) {
             if (/\.(mp4|m4v|webm)(?:$|\?)/i.test(parsed.pathname) || /\.mp4(?:$|\?)/i.test(remoteUrl)) {
                 mime = parsed.pathname.toLowerCase().includes(".webm") ? "video/webm" : "video/mp4";
             }
         }
     }
-    if (!allowed.includes(mime) && type === "image" && (contentType === "application/octet-stream" || !contentType)) {
+    if (!allowed.includes(mime) && type === JOB_TYPE.IMAGE && (contentType === "application/octet-stream" || !contentType)) {
         const magic = sniffMime(buf);
         if (allowed.includes(magic)) mime = magic;
     }
-    if (!allowed.includes(mime)) throw Object.assign(new Error(`远程文件类型不受支持: ${sniffed || contentType || "unknown"}`), { status: 400 });
+    if (!allowed.includes(mime)) throw httpError(`远程文件类型不受支持: ${sniffed || contentType || "unknown"}`, 400, CLOUD_ERROR_REASON.REMOTE_FETCH_UNSUPPORTED_TYPE);
 
-    return { bytes: buf, mime, filename: path.basename(parsed.pathname) || (type === "image" ? "remote.jpg" : "remote.mp4") };
+    return { bytes: buf, mime, filename: path.basename(parsed.pathname) || (type === JOB_TYPE.IMAGE ? "remote.jpg" : "remote.mp4") };
 }
 
 function handleGetFile(req, res, fileId) {
@@ -772,10 +774,10 @@ function handleGetFile(req, res, fileId) {
     if (!auth) return;
     const id = fileId.split(/[/?#]/)[0];
     const file = filesRepo.findForUser(id, auth.user.id);
-    if (!file) return fail(res, 404, "文件不存在");
+    if (!file) return fail(res, 404, "文件不存在", CLOUD_ERROR_REASON.NOT_FOUND);
 
     const abs = safeJoin(uploadsDir, ...String(file.storage_key).split("/"));
-    if (!fs.existsSync(abs)) return fail(res, 404, "文件已丢失");
+    if (!fs.existsSync(abs)) return fail(res, 404, "文件已丢失", CLOUD_ERROR_REASON.NOT_FOUND);
 
     const stat = fs.statSync(abs);
     const size = stat.size;

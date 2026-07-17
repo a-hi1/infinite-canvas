@@ -1,23 +1,32 @@
-/** Shared local-history cloud sync markers. Forward-compatible with future billing/job links. */
-export type CloudSyncStatus = "idle" | "pending" | "synced" | "failed" | "skipped";
+import { CLOUD_SYNC_STATUS, type CloudSyncStatus } from "@/lib/cloud-domain";
+
+export type { CloudSyncStatus };
 
 export function cloudSyncLabel(status?: CloudSyncStatus) {
-    if (status === "pending") return "同步中";
-    if (status === "synced") return "已上云";
-    if (status === "failed") return "上云失败";
-    if (status === "skipped") return "仅本机";
+    if (status === CLOUD_SYNC_STATUS.PENDING) return "同步中";
+    if (status === CLOUD_SYNC_STATUS.SYNCED) return "已上云";
+    if (status === CLOUD_SYNC_STATUS.FAILED) return "上云失败";
+    if (status === CLOUD_SYNC_STATUS.SKIPPED) return "仅本机";
     return "";
 }
 
 export function cloudSyncColor(status?: CloudSyncStatus): "default" | "processing" | "success" | "error" | "warning" {
-    if (status === "pending") return "processing";
-    if (status === "synced") return "success";
-    if (status === "failed") return "error";
-    if (status === "skipped") return "default";
+    if (status === CLOUD_SYNC_STATUS.PENDING) return "processing";
+    if (status === CLOUD_SYNC_STATUS.SYNCED) return "success";
+    if (status === CLOUD_SYNC_STATUS.FAILED) return "error";
+    if (status === CLOUD_SYNC_STATUS.SKIPPED) return "default";
     return "default";
 }
 
 export function normalizeCloudSyncStatus(value: unknown): CloudSyncStatus | undefined {
-    if (value === "idle" || value === "pending" || value === "synced" || value === "failed" || value === "skipped") return value;
+    if (
+        value === CLOUD_SYNC_STATUS.IDLE ||
+        value === CLOUD_SYNC_STATUS.PENDING ||
+        value === CLOUD_SYNC_STATUS.SYNCED ||
+        value === CLOUD_SYNC_STATUS.FAILED ||
+        value === CLOUD_SYNC_STATUS.SKIPPED
+    ) {
+        return value;
+    }
     return undefined;
 }

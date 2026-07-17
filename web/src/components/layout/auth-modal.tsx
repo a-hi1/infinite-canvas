@@ -1,15 +1,15 @@
 import { useState } from "react";
 import { App, Form, Input, Modal, Tabs } from "antd";
 
-import { isCloudApiError } from "@/services/cloud-api";
+import { CLOUD_ERROR_REASON, isCloudApiError } from "@/services/cloud-api";
 import { useAuthStore } from "@/stores/use-auth-store";
 
 function authErrorText(error: unknown, fallback: string) {
     if (isCloudApiError(error)) {
-        if (error.reason === "origin_not_allowed") return error.message;
-        if (error.reason === "invite_code_invalid") return "邀请码无效，请检查服务器邀请码配置";
-        if (error.reason === "email_already_registered") return "该邮箱已注册，请直接登录";
-        if (error.reason === "account_temporarily_locked") return "登录失败次数过多，账号已暂时锁定，请稍后再试";
+        if (error.reason === CLOUD_ERROR_REASON.ORIGIN_NOT_ALLOWED) return error.message;
+        if (error.reason === CLOUD_ERROR_REASON.INVITE_CODE_INVALID) return "邀请码无效，请检查服务器邀请码配置";
+        if (error.reason === CLOUD_ERROR_REASON.EMAIL_ALREADY_REGISTERED) return "该邮箱已注册，请直接登录";
+        if (error.reason === CLOUD_ERROR_REASON.ACCOUNT_TEMPORARILY_LOCKED) return "登录失败次数过多，账号已暂时锁定，请稍后再试";
         if (error.status === 0) return "无法连接云端服务，请稍后重试；未登录仍可本地使用";
         return error.message || fallback;
     }

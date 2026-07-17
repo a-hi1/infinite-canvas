@@ -2,6 +2,7 @@
 
 ## Unreleased
 
++ [调整] P1.0-B：收口云端 jobs/files/user/error 领域常量；remote-fetch 与通用失败透传稳定 `reason`；前端镜像常量并以 reason 判断登录/容量错误。
 + [修复] Nginx 反代 `/api` 改用 `$http_host` / `X-Forwarded-Host` 保留端口，修复 `http://127.0.0.1:3011` 等带端口同源登录被误判 Origin 的问题。
 + [修复] 文本问答 / 工具调用 / AI 提示词优化优先使用 `textModel`，并保留 `channelId::model` 渠道归属，避免多渠道同名模型时请求打错渠道。
 + [新增] 可选云端账号与生成历史上云（`api`）、同源 AI 安全代理（`ai-proxy`），以及 P0.5c 验稳收口清单与健康检查脚本。

@@ -1,6 +1,6 @@
 import { getImageBlob } from "@/services/image-storage";
 import { getMediaBlob } from "@/services/file-storage";
-import { blobFromUrl, isCloudApiError, uploadCloudJob, type CloudJob } from "@/services/cloud-api";
+import { blobFromUrl, CloudApiError, isCloudApiError, uploadCloudJob, type CloudJob } from "@/services/cloud-api";
 import { AI_PROXY_BASE_URL } from "@/stores/use-config-store";
 import { useAuthStore } from "@/stores/use-auth-store";
 
@@ -38,6 +38,8 @@ async function tryFetchViaSameOriginMediaProxy(remoteUrl: string): Promise<Blob 
 export type CloudSaveResult = {
     job: CloudJob | null;
     error?: string;
+    /** Stable API reason when available (prefer over Chinese error text). */
+    reason?: string;
 };
 
 async function uploadCloudJobFromUrl(input: {
@@ -76,20 +78,22 @@ async function uploadCloudJobFromUrl(input: {
         });
         if (response.status === 401) {
             window.dispatchEvent(new CustomEvent("infinite-canvas:cloud-unauthorized"));
-            throw new Error("请先登录");
+            throw new CloudApiError("请先登录", 401, "auth_required");
         }
-        const payload = (await response.json().catch(() => null)) as { code?: number; data?: CloudJob; msg?: string } | null;
+        const payload = (await response.json().catch(() => null)) as { code?: number; data?: CloudJob; msg?: string; reason?: string } | null;
         if (!response.ok || !payload || payload.code !== 0 || !payload.data) {
             // 把后端 502 原文透出，方便区分「超时 / 出网失败 / 类型不支持」
-            throw new Error(payload?.msg || `远程上云失败（${response.status}）`);
+            throw new CloudApiError(payload?.msg || `远程上云失败（${response.status}）`, response.status, payload?.reason);
         }
         return payload.data;
     } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {
-            throw new Error(
+            throw new CloudApiError(
                 input.type === "video"
                     ? "远程视频上云超时：本机服务器访问 vidgen 太慢或不通。可：① 配置并启动 ai-proxy 后重试生成以落盘 ② 浏览器另开视频链接下载后导入"
                     : "远程上云超时：服务器访问不了 imgen/vidgen。请用本机已落盘结果，或下载后导入",
+                0,
+                "remote_fetch_timeout",
             );
         }
         throw error;
@@ -98,10 +102,10 @@ async function uploadCloudJobFromUrl(input: {
     }
 }
 
-function toSaveError(error: unknown, fallback: string) {
-    if (isCloudApiError(error)) return error.message || fallback;
-    if (error instanceof Error && error.message) return error.message;
-    return fallback;
+function toSaveError(error: unknown, fallback: string): { error: string; reason?: string } {
+    if (isCloudApiError(error)) return { error: error.message || fallback, reason: error.reason };
+    if (error instanceof Error && error.message) return { error: error.message };
+    return { error: fallback };
 }
 
 /** Prefer local blob/storageKey; remote HTTP falls back to server-side allowlisted fetch. */
@@ -183,14 +187,14 @@ export async function saveImageToCloudDetailed(input: {
             } catch (fromUrlError) {
                 return {
                     job: null,
-                    error: toSaveError(fromUrlError, "远程图上云失败：浏览器 CORS 读不到，服务端也拉不到。可下载后本地导入"),
+                    ...toSaveError(fromUrlError, "远程图上云失败：浏览器 CORS 读不到，服务端也拉不到。可下载后本地导入"),
                 };
             }
         }
         return { job: null, error: "没有可上传的本地文件或远程地址" };
     } catch (error) {
         console.warn("cloud image save failed", error);
-        return { job: null, error: toSaveError(error, "上传失败") };
+        return { job: null, ...toSaveError(error, "上传失败") };
     }
 }
 
@@ -284,17 +288,16 @@ export async function saveVideoToCloudDetailed(input: {
             } catch (fromUrlError) {
                 return {
                     job: null,
-                    error:
-                        toSaveError(
-                            fromUrlError,
-                            "视频可播放但无法上云：浏览器代理不等于 Docker 出网。ai-proxy/api 容器拉不到 vidgen 时会 502。可：① 给容器配置 HTTP_PROXY/HTTPS_PROXY（host.docker.internal:本地代理端口）后重建 api/ai-proxy；② 浏览器下载视频后本地导入再上云；③ 生成时尽量先落盘到本机 storageKey",
-                        ),
+                    ...toSaveError(
+                        fromUrlError,
+                        "视频可播放但无法上云：浏览器代理不等于 Docker 出网。ai-proxy/api 容器拉不到 vidgen 时会 502。可：① 给容器配置 HTTP_PROXY/HTTPS_PROXY（host.docker.internal:本地代理端口）后重建 api/ai-proxy；② 浏览器下载视频后本地导入再上云；③ 生成时尽量先落盘到本机 storageKey",
+                    ),
                 };
             }
         }
         return { job: null, error: "没有可上传的本地文件或远程地址" };
     } catch (error) {
         console.warn("cloud video save failed", error);
-        return { job: null, error: toSaveError(error, "上传失败") };
+        return { job: null, ...toSaveError(error, "上传失败") };
     }
 }

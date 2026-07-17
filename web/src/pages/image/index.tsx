@@ -19,6 +19,7 @@ import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "
 import { requestEdit, requestGeneration } from "@/services/api/image";
 import { CloudHistoryPanel } from "@/components/cloud-history-panel";
 import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyncStatus } from "@/lib/cloud-sync";
+import { isStorageQuotaError } from "@/services/cloud-api";
 import { saveImageToCloudDetailed } from "@/services/cloud-history";
 import { deleteStoredImages, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
@@ -64,6 +65,7 @@ type GenerationLog = {
     cloudSync?: CloudSyncStatus;
     cloudJobIds?: string[];
     cloudError?: string;
+    cloudErrorReason?: string;
 };
 
 type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "size" | "count">;
@@ -267,7 +269,7 @@ export default function ImagePage() {
                             void useAuthStore.getState().refreshUsage();
                         } else if (next.cloudSync === "failed") {
                             const detail = next.cloudError || "";
-                            if (detail.includes("空间不足") || detail.includes("413") || detail.includes("storage_quota_exceeded")) {
+                            if (isStorageQuotaError({ message: detail, reason: next.cloudErrorReason })) {
                                 message.warning("云端空间不足，请删除部分云端历史后重试");
                             } else {
                                 message.warning(detail ? `云端同步失败：${detail}` : "云端同步失败，可在本机记录中重试");
@@ -1088,6 +1090,7 @@ async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog>
         cloudSync: normalizeCloudSyncStatus(log.cloudSync),
         cloudJobIds: Array.isArray(log.cloudJobIds) ? log.cloudJobIds.filter((id): id is string => typeof id === "string") : undefined,
         cloudError: typeof log.cloudError === "string" ? log.cloudError : undefined,
+        cloudErrorReason: typeof log.cloudErrorReason === "string" ? log.cloudErrorReason : undefined,
     };
 }
 
@@ -1131,10 +1134,10 @@ function ReferenceOrderButtons({ index, total, onMove }: { index: number; total:
 
 async function syncImageLogToCloud(log: GenerationLog): Promise<GenerationLog> {
     if (!useAuthStore.getState().user) {
-        return { ...log, cloudSync: "failed", cloudError: "未登录" };
+        return { ...log, cloudSync: "failed", cloudError: "未登录", cloudErrorReason: "auth_required" };
     }
     if (!log.images?.length) {
-        return { ...log, cloudSync: "failed", cloudError: "没有可上传的图片" };
+        return { ...log, cloudSync: "failed", cloudError: "没有可上传的图片", cloudErrorReason: undefined };
     }
     const saved = await Promise.all(
         log.images.map((image) =>
@@ -1152,10 +1155,10 @@ async function syncImageLogToCloud(log: GenerationLog): Promise<GenerationLog> {
     );
     const jobIds = saved.map((item) => item.job?.id).filter(Boolean) as string[];
     if (!jobIds.length) {
-        const firstError = saved.find((item) => item.error)?.error || "上传失败";
-        return { ...log, cloudSync: "failed", cloudError: firstError };
+        const first = saved.find((item) => item.error);
+        return { ...log, cloudSync: "failed", cloudError: first?.error || "上传失败", cloudErrorReason: first?.reason };
     }
-    return { ...log, cloudSync: "synced", cloudJobIds: jobIds, cloudError: undefined };
+    return { ...log, cloudSync: "synced", cloudJobIds: jobIds, cloudError: undefined, cloudErrorReason: undefined };
 }
 
 function buildLog({

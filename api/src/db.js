@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { ensureDir, randomId, sha256 } from "./util.js";
-import { FILE_STORAGE_BACKEND, JOB_STATUS, JOB_SOURCE, SAVE_STATUS } from "./model/cloud-domain.js";
+import { FILE_STORAGE_BACKEND, JOB_STATUS, JOB_SOURCE, SAVE_STATUS, USER_STATUS } from "./model/cloud-domain.js";
 
 /**
  * Lightweight JSON-file database.
@@ -69,7 +69,7 @@ export function createDb(dataDir) {
                 email: String(email).trim().toLowerCase(),
                 password_hash: passwordHash,
                 display_name: displayName || "",
-                status: "active",
+                status: USER_STATUS.ACTIVE,
                 plan_code: "free",
                 failed_login_count: 0,
                 locked_until: null,

@@ -1,45 +1,46 @@
-/** Stable domain enums for cloud API (JSON store + future Postgres/billing). */
+/**
+ * Frontend mirror of api/src/model/cloud-domain.js stable reason/status codes.
+ * Keep values identical so UI can branch without Chinese string matching.
+ * Do not invent extra wire values here without updating the API first.
+ */
 
-export const JOB_TYPE = {
+export const CLOUD_JOB_TYPE = {
     IMAGE: "image",
     VIDEO: "video",
-};
+} as const;
 
-export const JOB_SOURCE = {
+export type CloudJobType = (typeof CLOUD_JOB_TYPE)[keyof typeof CLOUD_JOB_TYPE];
+
+export const CLOUD_JOB_SOURCE = {
     CLIENT_UPLOAD: "client_upload",
     SERVER_FETCH: "server_fetch",
-    /** Reserved for P1 server-side generation gateway. */
     SERVER_GENERATE: "server_generate",
-};
+} as const;
 
-export const JOB_STATUS = {
+export const CLOUD_JOB_STATUS = {
     SUCCESS: "success",
     FAILED: "failed",
     CANCELLED: "cancelled",
     DELETED: "deleted",
-};
+} as const;
 
-export const SAVE_STATUS = {
+export const CLOUD_SAVE_STATUS = {
     STORED: "stored",
     FAILED: "failed",
     SKIPPED: "skipped",
-};
+} as const;
 
-export const FILE_STORAGE_BACKEND = {
-    LOCAL: "local",
-    S3: "s3",
-    MINIO: "minio",
-};
+/** Local history → cloud upload markers (browser only; not API job.status). */
+export const CLOUD_SYNC_STATUS = {
+    IDLE: "idle",
+    PENDING: "pending",
+    SYNCED: "synced",
+    FAILED: "failed",
+    SKIPPED: "skipped",
+} as const;
 
-export const USER_STATUS = {
-    ACTIVE: "active",
-    DISABLED: "disabled",
-};
+export type CloudSyncStatus = (typeof CLOUD_SYNC_STATUS)[keyof typeof CLOUD_SYNC_STATUS];
 
-/**
- * Stable machine-readable error reasons for API envelope `{ reason }`.
- * Frontend should prefer these over Chinese `msg` when branching.
- */
 export const CLOUD_ERROR_REASON = {
     AUTH_REQUIRED: "auth_required",
     ORIGIN_NOT_ALLOWED: "origin_not_allowed",
@@ -71,4 +72,19 @@ export const CLOUD_ERROR_REASON = {
     REMOTE_FETCH_BAD_GATEWAY: "remote_fetch_bad_gateway",
     REMOTE_FETCH_NOT_READY: "remote_fetch_not_ready",
     INTERNAL_ERROR: "internal_error",
-};
+} as const;
+
+export type CloudErrorReason = (typeof CLOUD_ERROR_REASON)[keyof typeof CLOUD_ERROR_REASON];
+
+export function isCloudErrorReason(value: unknown): value is CloudErrorReason {
+    return typeof value === "string" && Object.values(CLOUD_ERROR_REASON).includes(value as CloudErrorReason);
+}
+
+/** Prefer stable reason; fall back to legacy Chinese / status text only when reason missing. */
+export function isStorageQuotaError(error: { reason?: string; message?: string; status?: number } | null | undefined) {
+    if (!error) return false;
+    if (error.reason === CLOUD_ERROR_REASON.STORAGE_QUOTA_EXCEEDED) return true;
+    if (error.status === 413) return true;
+    const detail = `${error.message || ""}`;
+    return detail.includes("空间不足") || detail.includes("storage_quota_exceeded");
+}

@@ -21,6 +21,7 @@ import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
 import { CloudHistoryPanel } from "@/components/cloud-history-panel";
 import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyncStatus } from "@/lib/cloud-sync";
+import { isStorageQuotaError } from "@/services/cloud-api";
 import { saveVideoToCloudDetailed } from "@/services/cloud-history";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useAuthStore } from "@/stores/use-auth-store";
@@ -69,6 +70,7 @@ type GenerationLog = {
     cloudSync?: CloudSyncStatus;
     cloudJobIds?: string[];
     cloudError?: string;
+    cloudErrorReason?: string;
 };
 
 type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "baseUrl" | "apiFormat"> & { channelId?: string; channelName?: string };
@@ -419,7 +421,7 @@ export default function VideoPage() {
                                 void useAuthStore.getState().refreshUsage();
                             } else if (next.cloudSync === "failed") {
                                 const detail = next.cloudError || "";
-                                if (detail.includes("空间不足") || detail.includes("413") || detail.includes("storage_quota_exceeded")) {
+                                if (isStorageQuotaError({ message: detail, reason: next.cloudErrorReason })) {
                                     message.warning("云端空间不足，请删除部分云端历史后重试");
                                 } else {
                                     message.warning(detail ? `云端同步失败：${detail}` : "云端同步失败，可在本机记录中重试");
@@ -972,6 +974,7 @@ async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog>
         cloudSync: normalizeCloudSyncStatus(log.cloudSync),
         cloudJobIds: Array.isArray(log.cloudJobIds) ? log.cloudJobIds.filter((id): id is string => typeof id === "string") : undefined,
         cloudError: typeof log.cloudError === "string" ? log.cloudError : undefined,
+        cloudErrorReason: typeof log.cloudErrorReason === "string" ? log.cloudErrorReason : undefined,
     };
 }
 
@@ -1046,10 +1049,10 @@ function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
 
 async function syncVideoLogToCloud(log: GenerationLog): Promise<GenerationLog> {
     if (!useAuthStore.getState().user) {
-        return { ...log, cloudSync: "failed", cloudError: "未登录" };
+        return { ...log, cloudSync: "failed", cloudError: "未登录", cloudErrorReason: "auth_required" };
     }
     if (!log.video?.url) {
-        return { ...log, cloudSync: "failed", cloudError: "没有可上传的视频" };
+        return { ...log, cloudSync: "failed", cloudError: "没有可上传的视频", cloudErrorReason: undefined };
     }
     const saved = await saveVideoToCloudDetailed({
         url: log.video.url,
@@ -1063,8 +1066,8 @@ async function syncVideoLogToCloud(log: GenerationLog): Promise<GenerationLog> {
         provider: log.task?.provider,
         params: { size: log.size, seconds: log.seconds, resolution: log.resolution, localLogId: log.id },
     });
-    if (!saved.job) return { ...log, cloudSync: "failed", cloudError: saved.error || "上传失败" };
-    return { ...log, cloudSync: "synced", cloudJobIds: [saved.job.id], cloudError: undefined };
+    if (!saved.job) return { ...log, cloudSync: "failed", cloudError: saved.error || "上传失败", cloudErrorReason: saved.reason };
+    return { ...log, cloudSync: "synced", cloudJobIds: [saved.job.id], cloudError: undefined, cloudErrorReason: undefined };
 }
 
 function buildLog({ prompt, model, config, references, videoReferences, audioReferences, durationMs, status, task, video, error }: { prompt: string; model: string; config: AiConfig; references: ReferenceImage[]; videoReferences: ReferenceVideo[]; audioReferences: ReferenceAudio[]; durationMs: number; status: GenerationLog["status"]; task?: VideoGenerationTask; video?: GeneratedVideo; error?: string }): GenerationLog {

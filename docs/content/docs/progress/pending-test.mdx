@@ -49,7 +49,8 @@ description: 当前版本已实现但仍需人工验证的变更项
 - 云端错误 reason code：API 错误 envelope 增加 `reason`，前端 `CloudApiError` 带 `reason` 并优先用于登录/上云提示；至少覆盖 `auth_required`、`origin_not_allowed`、`storage_quota_exceeded`、`invite_code_invalid`、`email_already_registered`、`login_invalid_credentials`、`account_temporarily_locked`、`*_rate_limited`。需验证：登录/注册/容量不足/未登录场景不再只能靠中文文案匹配。
   - 本机自动化（重建后）：未登录 `/api/jobs` → `reason=auth_required`；跨站 Origin 登录 → `reason=origin_not_allowed`。其余登录/容量等场景仍待 UI 点验。
 - P1.0-A 数据访问分层：`api` 新增 `users/sessions/jobs/files` repository façade，`index.js` 改走 repo 而不直接四处 `db.*`；底层仍是 JSON 文件库，接口/存储格式/前端行为不变。需验证：登录、列表、上传、from-url、删除、容量统计行为与改造前一致。
-  - 本机：重建后容器内已有 `src/repositories/*` 与 `src/model/cloud-domain.js`；历史 `data/api/db.json` 仍可读写（users/jobs/files 计数保留）。完整业务路径仍待登录后点验。 
+  - 本机：重建后容器内已有 `src/repositories/*` 与 `src/model/cloud-domain.js`；历史 `data/api/db.json` 仍可读写（users/jobs/files 计数保留）。完整业务路径仍待登录后点验。
+- P1.0-B 领域常量收口：`JOB_TYPE` / `USER_STATUS` / 扩展 `CLOUD_ERROR_REASON`（含 remote-fetch、not_found、payload_too_large 等）；`httpError()` 统一 throw；路由 catch 透传 `error.reason`；前端 `web/src/lib/cloud-domain.ts` 镜像 reason，登录弹窗与图/视频上云空间不足提示优先 reason（`cloudErrorReason` 写入本机历史）。需验证：① 未登录/跨站 Origin 仍返回稳定 reason；② 登录失败 `login_invalid_credentials`；③ 上云 413 时 UI 走空间不足文案且本机生成成功不被改写；④ 旧本机历史无 `cloudErrorReason` 时中文回退仍可用；⑤ 重建 api 后 `data/api` 计数不丢。 
 - 配置节点模式切换模型：切换图/文/视/音时，若当前模型不匹配能力，会自动切到对应默认模型并写回节点；生成路径 `buildGenerationConfig` 同步按能力选择模型。需验证：配置节点从生图切到视频后模型变为视频模型，再切回文本同理。
 - IME 组合态 Enter：画布提示词输入与 Agent 聊天输入在中文输入法组合过程中不会误提交；仅普通 Enter 触发发送。需验证：拼音未上屏时按 Enter 只是选词，上屏后再 Enter 才提交。
 - Gemini 生图比例：Gemini 生图请求会附带 `imageConfig`/`responseFormat.image`（aspectRatio、部分模型 imageSize）；匹配最近支持比例时不再被本地 3:1 校验误伤。需验证：Gemini 渠道下 16:9 / 9:16 / auto 可正常生图。

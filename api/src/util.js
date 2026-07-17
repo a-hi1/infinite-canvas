@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { CLOUD_ERROR_REASON } from "./model/cloud-domain.js";
+
 export function json(res, status, data, msg = "ok", meta = undefined) {
     const body = JSON.stringify({ code: status >= 400 ? status : 0, data, msg, ...(meta && typeof meta === "object" ? meta : {}) });
     res.writeHead(status, {
@@ -13,6 +15,11 @@ export function json(res, status, data, msg = "ok", meta = undefined) {
 
 export function fail(res, status, msg, reason = undefined) {
     json(res, status, null, msg, reason ? { reason } : undefined);
+}
+
+/** Throw-shaped HTTP error; route catch reads `status` / `reason` into JSON envelope. */
+export function httpError(message, status = 500, reason = undefined) {
+    return Object.assign(new Error(message), { status, reason });
 }
 
 export function readBody(req, maxBytes) {
@@ -108,7 +115,7 @@ export function safeJoin(root, ...parts) {
     const resolved = path.resolve(root, ...parts);
     const rootResolved = path.resolve(root);
     if (resolved !== rootResolved && !resolved.startsWith(rootResolved + path.sep)) {
-        throw Object.assign(new Error("非法路径"), { status: 400 });
+        throw httpError("非法路径", 400, CLOUD_ERROR_REASON.BAD_REQUEST);
     }
     return resolved;
 }
@@ -177,7 +184,7 @@ export function sniffMime(buf) {
 /** Minimal multipart parser for single-file uploads with fields. */
 export function parseMultipart(buffer, contentType) {
     const match = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType || "");
-    if (!match) throw Object.assign(new Error("缺少 multipart boundary"), { status: 400 });
+    if (!match) throw httpError("缺少 multipart boundary", 400, CLOUD_ERROR_REASON.BAD_REQUEST);
     const boundary = match[1] || match[2];
     const sep = Buffer.from(`--${boundary}`);
     const fields = {};

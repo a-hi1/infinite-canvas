@@ -54,6 +54,8 @@ export type CloudJob = {
 
 type ApiEnvelope<T> = { code: number; data: T; msg: string; reason?: string };
 
+export { CLOUD_ERROR_REASON, isStorageQuotaError, type CloudErrorReason } from "@/lib/cloud-domain";
+
 /** 带 HTTP 状态与稳定 reason 的云 API 错误，避免前端长期靠中文文案做判断 */
 export class CloudApiError extends Error {
     status: number;
