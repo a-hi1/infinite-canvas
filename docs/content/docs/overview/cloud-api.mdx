@@ -91,7 +91,22 @@ curl -sS -X POST http://127.0.0.1:3011/api/admin/credits/grant \
   -d '{"email":"user@example.com","amount_yuan":10,"note":"试用赠送","idempotency_key":"trial-2026-07-17-user"}'
 ```
 
-- 默认 `platform_billing_enabled=false`：生成仍走用户自己的 Key；扣费要等后续图片网关 + 显式开关
+### 平台图片代生成（P1.0-D，可选）
+
+默认关闭。开启后登录用户可在**图片工作台**打开「平台积分生图」，走服务端 Key，浏览器不暴露上游密钥。
+
+| 变量 | 含义 |
+| --- | --- |
+| `API_PLATFORM_IMAGE_ENABLED` | `true` 才开放网关 |
+| `API_PLATFORM_IMAGE_BASE_URL` | OpenAI 兼容上游 Base URL（可与 ai-proxy 上游相同中转） |
+| `API_PLATFORM_IMAGE_API_KEY` | 仅服务端使用的上游 Key，**勿写进前端** |
+| `API_PLATFORM_IMAGE_MODEL` | 允许的平台模型名（默认 `gpt-image-2`） |
+| `API_PLATFORM_IMAGE_PRICE_CENTS` | 成功一张扣多少分（10=¥0.10；0=不扣费） |
+
+- 接口：`POST /api/generate/image`（需登录 Cookie）
+- 幂等：`client_local_id` 重复提交返回已有 job，不双扣
+- 当前仅文生图；参考图请继续用 BYOK 图生图
+- 画布默认路径仍是用户自己的渠道
 
 ### 访问地址与登录 403
 

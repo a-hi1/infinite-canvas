@@ -11,6 +11,7 @@ import { createSessionsRepo } from "./repositories/sessions-repo.js";
 import { createJobsRepo } from "./repositories/jobs-repo.js";
 import { createFilesRepo } from "./repositories/files-repo.js";
 import { createCreditsRepo } from "./repositories/credits-repo.js";
+import { generateOnePlatformImage } from "./platform-image.js";
 import {
     clearCookie,
     clientIp,
@@ -39,6 +40,14 @@ const uploadsDir = path.join(dataDir, "uploads");
 const inviteCode = String(process.env.API_INVITE_CODE || "").trim();
 // Optional admin token for manual credit grant only. Empty = admin routes disabled (404/not configured).
 const adminToken = String(process.env.API_ADMIN_TOKEN || "").trim();
+// Platform image gateway (opt-in). Default off: users keep BYOK local generation.
+const platformImageEnabled = String(process.env.API_PLATFORM_IMAGE_ENABLED || "").toLowerCase() === "true";
+const platformImageBaseUrl = String(process.env.API_PLATFORM_IMAGE_BASE_URL || "").trim();
+const platformImageApiKey = String(process.env.API_PLATFORM_IMAGE_API_KEY || "").trim();
+const platformImageModel = String(process.env.API_PLATFORM_IMAGE_MODEL || "gpt-image-2").trim() || "gpt-image-2";
+// Price per successful image in cents (integer). Default 10 cents = ¥0.10.
+const platformImagePriceCents = Math.max(0, Math.trunc(Number(process.env.API_PLATFORM_IMAGE_PRICE_CENTS || 10) || 10));
+const platformImageTimeoutMs = Math.max(15000, Math.trunc(Number(process.env.API_PLATFORM_IMAGE_TIMEOUT_MS || 120000) || 120000));
 const sessionTtlSec = Number(process.env.API_SESSION_TTL_SEC || 7 * 24 * 3600);
 const cookieSecure = String(process.env.API_COOKIE_SECURE || "").toLowerCase() === "true";
 const maxBodyBytes = Number(process.env.API_MAX_BODY_BYTES || 220 * 1024 * 1024);
@@ -46,6 +55,7 @@ const maxImageBytes = Number(process.env.API_MAX_IMAGE_BYTES || 20 * 1024 * 1024
 const maxVideoBytes = Number(process.env.API_MAX_VIDEO_BYTES || 200 * 1024 * 1024);
 const maxUserBytes = Number(process.env.API_MAX_USER_BYTES || 5 * 1024 * 1024 * 1024);
 const maxRemoteRedirects = Math.min(5, Math.max(0, Number(process.env.API_REMOTE_FETCH_MAX_REDIRECTS || 3)));
+const generateHits = new Map();
 const allowedOrigins = String(process.env.API_ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001")
     .split(",")
     .map((s) => s.trim())
@@ -164,6 +174,9 @@ const server = http.createServer(async (req, res) => {
         // Credits: user can list own ledger; admin token can grant/adjust (no payment gateway yet).
         if (req.method === "GET" && route === "/credits/ledger") return await handleListOwnCredits(req, res, url);
         if (req.method === "POST" && route === "/admin/credits/grant") return await handleAdminCreditGrant(req, res);
+
+        // Platform image generation (opt-in server-side; charges credits only on success).
+        if (req.method === "POST" && route === "/generate/image") return await handlePlatformGenerateImage(req, res);
 
         fail(res, 404, "接口不存在", CLOUD_ERROR_REASON.NOT_FOUND);
         logWarn(requestId, "route not found", { method: req.method, url: req.url, ms: Date.now() - startedAt });
@@ -374,9 +387,184 @@ function publicCredits(userId) {
     return {
         balance_cents: creditsRepo.getBalanceCents(userId),
         currency: "cny_cents",
-        // Explicit: platform generation billing is off until later switch.
-        platform_billing_enabled: false,
+        // Explicit opt-in: only true when env enables platform image gateway + upstream is configured.
+        platform_billing_enabled: isPlatformImageReady(),
+        image_price_cents: platformImagePriceCents,
+        image_model: isPlatformImageReady() ? platformImageModel : "",
     };
+}
+
+function isPlatformImageReady() {
+    return platformImageEnabled && Boolean(platformImageBaseUrl) && Boolean(platformImageApiKey);
+}
+
+/**
+ * POST /api/generate/image
+ * Server-side text-to-image using platform upstream Key (never browser Key).
+ * Charge credits only after upstream success; idempotent via client_local_id (same as job upload).
+ * Default path remains BYOK in the browser — this route is opt-in.
+ */
+async function handlePlatformGenerateImage(req, res) {
+    if (!platformImageEnabled) {
+        return fail(res, 503, "平台代生成未开启（API_PLATFORM_IMAGE_ENABLED）", CLOUD_ERROR_REASON.PLATFORM_GENERATE_DISABLED);
+    }
+    if (!platformImageBaseUrl || !platformImageApiKey) {
+        return fail(res, 503, "平台生图上游未配置（API_PLATFORM_IMAGE_BASE_URL / API_PLATFORM_IMAGE_API_KEY）", CLOUD_ERROR_REASON.PLATFORM_UPSTREAM_NOT_CONFIGURED);
+    }
+
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const ip = clientIp(req);
+    if (!rateLimit(generateHits, `${auth.user.id}:${ip}`, 30, 60 * 60 * 1000)) {
+        return fail(res, 429, "平台生图过于频繁，请稍后再试", CLOUD_ERROR_REASON.UPLOAD_RATE_LIMITED);
+    }
+
+    const body = await readJson(req);
+    const prompt = String(body.prompt || "").trim();
+    if (!prompt) return fail(res, 400, "请输入提示词", CLOUD_ERROR_REASON.BAD_REQUEST);
+    if (prompt.length > 4000) return fail(res, 400, "提示词过长", CLOUD_ERROR_REASON.BAD_REQUEST);
+
+    const clientLocalId = String(body.client_local_id || body.clientLocalId || "").trim();
+    const size = String(body.size || "").trim();
+    const quality = String(body.quality || "").trim();
+    const model = String(body.model || platformImageModel).trim() || platformImageModel;
+    // Only allow the configured platform model for now (prevents arbitrary model billing surprises).
+    if (model !== platformImageModel) {
+        return fail(res, 400, `当前平台仅支持模型 ${platformImageModel}`, CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+
+    // Idempotent retry: same user + image + client_local_id returns existing job without re-charge.
+    if (clientLocalId) {
+        const existing = jobsRepo.findByClientLocalId(auth.user.id, JOB_TYPE.IMAGE, clientLocalId);
+        if (existing && existing.source === JOB_SOURCE.SERVER_GENERATE && existing.status === JOB_STATUS.SUCCESS) {
+            const existingFile = existing.result_file_id ? filesRepo.findForUser(existing.result_file_id, auth.user.id) : null;
+            if (existingFile) {
+                try {
+                    const absExisting = safeJoin(uploadsDir, ...String(existingFile.storage_key).split("/"));
+                    if (fs.existsSync(absExisting)) {
+                        return json(
+                            res,
+                            200,
+                            {
+                                ...publicJob(existing, existingFile, { deduped: true }),
+                                credits: publicCredits(auth.user.id),
+                                charged_cents: 0,
+                            },
+                            "已存在相同本机请求结果，未重复生成/扣费",
+                        );
+                    }
+                } catch {
+                    // fall through to regenerate
+                }
+            }
+        }
+    }
+
+    const price = platformImagePriceCents;
+    if (price > 0) {
+        const balance = creditsRepo.getBalanceCents(auth.user.id);
+        if (balance < price) {
+            return fail(res, 402, `积分不足（需要 ${price} 分，当前 ${balance} 分）`, CLOUD_ERROR_REASON.CREDITS_INSUFFICIENT);
+        }
+    }
+
+    // Charge only after success — pre-check balance above, charge below with idempotent key.
+    let generated;
+    try {
+        generated = await generateOnePlatformImage({
+            baseUrl: platformImageBaseUrl,
+            apiKey: platformImageApiKey,
+            model,
+            prompt,
+            size,
+            quality,
+            timeoutMs: platformImageTimeoutMs,
+        });
+    } catch (error) {
+        if (error?.status) throw error;
+        throw httpError(error?.message || "平台生图失败", 502, CLOUD_ERROR_REASON.PLATFORM_UPSTREAM_FAILED);
+    }
+
+    const sniffed = sniffMime(generated.bytes) || generated.mime || "image/png";
+    if (!["image/jpeg", "image/png", "image/webp"].includes(sniffed)) {
+        return fail(res, 502, `上游返回了不支持的图片类型: ${sniffed}`, CLOUD_ERROR_REASON.PLATFORM_NO_IMAGE);
+    }
+    if (generated.bytes.length > maxImageBytes) {
+        return fail(res, 413, "生成图片过大", CLOUD_ERROR_REASON.PAYLOAD_TOO_LARGE);
+    }
+    if (filesRepo.countUserBytes(auth.user.id) + generated.bytes.length > maxUserBytes) {
+        return fail(res, 413, "云端存储空间不足", CLOUD_ERROR_REASON.STORAGE_QUOTA_EXCEEDED);
+    }
+
+    // Persist first, then charge (idempotent). If charge fails, soft-delete so free images are not kept.
+    const fileRow = writeUserFile({
+        userId: auth.user.id,
+        type: JOB_TYPE.IMAGE,
+        sniffed,
+        bytes: generated.bytes,
+        width: Number(body.width || 0) || 0,
+        height: Number(body.height || 0) || 0,
+        durationMs: 0,
+        filename: "platform.png",
+    });
+
+    const job = jobsRepo.create({
+        userId: auth.user.id,
+        type: JOB_TYPE.IMAGE,
+        status: JOB_STATUS.SUCCESS,
+        prompt,
+        model,
+        params: { size, quality, platform: true, price_cents: price },
+        resultFileId: fileRow.id,
+        clientLocalId,
+        source: JOB_SOURCE.SERVER_GENERATE,
+        provider: "platform",
+        saveStatus: SAVE_STATUS.STORED,
+    });
+    fileRow.job_id = job.id;
+
+    let chargedCents = 0;
+    if (price > 0) {
+        const chargeKey = clientLocalId ? `charge:image:${clientLocalId}` : `charge:image:${job.id}`;
+        try {
+            const chargeResult = creditsRepo.append({
+                userId: auth.user.id,
+                amountCents: -price,
+                type: CREDIT_LEDGER_TYPE.CHARGE,
+                note: `平台生图 ${model}`,
+                operator: "system",
+                idempotencyKey: chargeKey,
+                refType: "platform_generate_image",
+                refId: job.id,
+            });
+            chargedCents = chargeResult.deduped ? 0 : price;
+        } catch (error) {
+            try {
+                jobsRepo.deleteForUser(job.id, auth.user.id);
+                const abs = safeJoin(uploadsDir, ...String(fileRow.storage_key).split("/"));
+                if (fs.existsSync(abs)) fs.unlinkSync(abs);
+            } catch {
+                // best-effort rollback
+            }
+            db.flush();
+            if (error?.reason === CLOUD_ERROR_REASON.CREDITS_INSUFFICIENT) {
+                return fail(res, 402, error.message || "积分不足", CLOUD_ERROR_REASON.CREDITS_INSUFFICIENT);
+            }
+            throw error;
+        }
+    }
+    db.flush();
+
+    json(
+        res,
+        200,
+        {
+            ...publicJob(job, fileRow, { deduped: false }),
+            credits: publicCredits(auth.user.id),
+            charged_cents: chargedCents,
+        },
+        chargedCents > 0 ? `已生成并扣费 ${chargedCents} 分` : "已生成",
+    );
 }
 
 function handleListOwnCredits(req, res, url) {

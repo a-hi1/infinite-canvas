@@ -1,7 +1,7 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, WandSparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Segmented, Tag, Tooltip, Typography } from "antd";
+import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Segmented, Switch, Tag, Tooltip, Typography } from "antd";
 import localforage from "localforage";
 import { saveAs } from "file-saver";
 
@@ -19,7 +19,7 @@ import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "
 import { requestEdit, requestGeneration } from "@/services/api/image";
 import { CloudHistoryPanel } from "@/components/cloud-history-panel";
 import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyncStatus } from "@/lib/cloud-sync";
-import { isStorageQuotaError } from "@/services/cloud-api";
+import { generatePlatformImage, isStorageQuotaError } from "@/services/cloud-api";
 import { saveImageToCloudDetailed } from "@/services/cloud-history";
 import { deleteStoredImages, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
@@ -73,6 +73,7 @@ type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
 const LOG_STORE_KEY = "infinite-canvas:image_generation_logs";
+const PLATFORM_IMAGE_PREF_KEY = "infinite-canvas:prefer_platform_image";
 const RESULT_ACTION_BUTTON_CLASS = "min-w-0 px-1.5 [&_.ant-btn-icon]:shrink-0 [&>span:last-child]:min-w-0 [&>span:last-child]:truncate";
 const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
 
@@ -87,6 +88,8 @@ export default function ImagePage() {
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const addAsset = useAssetStore((state) => state.addAsset);
     const cloudUser = useAuthStore((state) => state.user);
+    const credits = useAuthStore((state) => state.credits);
+    const refreshUsage = useAuthStore((state) => state.refreshUsage);
     const [prompt, setPrompt] = useState("");
     const [references, setReferences] = useState<ReferenceImage[]>([]);
     const [results, setResults] = useState<GenerationResult[]>([]);
@@ -104,11 +107,22 @@ export default function ImagePage() {
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
     const [historySource, setHistorySource] = useState<"local" | "cloud">("local");
     const [cloudRefreshKey, setCloudRefreshKey] = useState(0);
+    const [preferPlatformImage, setPreferPlatformImage] = useState(() => {
+        try {
+            return localStorage.getItem(PLATFORM_IMAGE_PREF_KEY) === "1";
+        } catch {
+            return false;
+        }
+    });
 
     const model = effectiveConfig.imageModel || effectiveConfig.model;
     const textModel = effectiveConfig.textModel || effectiveConfig.model;
     const canGenerate = Boolean(prompt.trim());
     const generationCount = Math.max(1, Math.min(10, Number(config.count) || 1));
+    const platformBillingReady = Boolean(cloudUser && credits?.platform_billing_enabled);
+    const usePlatformImage = preferPlatformImage && platformBillingReady;
+    const imagePriceCents = credits?.image_price_cents ?? 0;
+    const platformModelLabel = credits?.image_model || "平台模型";
 
     useEffect(() => {
         if (!running || !startedAt) return;
@@ -211,7 +225,16 @@ export default function ImagePage() {
             message.error("请输入生图提示词");
             return;
         }
-        if (!isAiConfigReady(effectiveConfig, model)) {
+        if (usePlatformImage) {
+            if (references.length) {
+                message.warning("平台代生成当前仅支持文生图，请先清空参考图，或关闭「平台积分生图」");
+                return;
+            }
+            if ((credits?.balance_cents || 0) < imagePriceCents * generationCount && imagePriceCents > 0) {
+                message.error(`积分不足：约需 ${((imagePriceCents * generationCount) / 100).toFixed(2)} 元，当前 ${((credits?.balance_cents || 0) / 100).toFixed(2)} 元`);
+                return;
+            }
+        } else if (!isAiConfigReady(effectiveConfig, model)) {
             message.warning("请先完成配置");
             openConfigDialog(true);
             return;
@@ -458,16 +481,20 @@ export default function ImagePage() {
             message.error("请输入生图提示词");
             return null;
         }
-        if (!isAiConfigReady(effectiveConfig, model)) {
+        if (!usePlatformImage && !isAiConfigReady(effectiveConfig, model)) {
             message.warning("请先完成配置");
             openConfigDialog(true);
             return null;
         }
-        return { text, config: { ...effectiveConfig, model, count: "1" }, references: [...references] };
+        return { text, config: { ...effectiveConfig, model, count: "1" }, references: [...references], platform: usePlatformImage };
     };
 
-    const runGenerationBatch = async (snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }, count: number) => {
+    const runGenerationBatch = async (snapshot: { text: string; config: AiConfig; references: ReferenceImage[]; platform?: boolean }, count: number) => {
         const batchStartedAt = performance.now();
+        if (snapshot.platform) {
+            // 平台网关按张串行：每张独立 client_local_id，成功才扣费，避免并发双扣。
+            return runGenerationSlotsSerial(snapshot, 0, count);
+        }
         // 优先一次请求拿齐 count；失败或数量不足时再串行补齐，避免并发触发 429。
         try {
             const generated = snapshot.references.length ? await requestEdit({ ...snapshot.config, count: String(count) }, snapshot.text, snapshot.references) : await requestGeneration({ ...snapshot.config, count: String(count) }, snapshot.text);
@@ -512,7 +539,7 @@ export default function ImagePage() {
         }
     };
 
-    const runGenerationSlotsSerial = async (snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }, startIndex: number, count: number) => {
+    const runGenerationSlotsSerial = async (snapshot: { text: string; config: AiConfig; references: ReferenceImage[]; platform?: boolean }, startIndex: number, count: number) => {
         const images: GeneratedImage[] = [];
         let firstError = "";
         for (let index = startIndex; index < count; index += 1) {
@@ -525,9 +552,45 @@ export default function ImagePage() {
         return { images, firstError };
     };
 
-    const runGenerationSlot = async (index: number, snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }) => {
+    const runGenerationSlot = async (index: number, snapshot: { text: string; config: AiConfig; references: ReferenceImage[]; platform?: boolean }) => {
         const itemStartedAt = performance.now();
         try {
+            if (snapshot.platform) {
+                const platform = await generatePlatformImage({
+                    prompt: snapshot.text,
+                    size: snapshot.config.size,
+                    quality: snapshot.config.quality,
+                    clientLocalId: nanoid(),
+                });
+                let dataUrl = platform.dataUrl;
+                let storageKey: string | undefined;
+                let width = platform.width || 0;
+                let height = platform.height || 0;
+                let bytes = platform.bytes || getDataUrlByteSize(platform.dataUrl);
+                try {
+                    const stored = await uploadImage(platform.dataUrl);
+                    dataUrl = stored.url;
+                    storageKey = stored.storageKey;
+                    width = stored.width;
+                    height = stored.height;
+                    bytes = stored.bytes;
+                } catch {
+                    if (!width || !height) {
+                        const meta = await readImageMeta(platform.dataUrl);
+                        width = meta.width;
+                        height = meta.height;
+                    }
+                }
+                if (!width || !height) {
+                    const meta = await readImageMeta(dataUrl);
+                    width = meta.width;
+                    height = meta.height;
+                }
+                const nextImage: GeneratedImage = { id: platform.job.id || nanoid(), dataUrl, storageKey, durationMs: performance.now() - itemStartedAt, width, height, bytes, mimeType: platform.mimeType };
+                setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
+                void refreshUsage();
+                return nextImage;
+            }
             const result = snapshot.references.length ? await requestEdit(snapshot.config, snapshot.text, snapshot.references) : await requestGeneration(snapshot.config, snapshot.text);
             const image = result[0];
             if (!image) throw new Error("接口没有返回图片");
@@ -702,9 +765,36 @@ export default function ImagePage() {
                         </div>
 
                         <div className="mt-auto space-y-2 pt-6">
+                            {platformBillingReady ? (
+                                <div className="flex items-center justify-between gap-3 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">
+                                    <div className="min-w-0">
+                                        <div className="font-medium text-stone-800 dark:text-stone-100">平台积分生图</div>
+                                        <div className="mt-0.5 opacity-75">
+                                            {platformModelLabel}
+                                            {imagePriceCents > 0 ? ` · 约 ¥${(imagePriceCents / 100).toFixed(2)}/张` : " · 当前免费"}
+                                            {" · "}余额 ¥{((credits?.balance_cents || 0) / 100).toFixed(2)}
+                                        </div>
+                                    </div>
+                                    <Switch
+                                        checked={preferPlatformImage}
+                                        onChange={(checked) => {
+                                            setPreferPlatformImage(checked);
+                                            try {
+                                                localStorage.setItem(PLATFORM_IMAGE_PREF_KEY, checked ? "1" : "0");
+                                            } catch {
+                                                // ignore
+                                            }
+                                        }}
+                                    />
+                                </div>
+                            ) : null}
                             <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">
-                                请求模式：{modelOptionLabel(effectiveConfig, model)} · {references.length ? "图生图 /v1/images/edits" : "文生图 /v1/images/generations"} · 参考图 {references.length} 张 · 生成 {generationCount} 张
-                                <div className="mt-1 opacity-75">多张时优先一次请求；不足或失败时串行补齐，降低 429 风险。</div>
+                                {usePlatformImage
+                                    ? `请求模式：平台代生成 /api/generate/image · ${platformModelLabel} · 文生图 · 生成 ${generationCount} 张（成功后扣积分）`
+                                    : `请求模式：${modelOptionLabel(effectiveConfig, model)} · ${references.length ? "图生图 /v1/images/edits" : "文生图 /v1/images/generations"} · 参考图 ${references.length} 张 · 生成 ${generationCount} 张`}
+                                <div className="mt-1 opacity-75">
+                                    {usePlatformImage ? "默认仍是你自己的 API Key；开启平台积分后走服务端 Key，不经过浏览器暴露上游密钥。" : "多张时优先一次请求；不足或失败时串行补齐，降低 429 风险。"}
+                                </div>
                             </div>
                             <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
                                 开始生成

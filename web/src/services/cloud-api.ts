@@ -21,11 +21,13 @@ export type CloudLimits = {
     max_video_bytes: number;
 };
 
-/** Platform credit wallet (integer cents). Billing generation is still off by default. */
+/** Platform credit wallet (integer cents). Generation billing only when platform_billing_enabled. */
 export type CloudCredits = {
     balance_cents: number;
     currency?: string;
     platform_billing_enabled?: boolean;
+    image_price_cents?: number;
+    image_model?: string;
 };
 
 export type CloudFile = {
@@ -122,6 +124,59 @@ export function getCloudMe() {
         limits?: CloudLimits | null;
         credits?: CloudCredits | null;
     }>("/auth/me");
+}
+
+/**
+ * Server-side platform image generation (opt-in). Uses session cookie; charges credits on success.
+ * Default browser BYOK path is unchanged — call this only when user opts into platform billing.
+ */
+export async function generatePlatformImage(input: {
+    prompt: string;
+    size?: string;
+    quality?: string;
+    clientLocalId?: string;
+    model?: string;
+}) {
+    const data = await request<
+        CloudJob & {
+            charged_cents?: number;
+            credits?: CloudCredits | null;
+        }
+    >("/generate/image", {
+        method: "POST",
+        body: JSON.stringify({
+            prompt: input.prompt,
+            size: input.size || "",
+            quality: input.quality || "",
+            client_local_id: input.clientLocalId || "",
+            model: input.model || "",
+        }),
+    });
+    let dataUrl = "";
+    let mimeType = data.file?.mime || "image/png";
+    if (data.file?.url) {
+        const fileRes = await fetch(data.file.url, { credentials: "include" });
+        if (!fileRes.ok) throw new CloudApiError("生成成功但读取结果文件失败", fileRes.status);
+        const blob = await fileRes.blob();
+        mimeType = blob.type || mimeType;
+        dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ""));
+            reader.onerror = () => reject(new Error("读取生成图片失败"));
+            reader.readAsDataURL(blob);
+        });
+    }
+    if (!dataUrl) throw new CloudApiError("平台生图未返回可显示图片", 502, "platform_no_image");
+    return {
+        job: data,
+        dataUrl,
+        mimeType,
+        width: data.file?.width || 0,
+        height: data.file?.height || 0,
+        bytes: data.file?.bytes || 0,
+        chargedCents: data.charged_cents || 0,
+        credits: data.credits || null,
+    };
 }
 
 export function listCloudCreditLedger(input?: { page?: number; pageSize?: number }) {

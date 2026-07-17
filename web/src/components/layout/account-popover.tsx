@@ -60,7 +60,9 @@ export function AccountPopover() {
                     <span className="font-medium text-stone-700 dark:text-stone-200">{formatYuanFromCents(balanceCents)}</span>
                 </div>
                 <div className="text-[11px] leading-5 text-stone-400">
-                    {platformBilling ? "平台代生成已开启，扣费将走账本。" : "默认仍用你自己的 API Key 生成；积分仅预留后续平台代生成，手工加额由管理员操作。"}
+                    {platformBilling
+                        ? `平台代生成已开启${typeof credits?.image_price_cents === "number" ? `，约 ¥${(credits.image_price_cents / 100).toFixed(2)}/张` : ""}；图片工作台可开关「平台积分生图」。`
+                        : "默认仍用你自己的 API Key 生成；服务器开启平台生图后，图片工作台才会出现「平台积分生图」开关。"}
                 </div>
             </div>
 
