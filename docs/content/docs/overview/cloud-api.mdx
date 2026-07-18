@@ -109,6 +109,20 @@ curl -sS -X POST http://127.0.0.1:3011/api/admin/credits/grant \
 - 图生图：`images: [{ "data_url": "data:image/png;base64,..." }]`（最多 4 张）时调上游 `/images/edits`
 - 画布默认路径仍是用户自己的渠道；支付入账可后置
 
+### 平台视频代生成（P1.0-F，可选，仅文生视频）
+
+| 变量 | 含义 |
+| --- | --- |
+| `API_PLATFORM_VIDEO_ENABLED` | `true` 才开放视频网关 |
+| `API_PLATFORM_VIDEO_BASE_URL` | OpenAI 兼容上游；空则回落 `API_PLATFORM_IMAGE_BASE_URL` |
+| `API_PLATFORM_VIDEO_API_KEY` | 服务端 Key；空则回落图片上游 Key |
+| `API_PLATFORM_VIDEO_MODEL` | 允许的视频模型名（默认 `sora-2`） |
+| `API_PLATFORM_VIDEO_PRICE_CENTS` | 成功一条扣多少分（默认 50） |
+
+- 接口：`POST /api/generate/video`（需登录）
+- 仅文生视频；参考图/视频/音频请继续用 BYOK（Grok/Seedance 等）
+- 幂等与扣费语义同图片网关
+
 ### 访问地址与登录 403
 
 浏览器打开 `http://服务器IP:3001` 时，登录请求会带 `Origin: http://服务器IP:3001`。  

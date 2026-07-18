@@ -1,7 +1,7 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImageIcon, LoaderCircle, Music2, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon, WandSparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Segmented, Tag, Typography } from "antd";
+import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Segmented, Switch, Tag, Typography } from "antd";
 import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { saveAs } from "file-saver";
@@ -21,7 +21,7 @@ import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
 import { CloudHistoryPanel } from "@/components/cloud-history-panel";
 import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyncStatus } from "@/lib/cloud-sync";
-import { isStorageQuotaError } from "@/services/cloud-api";
+import { generatePlatformVideo, isStorageQuotaError } from "@/services/cloud-api";
 import { saveVideoToCloudDetailed } from "@/services/cloud-history";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useAuthStore } from "@/stores/use-auth-store";
@@ -78,6 +78,7 @@ type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vqu
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
 const LOG_STORE_KEY = "infinite-canvas:video_generation_logs";
+const PLATFORM_VIDEO_PREF_KEY = "infinite-canvas:prefer_platform_video";
 const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" });
 
 export default function VideoPage() {
@@ -91,6 +92,8 @@ export default function VideoPage() {
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const addAsset = useAssetStore((state) => state.addAsset);
     const cloudUser = useAuthStore((state) => state.user);
+    const credits = useAuthStore((state) => state.credits);
+    const refreshUsage = useAuthStore((state) => state.refreshUsage);
     const [prompt, setPrompt] = useState("");
     const [references, setReferences] = useState<ReferenceImage[]>([]);
     const [videoReferences, setVideoReferences] = useState<ReferenceVideo[]>([]);
@@ -110,9 +113,20 @@ export default function VideoPage() {
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
     const [historySource, setHistorySource] = useState<"local" | "cloud">("local");
     const [cloudRefreshKey, setCloudRefreshKey] = useState(0);
+    const [preferPlatformVideo, setPreferPlatformVideo] = useState(() => {
+        try {
+            return localStorage.getItem(PLATFORM_VIDEO_PREF_KEY) === "1";
+        } catch {
+            return false;
+        }
+    });
 
     const model = effectiveConfig.videoModel || effectiveConfig.model;
     const textModel = effectiveConfig.textModel || effectiveConfig.model;
+    const platformVideoReady = Boolean(cloudUser && (credits?.platform_video_enabled ?? false));
+    const usePlatformVideo = preferPlatformVideo && platformVideoReady;
+    const videoPriceCents = credits?.video_price_cents ?? 0;
+    const platformVideoModelLabel = credits?.video_model || "平台视频模型";
 
     useEffect(() => {
         const incoming = searchParams.get("prompt")?.trim() || "";
@@ -228,6 +242,55 @@ export default function VideoPage() {
         const batchStartedAt = performance.now();
         setStartedAt(batchStartedAt);
         try {
+            if (snapshot.platform) {
+                const platform = await generatePlatformVideo({
+                    prompt: snapshot.text,
+                    seconds: snapshot.config.videoSeconds,
+                    size: snapshot.config.size,
+                    clientLocalId: nanoid(),
+                });
+                const stored = platform.blob
+                    ? await storeGeneratedVideo({ blob: platform.blob, mimeType: platform.mimeType }, snapshot.config)
+                    : await storeGeneratedVideo({ url: platform.url, mimeType: platform.mimeType }, snapshot.config);
+                const nextVideo: GeneratedVideo = {
+                    id: platform.job.id || nanoid(),
+                    url: stored.url || platform.url,
+                    storageKey: stored.storageKey || "",
+                    durationMs: performance.now() - batchStartedAt,
+                    width: platform.width || stored.width || 0,
+                    height: platform.height || stored.height || 0,
+                    bytes: platform.bytes || stored.bytes || 0,
+                    mimeType: platform.mimeType || stored.mimeType || "video/mp4",
+                };
+                setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
+                const loggedIn = Boolean(useAuthStore.getState().user);
+                const successLog = buildLog({
+                    prompt: snapshot.text,
+                    model: platformVideoModelLabel,
+                    config: snapshot.config,
+                    references: [],
+                    videoReferences: [],
+                    audioReferences: [],
+                    durationMs: performance.now() - batchStartedAt,
+                    status: "成功",
+                    video: nextVideo,
+                });
+                const logWithSync: GenerationLog = {
+                    ...successLog,
+                    // Platform path already stored on server; mark local history as synced when logged in.
+                    cloudSync: loggedIn ? "synced" : "skipped",
+                    cloudJobIds: platform.job.id ? [platform.job.id] : undefined,
+                    cloudError: undefined,
+                    cloudErrorReason: undefined,
+                };
+                await saveLog(logWithSync);
+                setLogs((value) => [logWithSync, ...value.filter((item) => item.id !== logWithSync.id)]);
+                message.success(platform.chargedCents ? `视频已生成（已扣 ${platform.chargedCents} 分）` : "视频已生成");
+                void refreshUsage();
+                if (loggedIn) setCloudRefreshKey((value) => value + 1);
+                setRunning(false);
+                return;
+            }
             const task = await createVideoGenerationTask(snapshot.config, snapshot.text, snapshot.references, snapshot.videoReferences, snapshot.audioReferences);
             const log = buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: 0, status: "生成中", task });
             await saveLog(log);
@@ -272,6 +335,24 @@ export default function VideoPage() {
             message.error("请输入视频提示词");
             return null;
         }
+        if (usePlatformVideo) {
+            if (references.length || videoReferences.length || audioReferences.length) {
+                message.warning("平台积分视频当前仅支持文生视频，请清空参考素材，或关闭「平台积分生视频」");
+                return null;
+            }
+            if (videoPriceCents > 0 && (credits?.balance_cents || 0) < videoPriceCents) {
+                message.error(`积分不足：约需 ¥${(videoPriceCents / 100).toFixed(2)}，当前 ¥${((credits?.balance_cents || 0) / 100).toFixed(2)}`);
+                return null;
+            }
+            return {
+                text,
+                config: videoRequestConfig,
+                references: [] as ReferenceImage[],
+                videoReferences: [] as ReferenceVideo[],
+                audioReferences: [] as ReferenceAudio[],
+                platform: true as const,
+            };
+        }
         const warning = getVideoReadinessWarning(videoRequestConfig, model);
         if (warning) {
             message.warning(warning);
@@ -292,7 +373,7 @@ export default function VideoPage() {
             message.error(`${videoReferenceError}。${seedanceVideoReferenceHint}`);
             return null;
         }
-        return { text, config: videoRequestConfig, references: [...references], videoReferences: [...videoReferences], audioReferences: [...audioReferences] };
+        return { text, config: videoRequestConfig, references: [...references], videoReferences: [...videoReferences], audioReferences: [...audioReferences], platform: false as const };
     };
 
     const retryResult = () => {
@@ -637,7 +718,36 @@ export default function VideoPage() {
                             </div>
                         </div>
 
-                        <div className="mt-auto pt-6">
+                        <div className="mt-auto space-y-2 pt-6">
+                            {platformVideoReady ? (
+                                <div className="flex items-center justify-between gap-3 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">
+                                    <div className="min-w-0">
+                                        <div className="font-medium text-stone-800 dark:text-stone-100">平台积分生视频</div>
+                                        <div className="mt-0.5 opacity-75">
+                                            {platformVideoModelLabel}
+                                            {videoPriceCents > 0 ? ` · 约 ¥${(videoPriceCents / 100).toFixed(2)}/条` : " · 当前免费"}
+                                            {" · "}余额 ¥{((credits?.balance_cents || 0) / 100).toFixed(2)}
+                                            {" · "}仅文生视频
+                                        </div>
+                                    </div>
+                                    <Switch
+                                        checked={preferPlatformVideo}
+                                        onChange={(checked) => {
+                                            setPreferPlatformVideo(checked);
+                                            try {
+                                                localStorage.setItem(PLATFORM_VIDEO_PREF_KEY, checked ? "1" : "0");
+                                            } catch {
+                                                // ignore
+                                            }
+                                        }}
+                                    />
+                                </div>
+                            ) : null}
+                            <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">
+                                {usePlatformVideo
+                                    ? `请求模式：平台代生成 /api/generate/video · ${platformVideoModelLabel} · OpenAI 兼容文生视频（成功后扣积分）`
+                                    : `请求模式：${modelOptionLabel(effectiveConfig, model)} · ${videoProviderLabel} · ${videoSettingsSummary(videoRequestConfig)}`}
+                            </div>
                             <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
                                 开始生成
                             </Button>

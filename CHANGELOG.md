@@ -2,6 +2,8 @@
 
 ## Unreleased
 
++ [新增] P1.0-F：可选平台视频文生网关（`POST /api/generate/video`，OpenAI 兼容），成功后按分扣费；视频工作台可开关，默认仍 BYOK。
++ [调整] 平台图片/视频共用落盘与幂等扣费逻辑（`platform-billing`），减少后续网关重复实现。
 + [新增] P1.0-E：平台图片网关支持参考图图生图（`images[].data_url` → 上游 `/images/edits`，最多 4 张），扣费与幂等复用同一路径。
 + [新增] P1.0-D：可选平台图片代生成网关（`POST /api/generate/image`），显式环境开关，成功后按分扣费；图片工作台可开关，默认仍 BYOK。
 + [新增] P1.0-C：积分账本（append-only）与管理员手工加额接口；`/auth/me` 返回积分余额展示，默认不开启平台代生成扣费。

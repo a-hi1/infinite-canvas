@@ -21,13 +21,17 @@ export type CloudLimits = {
     max_video_bytes: number;
 };
 
-/** Platform credit wallet (integer cents). Generation billing only when platform_billing_enabled. */
+/** Platform credit wallet (integer cents). Generation billing only when platform_*_enabled. */
 export type CloudCredits = {
     balance_cents: number;
     currency?: string;
     platform_billing_enabled?: boolean;
+    platform_image_enabled?: boolean;
+    platform_video_enabled?: boolean;
     image_price_cents?: number;
     image_model?: string;
+    video_price_cents?: number;
+    video_model?: string;
 };
 
 export type CloudFile = {
@@ -178,6 +182,55 @@ export async function generatePlatformImage(input: {
     return {
         job: data,
         dataUrl,
+        mimeType,
+        width: data.file?.width || 0,
+        height: data.file?.height || 0,
+        bytes: data.file?.bytes || 0,
+        chargedCents: data.charged_cents || 0,
+        credits: data.credits || null,
+    };
+}
+
+/**
+ * Server-side platform text-to-video (opt-in OpenAI-compatible). No references on this path.
+ */
+export async function generatePlatformVideo(input: {
+    prompt: string;
+    seconds?: string;
+    size?: string;
+    clientLocalId?: string;
+    model?: string;
+}) {
+    const data = await request<
+        CloudJob & {
+            charged_cents?: number;
+            credits?: CloudCredits | null;
+        }
+    >("/generate/video", {
+        method: "POST",
+        body: JSON.stringify({
+            prompt: input.prompt,
+            seconds: input.seconds || "4",
+            size: input.size || "",
+            client_local_id: input.clientLocalId || "",
+            model: input.model || "",
+        }),
+    });
+    let blob: Blob | null = null;
+    let url = data.file?.url || "";
+    let mimeType = data.file?.mime || "video/mp4";
+    if (url) {
+        const fileRes = await fetch(url, { credentials: "include" });
+        if (!fileRes.ok) throw new CloudApiError("生成成功但读取结果视频失败", fileRes.status);
+        blob = await fileRes.blob();
+        mimeType = blob.type || mimeType;
+        url = URL.createObjectURL(blob);
+    }
+    if (!blob && !url) throw new CloudApiError("平台生视频未返回可播放结果", 502, "platform_upstream_failed");
+    return {
+        job: data,
+        blob: blob || undefined,
+        url,
         mimeType,
         width: data.file?.width || 0,
         height: data.file?.height || 0,

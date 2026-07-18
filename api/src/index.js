@@ -12,6 +12,8 @@ import { createJobsRepo } from "./repositories/jobs-repo.js";
 import { createFilesRepo } from "./repositories/files-repo.js";
 import { createCreditsRepo } from "./repositories/credits-repo.js";
 import { decodePlatformReferenceDataUrl, generateOnePlatformImage, PLATFORM_IMAGE_REF_LIMIT } from "./platform-image.js";
+import { generateOnePlatformVideo } from "./platform-video.js";
+import { findExistingPlatformJob, persistPlatformResultAndCharge } from "./platform-billing.js";
 import {
     clearCookie,
     clientIp,
@@ -48,6 +50,13 @@ const platformImageModel = String(process.env.API_PLATFORM_IMAGE_MODEL || "gpt-i
 // Price per successful image in cents (integer). Default 10 cents = ¥0.10.
 const platformImagePriceCents = Math.max(0, Math.trunc(Number(process.env.API_PLATFORM_IMAGE_PRICE_CENTS || 10) || 10));
 const platformImageTimeoutMs = Math.max(15000, Math.trunc(Number(process.env.API_PLATFORM_IMAGE_TIMEOUT_MS || 120000) || 120000));
+// Platform video gateway (opt-in, text-to-video OpenAI-compatible only). Default off.
+const platformVideoEnabled = String(process.env.API_PLATFORM_VIDEO_ENABLED || "").toLowerCase() === "true";
+const platformVideoBaseUrl = String(process.env.API_PLATFORM_VIDEO_BASE_URL || process.env.API_PLATFORM_IMAGE_BASE_URL || "").trim();
+const platformVideoApiKey = String(process.env.API_PLATFORM_VIDEO_API_KEY || process.env.API_PLATFORM_IMAGE_API_KEY || "").trim();
+const platformVideoModel = String(process.env.API_PLATFORM_VIDEO_MODEL || "sora-2").trim() || "sora-2";
+const platformVideoPriceCents = Math.max(0, Math.trunc(Number(process.env.API_PLATFORM_VIDEO_PRICE_CENTS || 50) || 50));
+const platformVideoTimeoutMs = Math.max(30000, Math.trunc(Number(process.env.API_PLATFORM_VIDEO_TIMEOUT_MS || 300000) || 300000));
 const sessionTtlSec = Number(process.env.API_SESSION_TTL_SEC || 7 * 24 * 3600);
 const cookieSecure = String(process.env.API_COOKIE_SECURE || "").toLowerCase() === "true";
 const maxBodyBytes = Number(process.env.API_MAX_BODY_BYTES || 220 * 1024 * 1024);
@@ -175,8 +184,9 @@ const server = http.createServer(async (req, res) => {
         if (req.method === "GET" && route === "/credits/ledger") return await handleListOwnCredits(req, res, url);
         if (req.method === "POST" && route === "/admin/credits/grant") return await handleAdminCreditGrant(req, res);
 
-        // Platform image generation (opt-in server-side; charges credits only on success).
+        // Platform generation (opt-in server-side; charges credits only on success).
         if (req.method === "POST" && route === "/generate/image") return await handlePlatformGenerateImage(req, res);
+        if (req.method === "POST" && route === "/generate/video") return await handlePlatformGenerateVideo(req, res);
 
         fail(res, 404, "接口不存在", CLOUD_ERROR_REASON.NOT_FOUND);
         logWarn(requestId, "route not found", { method: req.method, url: req.url, ms: Date.now() - startedAt });
@@ -384,18 +394,28 @@ function publicLimits() {
 }
 
 function publicCredits(userId) {
+    const imageReady = isPlatformImageReady();
+    const videoReady = isPlatformVideoReady();
     return {
         balance_cents: creditsRepo.getBalanceCents(userId),
         currency: "cny_cents",
-        // Explicit opt-in: only true when env enables platform image gateway + upstream is configured.
-        platform_billing_enabled: isPlatformImageReady(),
+        // True if any platform generate path is ready (image and/or video).
+        platform_billing_enabled: imageReady || videoReady,
+        platform_image_enabled: imageReady,
+        platform_video_enabled: videoReady,
         image_price_cents: platformImagePriceCents,
-        image_model: isPlatformImageReady() ? platformImageModel : "",
+        image_model: imageReady ? platformImageModel : "",
+        video_price_cents: platformVideoPriceCents,
+        video_model: videoReady ? platformVideoModel : "",
     };
 }
 
 function isPlatformImageReady() {
     return platformImageEnabled && Boolean(platformImageBaseUrl) && Boolean(platformImageApiKey);
+}
+
+function isPlatformVideoReady() {
+    return platformVideoEnabled && Boolean(platformVideoBaseUrl) && Boolean(platformVideoApiKey);
 }
 
 /**
@@ -446,31 +466,26 @@ async function handlePlatformGenerateImage(req, res) {
     }
     const mode = references.length ? "edit" : "generation";
 
-    // Idempotent retry: same user + image + client_local_id returns existing job without re-charge.
-    if (clientLocalId) {
-        const existing = jobsRepo.findByClientLocalId(auth.user.id, JOB_TYPE.IMAGE, clientLocalId);
-        if (existing && existing.source === JOB_SOURCE.SERVER_GENERATE && existing.status === JOB_STATUS.SUCCESS) {
-            const existingFile = existing.result_file_id ? filesRepo.findForUser(existing.result_file_id, auth.user.id) : null;
-            if (existingFile) {
-                try {
-                    const absExisting = safeJoin(uploadsDir, ...String(existingFile.storage_key).split("/"));
-                    if (fs.existsSync(absExisting)) {
-                        return json(
-                            res,
-                            200,
-                            {
-                                ...publicJob(existing, existingFile, { deduped: true }),
-                                credits: publicCredits(auth.user.id),
-                                charged_cents: 0,
-                            },
-                            "已存在相同本机请求结果，未重复生成/扣费",
-                        );
-                    }
-                } catch {
-                    // fall through to regenerate
-                }
-            }
-        }
+    const existing = findExistingPlatformJob({
+        jobsRepo,
+        filesRepo,
+        safeJoin,
+        uploadsDir,
+        userId: auth.user.id,
+        type: JOB_TYPE.IMAGE,
+        clientLocalId,
+    });
+    if (existing) {
+        return json(
+            res,
+            200,
+            {
+                ...publicJob(existing.job, existing.file, { deduped: true }),
+                credits: publicCredits(auth.user.id),
+                charged_cents: 0,
+            },
+            "已存在相同本机请求结果，未重复生成/扣费",
+        );
     }
 
     const price = platformImagePriceCents;
@@ -481,7 +496,6 @@ async function handlePlatformGenerateImage(req, res) {
         }
     }
 
-    // Charge only after success — pre-check balance above, charge below with idempotent key.
     let generated;
     try {
         generated = await generateOnePlatformImage({
@@ -510,71 +524,203 @@ async function handlePlatformGenerateImage(req, res) {
         return fail(res, 413, "云端存储空间不足", CLOUD_ERROR_REASON.STORAGE_QUOTA_EXCEEDED);
     }
 
-    // Persist first, then charge (idempotent). If charge fails, soft-delete so free images are not kept.
-    const fileRow = writeUserFile({
-        userId: auth.user.id,
-        type: JOB_TYPE.IMAGE,
-        sniffed,
-        bytes: generated.bytes,
-        width: Number(body.width || 0) || 0,
-        height: Number(body.height || 0) || 0,
-        durationMs: 0,
-        filename: "platform.png",
-    });
-
-    const job = jobsRepo.create({
-        userId: auth.user.id,
-        type: JOB_TYPE.IMAGE,
-        status: JOB_STATUS.SUCCESS,
-        prompt,
-        model,
-        params: {
-            size,
-            quality,
-            platform: true,
-            price_cents: price,
-            mode: generated.mode || mode,
-            reference_count: references.length,
-        },
-        resultFileId: fileRow.id,
-        clientLocalId,
-        source: JOB_SOURCE.SERVER_GENERATE,
-        provider: "platform",
-        saveStatus: SAVE_STATUS.STORED,
-    });
-    fileRow.job_id = job.id;
-
     let chargedCents = 0;
+    let job;
+    let fileRow;
+    try {
+        const saved = persistPlatformResultAndCharge({
+            db,
+            jobsRepo,
+            filesRepo,
+            creditsRepo,
+            writeUserFile,
+            safeJoin,
+            uploadsDir,
+            userId: auth.user.id,
+            type: JOB_TYPE.IMAGE,
+            prompt,
+            model,
+            params: {
+                size,
+                quality,
+                platform: true,
+                price_cents: price,
+                mode: generated.mode || mode,
+                reference_count: references.length,
+            },
+            clientLocalId,
+            sniffed,
+            bytes: generated.bytes,
+            width: Number(body.width || 0) || 0,
+            height: Number(body.height || 0) || 0,
+            durationMs: 0,
+            filename: "platform.png",
+            priceCents: price,
+            chargeNote: references.length ? `平台图生图 ${model}` : `平台文生图 ${model}`,
+        });
+        job = saved.job;
+        fileRow = saved.file;
+        chargedCents = saved.chargedCents;
+    } catch (error) {
+        if (error?.status) throw error;
+        throw error;
+    }
+
+    json(
+        res,
+        200,
+        {
+            ...publicJob(job, fileRow, { deduped: false }),
+            credits: publicCredits(auth.user.id),
+            charged_cents: chargedCents,
+        },
+        chargedCents > 0 ? `已生成并扣费 ${chargedCents} 分` : "已生成",
+    );
+}
+
+/**
+ * POST /api/generate/video
+ * Server-side OpenAI-compatible text-to-video only (no references).
+ * Opt-in via API_PLATFORM_VIDEO_*; default BYOK video path unchanged.
+ */
+async function handlePlatformGenerateVideo(req, res) {
+    if (!platformVideoEnabled) {
+        return fail(res, 503, "平台视频代生成未开启（API_PLATFORM_VIDEO_ENABLED）", CLOUD_ERROR_REASON.PLATFORM_GENERATE_DISABLED);
+    }
+    if (!platformVideoBaseUrl || !platformVideoApiKey) {
+        return fail(res, 503, "平台视频上游未配置（API_PLATFORM_VIDEO_BASE_URL / API_PLATFORM_VIDEO_API_KEY）", CLOUD_ERROR_REASON.PLATFORM_UPSTREAM_NOT_CONFIGURED);
+    }
+
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const ip = clientIp(req);
+    if (!rateLimit(generateHits, `${auth.user.id}:video:${ip}`, 10, 60 * 60 * 1000)) {
+        return fail(res, 429, "平台生视频过于频繁，请稍后再试", CLOUD_ERROR_REASON.UPLOAD_RATE_LIMITED);
+    }
+
+    const body = await readJson(req);
+    const prompt = String(body.prompt || "").trim();
+    if (!prompt) return fail(res, 400, "请输入提示词", CLOUD_ERROR_REASON.BAD_REQUEST);
+    if (prompt.length > 4000) return fail(res, 400, "提示词过长", CLOUD_ERROR_REASON.BAD_REQUEST);
+
+    // Keep MVP small: no reference media on platform video path.
+    if ((Array.isArray(body.images) && body.images.length) || (Array.isArray(body.references) && body.references.length)) {
+        return fail(res, 400, "平台视频当前仅支持文生视频，请去掉参考素材或改用自有渠道", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+
+    const clientLocalId = String(body.client_local_id || body.clientLocalId || "").trim();
+    const seconds = String(body.seconds || body.videoSeconds || "4").trim() || "4";
+    const size = String(body.size || "").trim();
+    const model = String(body.model || platformVideoModel).trim() || platformVideoModel;
+    if (model !== platformVideoModel) {
+        return fail(res, 400, `当前平台仅支持视频模型 ${platformVideoModel}`, CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+
+    const existing = findExistingPlatformJob({
+        jobsRepo,
+        filesRepo,
+        safeJoin,
+        uploadsDir,
+        userId: auth.user.id,
+        type: JOB_TYPE.VIDEO,
+        clientLocalId,
+    });
+    if (existing) {
+        return json(
+            res,
+            200,
+            {
+                ...publicJob(existing.job, existing.file, { deduped: true }),
+                credits: publicCredits(auth.user.id),
+                charged_cents: 0,
+            },
+            "已存在相同本机请求结果，未重复生成/扣费",
+        );
+    }
+
+    const price = platformVideoPriceCents;
     if (price > 0) {
-        const chargeKey = clientLocalId ? `charge:image:${clientLocalId}` : `charge:image:${job.id}`;
-        try {
-            const chargeResult = creditsRepo.append({
-                userId: auth.user.id,
-                amountCents: -price,
-                type: CREDIT_LEDGER_TYPE.CHARGE,
-                note: references.length ? `平台图生图 ${model}` : `平台文生图 ${model}`,
-                operator: "system",
-                idempotencyKey: chargeKey,
-                refType: "platform_generate_image",
-                refId: job.id,
-            });
-            chargedCents = chargeResult.deduped ? 0 : price;
-        } catch (error) {
-            try {
-                jobsRepo.deleteForUser(job.id, auth.user.id);
-                const abs = safeJoin(uploadsDir, ...String(fileRow.storage_key).split("/"));
-                if (fs.existsSync(abs)) fs.unlinkSync(abs);
-            } catch {
-                // best-effort rollback
-            }
-            db.flush();
-            if (error?.reason === CLOUD_ERROR_REASON.CREDITS_INSUFFICIENT) {
-                return fail(res, 402, error.message || "积分不足", CLOUD_ERROR_REASON.CREDITS_INSUFFICIENT);
-            }
-            throw error;
+        const balance = creditsRepo.getBalanceCents(auth.user.id);
+        if (balance < price) {
+            return fail(res, 402, `积分不足（需要 ${price} 分，当前 ${balance} 分）`, CLOUD_ERROR_REASON.CREDITS_INSUFFICIENT);
         }
     }
-    db.flush();
+
+    let generated;
+    try {
+        generated = await generateOnePlatformVideo({
+            baseUrl: platformVideoBaseUrl,
+            apiKey: platformVideoApiKey,
+            model,
+            prompt,
+            seconds,
+            size,
+            timeoutMs: platformVideoTimeoutMs,
+        });
+    } catch (error) {
+        if (error?.status) throw error;
+        throw httpError(error?.message || "平台生视频失败", 502, CLOUD_ERROR_REASON.PLATFORM_UPSTREAM_FAILED);
+    }
+
+    const sniffed = sniffMime(generated.bytes) || generated.mime || "video/mp4";
+    if (!["video/mp4", "video/webm"].includes(sniffed) && sniffed !== "video/mp4") {
+        // Some upstreams return octet-stream; accept if magic is missing but length is ok.
+        if (!sniffed.startsWith("video/") && sniffMime(generated.bytes) !== "video/mp4") {
+            // still allow if size looks like a video blob
+            if (generated.bytes.length < 1024) {
+                return fail(res, 502, `上游返回了不支持的视频类型: ${sniffed || "unknown"}`, CLOUD_ERROR_REASON.PLATFORM_UPSTREAM_FAILED);
+            }
+        }
+    }
+    if (generated.bytes.length > maxVideoBytes) {
+        return fail(res, 413, "生成视频过大", CLOUD_ERROR_REASON.PAYLOAD_TOO_LARGE);
+    }
+    if (filesRepo.countUserBytes(auth.user.id) + generated.bytes.length > maxUserBytes) {
+        return fail(res, 413, "云端存储空间不足", CLOUD_ERROR_REASON.STORAGE_QUOTA_EXCEEDED);
+    }
+
+    const finalMime = sniffed.startsWith("video/") ? sniffed : "video/mp4";
+    let chargedCents = 0;
+    let job;
+    let fileRow;
+    try {
+        const saved = persistPlatformResultAndCharge({
+            db,
+            jobsRepo,
+            filesRepo,
+            creditsRepo,
+            writeUserFile,
+            safeJoin,
+            uploadsDir,
+            userId: auth.user.id,
+            type: JOB_TYPE.VIDEO,
+            prompt,
+            model,
+            params: {
+                seconds,
+                size,
+                platform: true,
+                price_cents: price,
+                mode: "generation",
+                upstream_task_id: generated.upstreamTaskId || "",
+            },
+            clientLocalId,
+            sniffed: finalMime,
+            bytes: generated.bytes,
+            width: Number(body.width || 0) || 0,
+            height: Number(body.height || 0) || 0,
+            durationMs: generated.durationMs || 0,
+            filename: "platform.mp4",
+            priceCents: price,
+            chargeNote: `平台文生视频 ${model}`,
+        });
+        job = saved.job;
+        fileRow = saved.file;
+        chargedCents = saved.chargedCents;
+    } catch (error) {
+        if (error?.status) throw error;
+        throw error;
+    }
 
     json(
         res,

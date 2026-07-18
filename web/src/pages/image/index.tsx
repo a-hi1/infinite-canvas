@@ -119,7 +119,7 @@ export default function ImagePage() {
     const textModel = effectiveConfig.textModel || effectiveConfig.model;
     const canGenerate = Boolean(prompt.trim());
     const generationCount = Math.max(1, Math.min(10, Number(config.count) || 1));
-    const platformBillingReady = Boolean(cloudUser && credits?.platform_billing_enabled);
+    const platformBillingReady = Boolean(cloudUser && (credits?.platform_image_enabled ?? credits?.platform_billing_enabled));
     const usePlatformImage = preferPlatformImage && platformBillingReady;
     const imagePriceCents = credits?.image_price_cents ?? 0;
     const platformModelLabel = credits?.image_model || "平台模型";
