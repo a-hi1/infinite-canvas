@@ -8,7 +8,7 @@ import { fetchChannelModels } from "@/services/api/image";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
-import { AI_PROXY_BASE_URL, createModelChannel, defaultBaseUrlForApiFormat, encodeChannelModel, filterModelsByCapability, isAiProxyBaseUrl, modelOptionLabel, modelOptionName, modelOptionsFromChannels, normalizeModelOptionValue, resolveModelScript, setModelScript, useConfigStore, type AiConfig, type ApiCallFormat, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { AI_PROXY_BASE_URL, createModelChannel, defaultBaseUrlForApiFormat, encodeChannelModel, filterModelsByCapability, isAiProxyBaseUrl, listConfiguredModelScripts, modelOptionLabel, modelOptionName, modelOptionsFromChannels, normalizeModelOptionValue, pruneModelScripts, resolveModelScript, setModelScript, useConfigStore, type AiConfig, type ApiCallFormat, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -76,13 +76,20 @@ export function AppConfigModal() {
     const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
     const clearPromptContinue = useConfigStore((state) => state.clearPromptContinue);
     const modelOptions = config.models.map((model) => ({ label: modelOptionLabel(config, model), value: model }));
+    const configuredScripts = useMemo(() => listConfiguredModelScripts(config), [config]);
     const scriptModelOptionsByCapability = useMemo(() => {
-        const scripted = Object.keys(config.modelScripts || {}).filter((key) => Boolean((config.modelScripts || {})[key]?.trim()));
+        const scripted = configuredScripts.map((item) => item.key);
         return Object.fromEntries(
             modelGroups.map((group) => {
                 const capabilityModels = config[group.modelsKey] || [];
                 const defaultModel = config[group.modelKey];
-                const values = Array.from(new Set([defaultModel, ...capabilityModels, ...scripted].map((value) => (value || "").trim()).filter(Boolean)));
+                const capabilityNames = new Set(capabilityModels.map((value) => modelOptionName(value)));
+                if (defaultModel) capabilityNames.add(modelOptionName(defaultModel));
+                const relatedScripted = scripted.filter((key) => {
+                    if (capabilityModels.includes(key) || key === defaultModel) return true;
+                    return capabilityNames.has(modelOptionName(key));
+                });
+                const values = Array.from(new Set([defaultModel, ...capabilityModels, ...relatedScripted].map((value) => (value || "").trim()).filter(Boolean)));
                 return [
                     group.capability,
                     values.map((value) => ({
@@ -92,11 +99,22 @@ export function AppConfigModal() {
                 ];
             }),
         ) as Record<ModelCapability, Array<{ value: string; label: string }>>;
-    }, [config]);
+    }, [config, configuredScripts]);
     const webdavReady = Boolean(webdav.url.trim());
 
     const saveConfig = (nextConfig: AiConfig) => {
-        (Object.keys(nextConfig) as Array<keyof AiConfig>).forEach((key) => updateConfig(key, nextConfig[key]));
+        const pruned = pruneModelScripts(nextConfig);
+        (Object.keys(pruned) as Array<keyof AiConfig>).forEach((key) => updateConfig(key, pruned[key]));
+    };
+
+    const clearModelScript = (modelValue: string) => {
+        try {
+            const next = setModelScript(config, modelValue, "");
+            updateConfig("modelScripts", next.modelScripts);
+            message.success("已清除该模型的自定义脚本");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "清除脚本失败");
+        }
     };
 
     const finishConfig = () => {
@@ -363,14 +381,16 @@ export function AppConfigModal() {
                                 <div className="mt-4 rounded-lg border border-stone-200 p-3 dark:border-stone-800">
                                     <div className="text-sm font-semibold">模型调用脚本（可选）</div>
                                     <div className="mt-1 text-xs leading-5 text-stone-500">
-                                        可为<strong>任意可选模型</strong>（不限默认模型）编写自定义调用脚本，适配特殊中转站。键为
-                                        <code className="mx-1">渠道::模型</code>；
-                                        <strong>留空则完全走系统默认路径</strong>，不影响现有 BYOK / Grok / Agnes / Seedance。脚本仅保存在本机，不会远程安装。
+                                        可为<strong>任意可选模型</strong>（不限默认模型）编写自定义调用脚本，适配特殊中转站。键优先为
+                                        <code className="mx-1">渠道::模型</code>
+                                        ，不会跨渠道误套用；
+                                        <strong>留空则完全走系统默认路径</strong>。脚本仅保存在本机，不会远程安装。删除渠道/模型后会自动清理失效脚本。
                                     </div>
                                     <div className="mt-3 grid gap-3 md:grid-cols-2">
                                         {modelGroups.map((group) => {
                                             const options = scriptModelOptionsByCapability[group.capability] || [];
-                                            const modelValue = scriptTargetByCapability[group.capability] || config[group.modelKey] || options[0]?.value || "";
+                                            const selected = scriptTargetByCapability[group.capability];
+                                            const modelValue = (selected && options.some((item) => item.value === selected) ? selected : "") || config[group.modelKey] || options[0]?.value || "";
                                             const hasScript = Boolean(modelValue && resolveModelScript(config, modelValue));
                                             const isDefaultModel = Boolean(modelValue && modelValue === config[group.modelKey]);
                                             return (
@@ -407,6 +427,48 @@ export function AppConfigModal() {
                                             );
                                         })}
                                     </div>
+                                    {configuredScripts.length ? (
+                                        <div className="mt-3 rounded-md border border-stone-200 p-3 dark:border-stone-800">
+                                            <div className="mb-2 flex items-center justify-between gap-2">
+                                                <div className="text-sm font-medium">已配置脚本（{configuredScripts.length}）</div>
+                                                <div className="text-xs text-stone-500">仅列出有自定义脚本的模型</div>
+                                            </div>
+                                            <div className="space-y-2">
+                                                {configuredScripts.map((item) => (
+                                                    <div key={item.key} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-stone-50 px-2.5 py-2 dark:bg-stone-900/40">
+                                                        <div className="min-w-0">
+                                                            <div className="truncate text-sm font-medium">{item.label}</div>
+                                                            <div className="truncate font-mono text-[11px] text-stone-500">{item.key}</div>
+                                                        </div>
+                                                        <div className="flex shrink-0 gap-2">
+                                                            <Button
+                                                                size="small"
+                                                                icon={<Code2 className="size-3.5" />}
+                                                                onClick={() => {
+                                                                    const capability =
+                                                                        modelGroups.find((group) => config[group.modelKey] === item.key || (config[group.modelsKey] || []).includes(item.key))?.capability ||
+                                                                        (modelOptionName(item.key).match(/video|sora|veo|seedance|agnes|kling|wan|hailuo/i)
+                                                                            ? "video"
+                                                                            : modelOptionName(item.key).match(/tts|audio|speech|voice|music|sound/i)
+                                                                              ? "audio"
+                                                                              : modelOptionName(item.key).match(/image|dall|seedream|flux|imagen|sdxl|gpt-image/i)
+                                                                                ? "image"
+                                                                                : "text");
+                                                                    setScriptTargetByCapability((current) => ({ ...current, [capability]: item.key }));
+                                                                    setScriptEditor({ capability, modelValue: item.key });
+                                                                }}
+                                                            >
+                                                                编辑
+                                                            </Button>
+                                                            <Button size="small" danger onClick={() => clearModelScript(item.key)}>
+                                                                清除
+                                                            </Button>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ) : null}
                                 </div>
                             </Form>
                         ),
@@ -527,7 +589,7 @@ function withChannels(config: AiConfig, channels: ModelChannel[]): AiConfig {
     const videoModels = keepOrSuggest(config.videoModels, filterModelsByCapability(models, "video"), models);
     const textModels = keepOrSuggest(config.textModels, filterModelsByCapability(models, "text"), models);
     const audioModels = keepOrSuggest(config.audioModels, filterModelsByCapability(models, "audio"), models);
-    return {
+    return pruneModelScripts({
         ...config,
         channels,
         models,
@@ -542,7 +604,7 @@ function withChannels(config: AiConfig, channels: ModelChannel[]): AiConfig {
         videoModel: normalizeDefaultModel(config.videoModel, videoModels),
         textModel: normalizeDefaultModel(config.textModel, textModels),
         audioModel: normalizeDefaultModel(config.audioModel, audioModels),
-    };
+    });
 }
 
 function keepOrSuggest(current: string[], suggested: string[], allModels: string[]) {

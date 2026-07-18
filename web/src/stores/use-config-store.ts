@@ -268,22 +268,40 @@ function normalizeModelScripts(value: unknown): Record<string, string> {
     return next;
 }
 
-/** User-authored model call script for a model option; empty means system default path. */
+/**
+ * User-authored model call script for a model option; empty means system default path.
+ * Prefer channel-qualified keys (`channelId::model`). Bare-name keys are legacy only and
+ * never apply across a different channel when the request already carries channelId::model.
+ */
 export function resolveModelScript(config: AiConfig, value: string) {
     const scripts = config.modelScripts || {};
-    const direct = scripts[value]?.trim();
+    const key = (value || "").trim();
+    if (!key) return "";
+    const direct = scripts[key]?.trim();
     if (direct) return direct;
-    const name = modelOptionName(value);
-    if (name && name !== value) {
-        const byName = scripts[name]?.trim();
-        if (byName) return byName;
+
+    const decoded = decodeChannelModel(key);
+    if (decoded) {
+        // Qualified model: do not fall back to bare name (avoids cross-channel script reuse).
+        // Allow exact legacy key only if someone stored the same qualified string differently — already checked.
+        return "";
     }
+
+    // Bare model name: only the bare key, or a single channel-qualified script for that name.
+    const bare = scripts[key]?.trim();
+    if (bare) return bare;
+    const qualifiedMatches = Object.entries(scripts)
+        .filter(([scriptKey, script]) => Boolean(script?.trim()) && modelOptionName(scriptKey) === key && isChannelModelValue(scriptKey))
+        .map(([, script]) => script.trim());
+    if (qualifiedMatches.length === 1) return qualifiedMatches[0];
     return "";
 }
 
 export function setModelScript(config: AiConfig, modelValue: string, script: string): AiConfig {
-    const key = (modelValue || "").trim();
-    if (!key) return config;
+    const raw = (modelValue || "").trim();
+    if (!raw) return config;
+    // Prefer channel-qualified storage so later lookups stay channel-safe.
+    const key = normalizeModelOptionValue(raw, config.channels) || raw;
     const nextScripts = { ...(config.modelScripts || {}) };
     const text = script.trim();
     if (text) {
@@ -291,8 +309,63 @@ export function setModelScript(config: AiConfig, modelValue: string, script: str
             throw new Error(`模型调用脚本过长（最多 ${MODEL_SCRIPT_STORE_MAX_CHARS} 字符）`);
         }
         nextScripts[key] = text;
-    } else delete nextScripts[key];
+        // Drop legacy bare duplicate when upgrading to channel-qualified key.
+        const name = modelOptionName(key);
+        if (name && name !== key && nextScripts[name] === text) delete nextScripts[name];
+    } else {
+        delete nextScripts[key];
+        const name = modelOptionName(key);
+        if (name && name !== key) delete nextScripts[name];
+    }
     return { ...config, modelScripts: nextScripts };
+}
+
+/** Known model option keys currently present in channels / capability lists. */
+export function knownModelScriptKeys(config: AiConfig) {
+    const keys = new Set<string>();
+    for (const channel of config.channels || []) {
+        for (const model of channel.models || []) {
+            const name = model.trim();
+            if (!name) continue;
+            keys.add(encodeChannelModel(channel.id, name));
+            keys.add(name);
+        }
+    }
+    for (const value of [...(config.models || []), config.model, config.imageModel, config.videoModel, config.textModel, config.audioModel, ...(config.imageModels || []), ...(config.videoModels || []), ...(config.textModels || []), ...(config.audioModels || [])]) {
+        const key = (value || "").trim();
+        if (!key) continue;
+        keys.add(key);
+        keys.add(modelOptionName(key));
+    }
+    return keys;
+}
+
+/** Remove scripts whose model/channel no longer exists (keeps local config tidy). */
+export function pruneModelScripts(config: AiConfig): AiConfig {
+    const scripts = config.modelScripts || {};
+    const known = knownModelScriptKeys(config);
+    let changed = false;
+    const next: Record<string, string> = {};
+    for (const [key, script] of Object.entries(scripts)) {
+        const text = script?.trim() || "";
+        if (!text) {
+            changed = true;
+            continue;
+        }
+        if (known.has(key) || known.has(modelOptionName(key))) {
+            next[key] = text;
+        } else {
+            changed = true;
+        }
+    }
+    return changed ? { ...config, modelScripts: next } : config;
+}
+
+export function listConfiguredModelScripts(config: AiConfig) {
+    return Object.entries(config.modelScripts || {})
+        .filter(([, script]) => Boolean(script?.trim()))
+        .map(([key, script]) => ({ key, script: script.trim(), label: modelOptionLabel(config, key) }))
+        .sort((a, b) => a.label.localeCompare(b.label, "zh-CN"));
 }
 
 function normalizeModelList(models: string[], channels: ModelChannel[]) {
