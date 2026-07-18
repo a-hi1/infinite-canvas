@@ -26,7 +26,7 @@ import { generatePlatformVideo, isStorageQuotaError } from "@/services/cloud-api
 import { saveVideoToCloudDetailed } from "@/services/cloud-history";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useAuthStore } from "@/stores/use-auth-store";
-import { isAiProxyBaseUrl, modelOptionLabel, modelOptionName, resolveModelChannel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { isAiProxyBaseUrl, modelOptionLabel, modelOptionName, resolveModelChannel, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -162,6 +162,7 @@ export default function VideoPage() {
     const seedanceMode = isSeedanceVideoConfig(videoRequestConfig);
     const grokMode = isGrokVideoConfig(videoRequestConfig);
     const videoProviderLabel = agnesMode ? "Agnes Video" : seedanceMode ? "Seedance / Agent Plan" : grokMode ? "Grok Imagine" : "OpenAI /videos";
+    const videoUsesCustomScript = Boolean(resolveModelScript(effectiveConfig, model));
     const videoReadinessWarning = getVideoReadinessWarning(videoRequestConfig, model);
     const referenceModeHint = agnesMode ? agnesVideoModeHint : seedanceMode ? "当前模型支持参考图、参考视频和参考音频" : grokMode ? grokVideoModeHint : "当前 OpenAI 格式视频接口仅支持参考图；参考视频/音频需要 Seedance 2.0 / 火山 Agent Plan";
     const canGenerate = Boolean(prompt.trim());
@@ -747,7 +748,10 @@ export default function VideoPage() {
                             <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">
                                 {usePlatformVideo
                                     ? `请求模式：平台代生成 /api/generate/video · ${platformVideoModelLabel} · OpenAI 兼容文生视频（成功后扣积分）`
-                                    : `请求模式：${modelOptionLabel(effectiveConfig, model)} · ${videoProviderLabel} · ${videoSettingsSummary(videoRequestConfig)}`}
+                                    : `请求模式：${modelOptionLabel(effectiveConfig, model)} · ${videoUsesCustomScript ? "自定义调用脚本" : videoProviderLabel} · ${videoSettingsSummary(videoRequestConfig)}`}
+                                {!usePlatformVideo && videoUsesCustomScript ? (
+                                    <div className="mt-1 opacity-75">当前视频模型已配置本地调用脚本；脚本需自行完成创建与轮询。清空脚本后回退 Grok/Agnes/Seedance/OpenAI 默认路径。</div>
+                                ) : null}
                             </div>
                             <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
                                 开始生成

@@ -900,6 +900,8 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
 export async function requestToolResponse(config: AiConfig, messages: ResponseInputMessage[], tools: ResponseFunctionTool[], toolChoice: ToolChoice = "auto", onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
     const selectedTextModel = (config.textModel || config.model || "").trim();
     const requestConfig = resolveModelRequestConfig(config, selectedTextModel);
+    // Tool/function-calling stays on the system path even if a text model has a custom script.
+    // Custom scripts only cover plain prompt/messages return shapes, not tool schemas.
     try {
         if (requestConfig.apiFormat === "gemini") {
             return await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, messages, toGeminiToolOptions(tools, toolChoice)), onDelta, options);

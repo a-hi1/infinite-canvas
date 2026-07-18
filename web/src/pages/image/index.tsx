@@ -12,7 +12,7 @@ import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/a
 import { canvasThemes } from "@/lib/canvas-theme";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
-import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { modelOptionLabel, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
@@ -124,6 +124,7 @@ export default function ImagePage() {
     const usePlatformImage = preferPlatformImage && platformBillingReady;
     const imagePriceCents = platformImagePriceCents(credits);
     const platformModelLabel = credits?.image_model || "平台模型";
+    const imageUsesCustomScript = !usePlatformImage && Boolean(resolveModelScript(effectiveConfig, model));
 
     useEffect(() => {
         if (!running || !startedAt) return;
@@ -805,11 +806,13 @@ export default function ImagePage() {
                             <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">
                                 {usePlatformImage
                                     ? `请求模式：平台代生成 /api/generate/image · ${platformModelLabel} · ${references.length ? `图生图（参考 ${Math.min(references.length, 4)} 张）` : "文生图"} · 生成 ${generationCount} 张（成功后扣积分）`
-                                    : `请求模式：${modelOptionLabel(effectiveConfig, model)} · ${references.length ? "图生图 /v1/images/edits" : "文生图 /v1/images/generations"} · 参考图 ${references.length} 张 · 生成 ${generationCount} 张`}
+                                    : `请求模式：${modelOptionLabel(effectiveConfig, model)} · ${imageUsesCustomScript ? "自定义调用脚本" : references.length ? "图生图 /v1/images/edits" : "文生图 /v1/images/generations"} · 参考图 ${references.length} 张 · 生成 ${generationCount} 张`}
                                 <div className="mt-1 opacity-75">
                                     {usePlatformImage
                                         ? "默认仍是你自己的 API Key；开启平台积分后走服务端 Key。参考图会以 data URL 上传服务端再调上游 edits（最多 4 张）。"
-                                        : "多张时优先一次请求；不足或失败时串行补齐，降低 429 风险。"}
+                                        : imageUsesCustomScript
+                                          ? "当前模型已配置本地调用脚本；留空脚本则回退系统默认 OpenAI/Gemini 路径。多张时仍优先一次请求，不足再串行补齐。"
+                                          : "多张时优先一次请求；不足或失败时串行补齐，降低 429 风险。"}
                                 </div>
                             </div>
                             <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
