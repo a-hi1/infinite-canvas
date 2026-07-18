@@ -1,6 +1,6 @@
 import { App, Button, Form, Input, Modal, Progress, Select, Tabs, Tag } from "antd";
 import { CircleAlert, Cloud, Code2, Plus, RefreshCw, Trash2, Wifi } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { ModelPicker } from "@/components/model-picker";
 import { ModelScriptEditor } from "@/components/layout/model-script-editor";
@@ -65,6 +65,8 @@ export function AppConfigModal() {
     const [webdavSyncStatus, setWebdavSyncStatus] = useState("");
     const [webdavDomainProgress, setWebdavDomainProgress] = useState(createWebdavDomainProgress);
     const [scriptEditor, setScriptEditor] = useState<{ capability: ModelCapability; modelValue: string } | null>(null);
+    /** Per-capability model currently selected in the script manager UI (not the default model). */
+    const [scriptTargetByCapability, setScriptTargetByCapability] = useState<Partial<Record<ModelCapability, string>>>({});
     const config = useConfigStore((state) => state.config);
     const webdav = useConfigStore((state) => state.webdav);
     const updateConfig = useConfigStore((state) => state.updateConfig);
@@ -74,6 +76,23 @@ export function AppConfigModal() {
     const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
     const clearPromptContinue = useConfigStore((state) => state.clearPromptContinue);
     const modelOptions = config.models.map((model) => ({ label: modelOptionLabel(config, model), value: model }));
+    const scriptModelOptionsByCapability = useMemo(() => {
+        const scripted = Object.keys(config.modelScripts || {}).filter((key) => Boolean((config.modelScripts || {})[key]?.trim()));
+        return Object.fromEntries(
+            modelGroups.map((group) => {
+                const capabilityModels = config[group.modelsKey] || [];
+                const defaultModel = config[group.modelKey];
+                const values = Array.from(new Set([defaultModel, ...capabilityModels, ...scripted].map((value) => (value || "").trim()).filter(Boolean)));
+                return [
+                    group.capability,
+                    values.map((value) => ({
+                        value,
+                        label: `${modelOptionLabel(config, value)}${resolveModelScript(config, value) ? " · 已自定义" : ""}`,
+                    })),
+                ];
+            }),
+        ) as Record<ModelCapability, Array<{ value: string; label: string }>>;
+    }, [config]);
     const webdavReady = Boolean(webdav.url.trim());
 
     const saveConfig = (nextConfig: AiConfig) => {
@@ -344,22 +363,38 @@ export function AppConfigModal() {
                                 <div className="mt-4 rounded-lg border border-stone-200 p-3 dark:border-stone-800">
                                     <div className="text-sm font-semibold">模型调用脚本（可选）</div>
                                     <div className="mt-1 text-xs leading-5 text-stone-500">
-                                        为默认模型编写自定义调用脚本以适配特殊中转站；<strong>留空则完全走系统默认路径</strong>，不影响现有 BYOK / Grok / Agnes / Seedance。脚本仅保存在本机配置，不会自动从远程安装。
+                                        可为<strong>任意可选模型</strong>（不限默认模型）编写自定义调用脚本，适配特殊中转站。键为
+                                        <code className="mx-1">渠道::模型</code>；
+                                        <strong>留空则完全走系统默认路径</strong>，不影响现有 BYOK / Grok / Agnes / Seedance。脚本仅保存在本机，不会远程安装。
                                     </div>
                                     <div className="mt-3 grid gap-3 md:grid-cols-2">
                                         {modelGroups.map((group) => {
-                                            const modelValue = config[group.modelKey];
-                                            const hasScript = Boolean(resolveModelScript(config, modelValue));
+                                            const options = scriptModelOptionsByCapability[group.capability] || [];
+                                            const modelValue = scriptTargetByCapability[group.capability] || config[group.modelKey] || options[0]?.value || "";
+                                            const hasScript = Boolean(modelValue && resolveModelScript(config, modelValue));
+                                            const isDefaultModel = Boolean(modelValue && modelValue === config[group.modelKey]);
                                             return (
-                                                <div key={`script-${group.modelKey}`} className="flex items-center justify-between gap-2 rounded-md border border-stone-200 px-3 py-2 dark:border-stone-800">
-                                                    <div className="min-w-0">
-                                                        <div className="truncate text-sm font-medium">{group.defaultLabel}</div>
-                                                        <div className="mt-0.5 truncate text-xs text-stone-500">{modelValue ? modelOptionLabel(config, modelValue) : "未选择模型"}</div>
+                                                <div key={`script-${group.modelKey}`} className="space-y-2 rounded-md border border-stone-200 p-3 dark:border-stone-800">
+                                                    <div className="flex items-center justify-between gap-2">
+                                                        <div className="min-w-0 text-sm font-medium">{group.capability === "image" ? "生图" : group.capability === "video" ? "视频" : group.capability === "text" ? "文本" : "音频"}脚本</div>
+                                                        <div className="flex shrink-0 items-center gap-1.5">
+                                                            {isDefaultModel ? <Tag className="m-0">默认模型</Tag> : null}
+                                                            {hasScript ? <Tag className="m-0" color="blue">已自定义</Tag> : <Tag className="m-0">系统默认</Tag>}
+                                                        </div>
                                                     </div>
-                                                    <div className="flex shrink-0 items-center gap-2">
-                                                        {hasScript ? <Tag color="blue">已自定义</Tag> : <Tag>默认</Tag>}
+                                                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                        <Select
+                                                            className="min-w-0 flex-1"
+                                                            showSearch
+                                                            allowClear={false}
+                                                            placeholder={options.length ? "选择要配置脚本的模型" : "先到上方添加模型可选项"}
+                                                            value={modelValue || undefined}
+                                                            options={options}
+                                                            optionFilterProp="label"
+                                                            onChange={(value) => setScriptTargetByCapability((current) => ({ ...current, [group.capability]: value }))}
+                                                        />
                                                         <Button
-                                                            size="small"
+                                                            size="middle"
                                                             icon={<Code2 className="size-3.5" />}
                                                             disabled={!modelValue}
                                                             onClick={() => modelValue && setScriptEditor({ capability: group.capability, modelValue })}
@@ -367,6 +402,7 @@ export function AppConfigModal() {
                                                             编辑脚本
                                                         </Button>
                                                     </div>
+                                                    {!options.length ? <div className="text-xs text-stone-500">该能力还没有可选模型，请先在上方「可选项」中添加。</div> : null}
                                                 </div>
                                             );
                                         })}
