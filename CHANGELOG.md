@@ -2,6 +2,7 @@
 
 ## Unreleased
 
++ [新增] P1.0-E：平台图片网关支持参考图图生图（`images[].data_url` → 上游 `/images/edits`，最多 4 张），扣费与幂等复用同一路径。
 + [新增] P1.0-D：可选平台图片代生成网关（`POST /api/generate/image`），显式环境开关，成功后按分扣费；图片工作台可开关，默认仍 BYOK。
 + [新增] P1.0-C：积分账本（append-only）与管理员手工加额接口；`/auth/me` 返回积分余额展示，默认不开启平台代生成扣费。
 + [调整] P1.0-B：收口云端 jobs/files/user/error 领域常量；remote-fetch 与通用失败透传稳定 `reason`；前端镜像常量并以 reason 判断登录/容量错误。

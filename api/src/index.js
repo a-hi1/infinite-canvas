@@ -11,7 +11,7 @@ import { createSessionsRepo } from "./repositories/sessions-repo.js";
 import { createJobsRepo } from "./repositories/jobs-repo.js";
 import { createFilesRepo } from "./repositories/files-repo.js";
 import { createCreditsRepo } from "./repositories/credits-repo.js";
-import { generateOnePlatformImage } from "./platform-image.js";
+import { decodePlatformReferenceDataUrl, generateOnePlatformImage, PLATFORM_IMAGE_REF_LIMIT } from "./platform-image.js";
 import {
     clearCookie,
     clientIp,
@@ -400,9 +400,13 @@ function isPlatformImageReady() {
 
 /**
  * POST /api/generate/image
- * Server-side text-to-image using platform upstream Key (never browser Key).
+ * Server-side text-to-image / image-edit using platform upstream Key (never browser Key).
  * Charge credits only after upstream success; idempotent via client_local_id (same as job upload).
  * Default path remains BYOK in the browser — this route is opt-in.
+ *
+ * Body JSON:
+ * - prompt, size?, quality?, client_local_id?, model?
+ * - images?: [{ data_url: "data:image/png;base64,..." }]  // optional refs → /images/edits
  */
 async function handlePlatformGenerateImage(req, res) {
     if (!platformImageEnabled) {
@@ -432,6 +436,15 @@ async function handlePlatformGenerateImage(req, res) {
     if (model !== platformImageModel) {
         return fail(res, 400, `当前平台仅支持模型 ${platformImageModel}`, CLOUD_ERROR_REASON.BAD_REQUEST);
     }
+
+    let references = [];
+    try {
+        references = normalizePlatformReferenceInputs(body.images || body.references || []);
+    } catch (error) {
+        if (error?.status) throw error;
+        return fail(res, 400, error?.message || "参考图无效", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    const mode = references.length ? "edit" : "generation";
 
     // Idempotent retry: same user + image + client_local_id returns existing job without re-charge.
     if (clientLocalId) {
@@ -479,6 +492,7 @@ async function handlePlatformGenerateImage(req, res) {
             size,
             quality,
             timeoutMs: platformImageTimeoutMs,
+            references,
         });
     } catch (error) {
         if (error?.status) throw error;
@@ -514,7 +528,14 @@ async function handlePlatformGenerateImage(req, res) {
         status: JOB_STATUS.SUCCESS,
         prompt,
         model,
-        params: { size, quality, platform: true, price_cents: price },
+        params: {
+            size,
+            quality,
+            platform: true,
+            price_cents: price,
+            mode: generated.mode || mode,
+            reference_count: references.length,
+        },
         resultFileId: fileRow.id,
         clientLocalId,
         source: JOB_SOURCE.SERVER_GENERATE,
@@ -531,7 +552,7 @@ async function handlePlatformGenerateImage(req, res) {
                 userId: auth.user.id,
                 amountCents: -price,
                 type: CREDIT_LEDGER_TYPE.CHARGE,
-                note: `平台生图 ${model}`,
+                note: references.length ? `平台图生图 ${model}` : `平台文生图 ${model}`,
                 operator: "system",
                 idempotencyKey: chargeKey,
                 refType: "platform_generate_image",
@@ -565,6 +586,24 @@ async function handlePlatformGenerateImage(req, res) {
         },
         chargedCents > 0 ? `已生成并扣费 ${chargedCents} 分` : "已生成",
     );
+}
+
+function normalizePlatformReferenceInputs(raw) {
+    if (raw == null || raw === "") return [];
+    if (!Array.isArray(raw)) {
+        throw httpError("images 必须是数组", 400, CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    if (raw.length > PLATFORM_IMAGE_REF_LIMIT) {
+        throw httpError(`参考图最多 ${PLATFORM_IMAGE_REF_LIMIT} 张`, 400, CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    return raw.map((item, index) => {
+        if (typeof item === "string") return decodePlatformReferenceDataUrl(item, index);
+        if (item && typeof item === "object") {
+            const dataUrl = item.data_url || item.dataUrl || item.url || "";
+            return decodePlatformReferenceDataUrl(dataUrl, index);
+        }
+        throw httpError("参考图格式无效", 400, CLOUD_ERROR_REASON.BAD_REQUEST);
+    });
 }
 
 function handleListOwnCredits(req, res, url) {

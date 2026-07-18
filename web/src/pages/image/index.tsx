@@ -21,7 +21,7 @@ import { CloudHistoryPanel } from "@/components/cloud-history-panel";
 import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyncStatus } from "@/lib/cloud-sync";
 import { generatePlatformImage, isStorageQuotaError } from "@/services/cloud-api";
 import { saveImageToCloudDetailed } from "@/services/cloud-history";
-import { deleteStoredImages, resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { deleteStoredImages, ensureLocalImageDataUrl, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useAuthStore } from "@/stores/use-auth-store";
 import type { ReferenceImage } from "@/types/image";
@@ -226,8 +226,8 @@ export default function ImagePage() {
             return;
         }
         if (usePlatformImage) {
-            if (references.length) {
-                message.warning("平台代生成当前仅支持文生图，请先清空参考图，或关闭「平台积分生图」");
+            if (references.length > 4) {
+                message.warning("平台图生图最多 4 张参考图，请删减后再试");
                 return;
             }
             if ((credits?.balance_cents || 0) < imagePriceCents * generationCount && imagePriceCents > 0) {
@@ -556,11 +556,24 @@ export default function ImagePage() {
         const itemStartedAt = performance.now();
         try {
             if (snapshot.platform) {
+                const platformImages = [];
+                for (const ref of snapshot.references.slice(0, 4)) {
+                    try {
+                        const dataUrl = await ensureLocalImageDataUrl(ref);
+                        if (dataUrl?.startsWith("data:image/")) platformImages.push({ dataUrl });
+                    } catch {
+                        // skip unreadable ref; server requires valid data URLs only
+                    }
+                }
+                if (snapshot.references.length && !platformImages.length) {
+                    throw new Error("参考图无法读取为本地图片，请重新上传本地图后再用平台图生图");
+                }
                 const platform = await generatePlatformImage({
                     prompt: snapshot.text,
                     size: snapshot.config.size,
                     quality: snapshot.config.quality,
                     clientLocalId: nanoid(),
+                    images: platformImages,
                 });
                 let dataUrl = platform.dataUrl;
                 let storageKey: string | undefined;
@@ -790,10 +803,12 @@ export default function ImagePage() {
                             ) : null}
                             <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">
                                 {usePlatformImage
-                                    ? `请求模式：平台代生成 /api/generate/image · ${platformModelLabel} · 文生图 · 生成 ${generationCount} 张（成功后扣积分）`
+                                    ? `请求模式：平台代生成 /api/generate/image · ${platformModelLabel} · ${references.length ? `图生图（参考 ${Math.min(references.length, 4)} 张）` : "文生图"} · 生成 ${generationCount} 张（成功后扣积分）`
                                     : `请求模式：${modelOptionLabel(effectiveConfig, model)} · ${references.length ? "图生图 /v1/images/edits" : "文生图 /v1/images/generations"} · 参考图 ${references.length} 张 · 生成 ${generationCount} 张`}
                                 <div className="mt-1 opacity-75">
-                                    {usePlatformImage ? "默认仍是你自己的 API Key；开启平台积分后走服务端 Key，不经过浏览器暴露上游密钥。" : "多张时优先一次请求；不足或失败时串行补齐，降低 429 风险。"}
+                                    {usePlatformImage
+                                        ? "默认仍是你自己的 API Key；开启平台积分后走服务端 Key。参考图会以 data URL 上传服务端再调上游 edits（最多 4 张）。"
+                                        : "多张时优先一次请求；不足或失败时串行补齐，降低 429 风险。"}
                                 </div>
                             </div>
                             <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>

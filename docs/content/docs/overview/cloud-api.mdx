@@ -105,8 +105,9 @@ curl -sS -X POST http://127.0.0.1:3011/api/admin/credits/grant \
 
 - 接口：`POST /api/generate/image`（需登录 Cookie）
 - 幂等：`client_local_id` 重复提交返回已有 job，不双扣
-- 当前仅文生图；参考图请继续用 BYOK 图生图
-- 画布默认路径仍是用户自己的渠道
+- 文生图：无 `images` 时调上游 `/images/generations`
+- 图生图：`images: [{ "data_url": "data:image/png;base64,..." }]`（最多 4 张）时调上游 `/images/edits`
+- 画布默认路径仍是用户自己的渠道；支付入账可后置
 
 ### 访问地址与登录 403
 

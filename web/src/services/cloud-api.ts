@@ -127,8 +127,9 @@ export function getCloudMe() {
 }
 
 /**
- * Server-side platform image generation (opt-in). Uses session cookie; charges credits on success.
+ * Server-side platform image generation / edit (opt-in). Uses session cookie; charges credits on success.
  * Default browser BYOK path is unchanged — call this only when user opts into platform billing.
+ * Optional images: data URLs (png/jpeg/webp) → server /images/edits.
  */
 export async function generatePlatformImage(input: {
     prompt: string;
@@ -136,7 +137,13 @@ export async function generatePlatformImage(input: {
     quality?: string;
     clientLocalId?: string;
     model?: string;
+    images?: Array<{ dataUrl: string }>;
 }) {
+    const images = (input.images || [])
+        .map((item) => String(item.dataUrl || "").trim())
+        .filter((dataUrl) => dataUrl.startsWith("data:image/"))
+        .slice(0, 4)
+        .map((data_url) => ({ data_url }));
     const data = await request<
         CloudJob & {
             charged_cents?: number;
@@ -150,6 +157,7 @@ export async function generatePlatformImage(input: {
             quality: input.quality || "",
             client_local_id: input.clientLocalId || "",
             model: input.model || "",
+            images,
         }),
     });
     let dataUrl = "";

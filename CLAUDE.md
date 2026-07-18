@@ -55,7 +55,7 @@ P0.5 扫尾（运维与体验）：`GET /auth/me` 返回 `usage`（已用字节�
 
 **P1.0-C 已落地：** 积分账本 `credit_ledger`（append-only）+ 用户 `credit_balance_cents` 缓存；`GET /auth/me` 返回 `credits`；用户 `GET /api/credits/ledger`；管理员手工加额 `POST /api/admin/credits/grant`（`API_ADMIN_TOKEN`）。
 
-**P1.0-D 已落地：** 可选平台图片网关 `POST /api/generate/image`。须同时 `API_PLATFORM_IMAGE_ENABLED=true` + 上游 `API_PLATFORM_IMAGE_BASE_URL`/`API_PLATFORM_IMAGE_API_KEY`（模型/单价见 env）。成功写入 `source=server_generate` 任务后扣费，`client_local_id` 幂等；失败不扣。默认浏览器 BYOK 不变；图片工作台仅在 `platform_billing_enabled` 时显示「平台积分生图」开关。暂不支持平台图生图/视频/支付。 
+**P1.0-D / P1.0-E 已落地：** 可选平台图片网关 `POST /api/generate/image`。须同时 `API_PLATFORM_IMAGE_ENABLED=true` + 上游 Base URL/Key。无参考图走 `/images/generations`；带 `images[].data_url`（最多 4 张 png/jpeg/webp）走 `/images/edits`。成功写入 `source=server_generate` 后扣费，`client_local_id` 幂等；失败不扣。默认浏览器 BYOK 不变；图片工作台仅在 `platform_billing_enabled` 时显示「平台积分生图」开关。暂不支持平台视频/支付（支付可后置）。 
 
 P0.5b 安全/部署加固（为 P1 铺路，不改本地生成主路径）：`from-url` 白名单域名在 DNS 解析后拒绝内网地址、限制重定向跳数、拒绝 URL 内嵌账号；过期/吊销会话定期清理；`docker-compose.local.yml` 透传 Cookie Secure / 邀请码 / 容量等变量（Compose 从仓库根 `.env` 插值，示例见 `.env.api.example`）。同源自部署默认 `API_TRUST_PROXY_SAME_ORIGIN=true`：浏览器 Origin 与 `Host`/`X-Forwarded-Host`+协议一致时放行（解决 `http://公网IP:3001` 登录 403），跨站仍靠显式白名单；可设 `false` 回到仅白名单。Nginx 必须用 `$http_host`（保留端口）并设置 `X-Forwarded-Host`，不要只用 `$host`（会丢 `:3001`/`:3011`，表现为「localhost 能登、127.0.0.1:端口不能登」）。**当前优先真机验收云端出门条件，勿跳过验收直接做计费或画布全量同步。**
 
