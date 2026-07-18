@@ -122,6 +122,7 @@ curl -sS -X POST http://127.0.0.1:3011/api/admin/credits/grant \
 - 接口：`POST /api/generate/video`（需登录）
 - 仅文生视频；参考图/视频/音频请继续用 BYOK（Grok/Seedance 等）
 - 幂等与扣费语义同图片网关
+- 运维探活：`GET /api/health` 的 `platform.image_enabled` / `platform.video_enabled`（不含密钥）
 
 ### 访问地址与登录 403
 

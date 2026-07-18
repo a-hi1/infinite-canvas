@@ -10,7 +10,7 @@ description: 当前项目后续值得处理的事项
 - 本地 Agent 接入后续：按[本地 Agent 接入规划](/docs/progress/local-agent-integration-plan)把 Claude Code CLI Adapter 升级为 Claude Agent SDK Adapter，并完善工具队列体验。
 - AI 接口安全代理后续：已增加首版 `ai-proxy` 服务和前端代理渠道入口，后续继续完善多用户鉴权、额度控制、分渠道上游配置和更细粒度的接口白名单体验；公开多人使用前仍需补充更完整的用户体系。
 - 云端账号 P0.5c（当前主线）：产品与运维代码已在 main。本阶段做**验稳收口**——双轨回归、环境分册（本机 dev vs 服务器）、Grok/vidgen 出网预期、健康检查脚本；**勿跳过验收直接做计费或画布同步**。清单见 [P0.5c 验稳收口](/docs/progress/p05c-acceptance)；脚本 `scripts/check-cloud-stack.sh` / `.ps1`。
-- 云端账号 P1：服务端代生成（`/api/generate/*`）+ 积分账本 + 支付；将 Grok/图视频渠道适配逐步下沉到服务端，平台 Key 不再依赖浏览器。扣费必须复用 `client_local_id` / 任务幂等键，避免与上传去重语义冲突。登录后默认仍 BYOK，平台额度须显式开关。建议拆刀：**P1.0-A～E 已完成**（分层、常量、账本、图片文生/图生图网关）→ **P1.0-F 已完成最小平台视频文生**（`POST /api/generate/video`，OpenAI 兼容 `/videos` 轮询，无参考素材；共用 `platform-billing` 落盘/幂等扣费；视频工作台可选开关）→ 下一步：支付入账（后置）或平台视频参考图/Grok 路径（仍禁止一次合并）。
+- 云端账号 P1：服务端代生成（`/api/generate/*`）+ 积分账本 + 支付；将 Grok/图视频渠道适配逐步下沉到服务端，平台 Key 不再依赖浏览器。扣费必须复用 `client_local_id` / 任务幂等键，避免与上传去重语义冲突。登录后默认仍 BYOK，平台额度须显式开关。建议拆刀：**P1.0-A～F 已完成**（分层、常量、账本、图片文生/图生图、视频文生）→ **P1.0-G 已完成平台收口加固**（图生图 JSON body 上限适配 base64 参考图；`/health.platform` 暴露就绪态；前端 `platform-credits` 统一图/视频开关与余额判断）→ 下一步：支付入账（后置）或平台视频参考图/Grok 路径（仍禁止一次合并）。
 - 云端账号 P2：画布项目 / 素材库云同步；`api` 存储从 JSON 文件升级为 Postgres，文件后端抽象到 S3/MinIO。保存策略：先本地后异步推云，云失败不丢草稿。MVP 可只做项目列表/打开/保存 JSON。
 - 路线选择：P0.5c 出门条件通过后，按目标在「P1 平台代生成计费」与「P2 多设备项目同步」之间二选一或小并行；禁止一次合并完整视频计费 + 全量素材库。
 - 上游跟进策略（basketikun，当前对照 `v0.8.2` / `origin/main`）：**不整仓 merge/rebase**。自用主线继续云端验稳与 `ai-proxy`；上游按「能力切片」只读跟踪后 cherry-pick/移植。分叉点约 `568f0f1`（2026-07-05）；部署相关 `docker-compose` / `nginx.conf` / `Dockerfile` 禁止被上游覆盖。推送仍走 `a-hi1`。

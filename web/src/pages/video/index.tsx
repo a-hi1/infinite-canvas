@@ -21,6 +21,7 @@ import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
 import { CloudHistoryPanel } from "@/components/cloud-history-panel";
 import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyncStatus } from "@/lib/cloud-sync";
+import { formatYuanFromCents, hasEnoughCredits, isPlatformVideoReady, platformVideoPriceCents } from "@/lib/platform-credits";
 import { generatePlatformVideo, isStorageQuotaError } from "@/services/cloud-api";
 import { saveVideoToCloudDetailed } from "@/services/cloud-history";
 import { useAssetStore } from "@/stores/use-asset-store";
@@ -123,9 +124,9 @@ export default function VideoPage() {
 
     const model = effectiveConfig.videoModel || effectiveConfig.model;
     const textModel = effectiveConfig.textModel || effectiveConfig.model;
-    const platformVideoReady = Boolean(cloudUser && (credits?.platform_video_enabled ?? false));
+    const platformVideoReady = isPlatformVideoReady(cloudUser, credits);
     const usePlatformVideo = preferPlatformVideo && platformVideoReady;
-    const videoPriceCents = credits?.video_price_cents ?? 0;
+    const videoPriceCents = platformVideoPriceCents(credits);
     const platformVideoModelLabel = credits?.video_model || "平台视频模型";
 
     useEffect(() => {
@@ -340,8 +341,8 @@ export default function VideoPage() {
                 message.warning("平台积分视频当前仅支持文生视频，请清空参考素材，或关闭「平台积分生视频」");
                 return null;
             }
-            if (videoPriceCents > 0 && (credits?.balance_cents || 0) < videoPriceCents) {
-                message.error(`积分不足：约需 ¥${(videoPriceCents / 100).toFixed(2)}，当前 ¥${((credits?.balance_cents || 0) / 100).toFixed(2)}`);
+            if (!hasEnoughCredits(credits?.balance_cents, videoPriceCents, 1)) {
+                message.error(`积分不足：约需 ${formatYuanFromCents(videoPriceCents)}，当前 ${formatYuanFromCents(credits?.balance_cents)}`);
                 return null;
             }
             return {
@@ -725,8 +726,8 @@ export default function VideoPage() {
                                         <div className="font-medium text-stone-800 dark:text-stone-100">平台积分生视频</div>
                                         <div className="mt-0.5 opacity-75">
                                             {platformVideoModelLabel}
-                                            {videoPriceCents > 0 ? ` · 约 ¥${(videoPriceCents / 100).toFixed(2)}/条` : " · 当前免费"}
-                                            {" · "}余额 ¥{((credits?.balance_cents || 0) / 100).toFixed(2)}
+                                            {videoPriceCents > 0 ? ` · 约 ${formatYuanFromCents(videoPriceCents)}/条` : " · 当前免费"}
+                                            {" · "}余额 {formatYuanFromCents(credits?.balance_cents)}
                                             {" · "}仅文生视频
                                         </div>
                                     </div>

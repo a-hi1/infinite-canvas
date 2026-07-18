@@ -19,6 +19,7 @@ import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "
 import { requestEdit, requestGeneration } from "@/services/api/image";
 import { CloudHistoryPanel } from "@/components/cloud-history-panel";
 import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyncStatus } from "@/lib/cloud-sync";
+import { formatYuanFromCents, hasEnoughCredits, isPlatformImageReady, platformImagePriceCents } from "@/lib/platform-credits";
 import { generatePlatformImage, isStorageQuotaError } from "@/services/cloud-api";
 import { saveImageToCloudDetailed } from "@/services/cloud-history";
 import { deleteStoredImages, ensureLocalImageDataUrl, resolveImageUrl, uploadImage } from "@/services/image-storage";
@@ -119,9 +120,9 @@ export default function ImagePage() {
     const textModel = effectiveConfig.textModel || effectiveConfig.model;
     const canGenerate = Boolean(prompt.trim());
     const generationCount = Math.max(1, Math.min(10, Number(config.count) || 1));
-    const platformBillingReady = Boolean(cloudUser && (credits?.platform_image_enabled ?? credits?.platform_billing_enabled));
+    const platformBillingReady = isPlatformImageReady(cloudUser, credits);
     const usePlatformImage = preferPlatformImage && platformBillingReady;
-    const imagePriceCents = credits?.image_price_cents ?? 0;
+    const imagePriceCents = platformImagePriceCents(credits);
     const platformModelLabel = credits?.image_model || "平台模型";
 
     useEffect(() => {
@@ -230,8 +231,8 @@ export default function ImagePage() {
                 message.warning("平台图生图最多 4 张参考图，请删减后再试");
                 return;
             }
-            if ((credits?.balance_cents || 0) < imagePriceCents * generationCount && imagePriceCents > 0) {
-                message.error(`积分不足：约需 ${((imagePriceCents * generationCount) / 100).toFixed(2)} 元，当前 ${((credits?.balance_cents || 0) / 100).toFixed(2)} 元`);
+            if (!hasEnoughCredits(credits?.balance_cents, imagePriceCents, generationCount)) {
+                message.error(`积分不足：约需 ${formatYuanFromCents(imagePriceCents * generationCount)}，当前 ${formatYuanFromCents(credits?.balance_cents)}`);
                 return;
             }
         } else if (!isAiConfigReady(effectiveConfig, model)) {
@@ -784,8 +785,8 @@ export default function ImagePage() {
                                         <div className="font-medium text-stone-800 dark:text-stone-100">平台积分生图</div>
                                         <div className="mt-0.5 opacity-75">
                                             {platformModelLabel}
-                                            {imagePriceCents > 0 ? ` · 约 ¥${(imagePriceCents / 100).toFixed(2)}/张` : " · 当前免费"}
-                                            {" · "}余额 ¥{((credits?.balance_cents || 0) / 100).toFixed(2)}
+                                            {imagePriceCents > 0 ? ` · 约 ${formatYuanFromCents(imagePriceCents)}/张` : " · 当前免费"}
+                                            {" · "}余额 {formatYuanFromCents(credits?.balance_cents)}
                                         </div>
                                     </div>
                                     <Switch

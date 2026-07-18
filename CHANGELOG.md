@@ -2,6 +2,8 @@
 
 ## Unreleased
 
++ [修复] 平台图生图 JSON body 上限适配 base64 参考图，避免被 1MB 限制误拒。
++ [调整] P1.0-G：`/api/health` 暴露平台就绪态；前端统一平台积分辅助判断。
 + [新增] P1.0-F：可选平台视频文生网关（`POST /api/generate/video`，OpenAI 兼容），成功后按分扣费；视频工作台可开关，默认仍 BYOK。
 + [调整] 平台图片/视频共用落盘与幂等扣费逻辑（`platform-billing`），减少后续网关重复实现。
 + [新增] P1.0-E：平台图片网关支持参考图图生图（`images[].data_url` → 上游 `/images/edits`，最多 4 张），扣费与幂等复用同一路径。

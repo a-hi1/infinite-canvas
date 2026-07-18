@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { App, Button, Popover, Progress, Typography } from "antd";
 import { LogOut, RefreshCw, UserRound } from "lucide-react";
 
+import { formatYuanFromCents, platformCapabilitySummary } from "@/lib/platform-credits";
 import { useAuthStore } from "@/stores/use-auth-store";
 
 function formatBytes(bytes: number) {
@@ -14,11 +15,6 @@ function formatBytes(bytes: number) {
         unit += 1;
     }
     return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
-}
-
-function formatYuanFromCents(cents: number) {
-    if (!Number.isFinite(cents)) return "¥0.00";
-    return `¥${(cents / 100).toFixed(2)}`;
 }
 
 export function AccountPopover() {
@@ -44,7 +40,7 @@ export function AccountPopover() {
     const percent = max > 0 ? Math.min(100, Math.round((used / max) * 1000) / 10) : 0;
     const nearFull = max > 0 && used / max >= 0.9;
     const balanceCents = credits?.balance_cents ?? user.credit_balance_cents ?? 0;
-    const platformBilling = Boolean(credits?.platform_billing_enabled);
+    const capabilityParts = platformCapabilitySummary(user, credits);
 
     const content = (
         <div className="w-72 space-y-3">
@@ -60,9 +56,9 @@ export function AccountPopover() {
                     <span className="font-medium text-stone-700 dark:text-stone-200">{formatYuanFromCents(balanceCents)}</span>
                 </div>
                 <div className="text-[11px] leading-5 text-stone-400">
-                    {platformBilling
-                        ? `平台代生成已开启${typeof credits?.image_price_cents === "number" ? `，约 ¥${(credits.image_price_cents / 100).toFixed(2)}/张` : ""}；图片工作台可开关「平台积分生图」。`
-                        : "默认仍用你自己的 API Key 生成；服务器开启平台生图后，图片工作台才会出现「平台积分生图」开关。"}
+                    {capabilityParts.length
+                        ? `平台代生成已开启：${capabilityParts.join("；")}。工作台可单独开关，默认仍用你自己的 API Key。`
+                        : "默认仍用你自己的 API Key 生成；服务器开启平台图/视频后，对应工作台才会出现平台积分开关。"}
                 </div>
             </div>
 

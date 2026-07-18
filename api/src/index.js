@@ -147,6 +147,7 @@ const server = http.createServer(async (req, res) => {
         const pathname = url.pathname.replace(/\/+$/, "") || "/";
 
         if (req.method === "GET" && (pathname === "/health" || pathname === "/api/health")) {
+            // Platform readiness only (no secrets / base URLs).
             json(res, 200, {
                 ok: true,
                 auth: true,
@@ -156,6 +157,15 @@ const server = http.createServer(async (req, res) => {
                 allowedOriginCount: allowedOrigins.length,
                 trustProxySameOrigin,
                 envProxy: Boolean(process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy),
+                platform: {
+                    image_enabled: isPlatformImageReady(),
+                    video_enabled: isPlatformVideoReady(),
+                    image_model: isPlatformImageReady() ? platformImageModel : "",
+                    video_model: isPlatformVideoReady() ? platformVideoModel : "",
+                    image_price_cents: platformImagePriceCents,
+                    video_price_cents: platformVideoPriceCents,
+                    admin_configured: Boolean(adminToken),
+                },
             });
             return;
         }
@@ -274,8 +284,12 @@ function rateLimit(map, key, limit, windowMs) {
     return item.count <= limit;
 }
 
-async function readJson(req) {
-    const raw = await readBody(req, Math.min(maxBodyBytes, 1024 * 1024));
+/**
+ * @param {import("node:http").IncomingMessage} req
+ * @param {number} [limitBytes] default 1MB; platform image edits may pass larger base64 refs.
+ */
+async function readJson(req, limitBytes = Math.min(maxBodyBytes, 1024 * 1024)) {
+    const raw = await readBody(req, Math.min(maxBodyBytes, Math.max(1024, limitBytes)));
     if (!raw.length) return {};
     try {
         return JSON.parse(raw.toString("utf8"));
@@ -283,6 +297,10 @@ async function readJson(req) {
         throw httpError("JSON 无效", 400, CLOUD_ERROR_REASON.BAD_REQUEST);
     }
 }
+
+// Platform image may include up to 4 base64 refs (~12MB each before encoding).
+const PLATFORM_IMAGE_JSON_LIMIT = Math.min(maxBodyBytes, 56 * 1024 * 1024);
+const PLATFORM_VIDEO_JSON_LIMIT = Math.min(maxBodyBytes, 256 * 1024);
 
 function getSessionUser(req) {
     const cookies = parseCookies(req.headers.cookie || "");
@@ -443,7 +461,8 @@ async function handlePlatformGenerateImage(req, res) {
         return fail(res, 429, "平台生图过于频繁，请稍后再试", CLOUD_ERROR_REASON.UPLOAD_RATE_LIMITED);
     }
 
-    const body = await readJson(req);
+    // Larger limit: optional base64 reference images for edits.
+    const body = await readJson(req, PLATFORM_IMAGE_JSON_LIMIT);
     const prompt = String(body.prompt || "").trim();
     if (!prompt) return fail(res, 400, "请输入提示词", CLOUD_ERROR_REASON.BAD_REQUEST);
     if (prompt.length > 4000) return fail(res, 400, "提示词过长", CLOUD_ERROR_REASON.BAD_REQUEST);
@@ -598,7 +617,7 @@ async function handlePlatformGenerateVideo(req, res) {
         return fail(res, 429, "平台生视频过于频繁，请稍后再试", CLOUD_ERROR_REASON.UPLOAD_RATE_LIMITED);
     }
 
-    const body = await readJson(req);
+    const body = await readJson(req, PLATFORM_VIDEO_JSON_LIMIT);
     const prompt = String(body.prompt || "").trim();
     if (!prompt) return fail(res, 400, "请输入提示词", CLOUD_ERROR_REASON.BAD_REQUEST);
     if (prompt.length > 4000) return fail(res, 400, "提示词过长", CLOUD_ERROR_REASON.BAD_REQUEST);
