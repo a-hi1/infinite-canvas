@@ -1,0 +1,58 @@
+---
+title: 清单实现核验
+description: P0.5c 与最短人工清单各项的代码实现状态（实现 vs 仍须人点）
+---
+
+# 清单实现核验
+
+对照 [P0.5c 验稳收口](/docs/progress/p05c-acceptance)。  
+**实现 = 代码/接口已有**；**通过 = 你本机/服务器点过并勾选**。二者不要混为一谈。
+
+## 积分 / 余额 / 平台代生成
+
+| 能力 | 实现状态 | 说明 |
+| --- | --- | --- |
+| 积分账本 + 余额字段 | **已实现** | `credit_ledger`、`credit_balance_cents`；`GET /auth/me` → `credits.balance_cents` |
+| 管理员加额 | **已实现** | `POST /api/admin/credits/grant`（需 `API_ADMIN_TOKEN`） |
+| 账号弹层显示余额 | **已打开** | 登录后始终显示「云端积分余额」；与平台网关是否开启解耦 |
+| 平台积分生图开关 | **代码在，默认关** | 需 `API_PLATFORM_IMAGE_ENABLED=true` + Base URL + Key，且登录后 `platform_image_enabled=true` |
+| 平台积分生视频开关 | **代码在，默认关** | 需 `API_PLATFORM_VIDEO_*` 就绪；仅文生视频 |
+| 支付入账 | **未做** | 无自助充值；只能管理员 grant |
+| 本机当前 env | **未配置平台网关** | 根目录 `.env` 无 `API_PLATFORM_*`；`/api/health.platform.*=false` |
+
+打开平台代生成（可选，**会走服务端 Key 并可能扣余额**）：
+
+1. 根目录 `.env` 按 `.env.api.example` 设置 `API_PLATFORM_IMAGE_ENABLED=true`、`API_PLATFORM_IMAGE_BASE_URL`、`API_PLATFORM_IMAGE_API_KEY`（视频同理）
+2. 可选 `API_ADMIN_TOKEN=...` 用于加额
+3. `docker compose -f docker-compose.local.yml -f docker-compose.dev-host.yml up -d --build`
+4. 确认 `GET /api/health` 里 `platform.image_enabled` / `video_enabled`
+5. 登录后工作台出现平台开关（默认仍关=BYOK）；账号弹层显示余额与能力文案
+6. grant 示例见 [云端 API](/docs/overview/cloud-api)
+
+**未配置上游 Key 时不要只改 ENABLED=true**——接口会 503「上游未配置」，且无真实代生成能力。
+
+## A / G 最短清单：实现 vs 人点
+
+| 清单项 | 代码实现 | 仍须人点 |
+| --- | --- | --- |
+| 停 api 后页面 200 | 是（smoke 已绿） | 否（自动） |
+| 停 api 后未登录仍可生图/画布/素材/提示词 | 设计上是（本地轨） | **是** |
+| 登录后生图上云、云端列表预览 | 是（jobs/files + 侧栏双轨） | **是** |
+| 上云失败本地仍成功、可重试 | 是（cloudSync 状态） | **是** |
+| 跨用户读文件拒绝 | 是（归属校验） | **是**（需两账号） |
+| 上云幂等 deduped | 是（client_local_id） | **是** |
+| 账号弹层容量/条数 | 是 | **是**（登录后看一眼） |
+| 401 只清一次会话 | 是（cloud-unauthorized） | **是** |
+| 画布/素材删除不复活 | 是（tombstone） | **是** |
+| 透明背景开关 | 是 | **是** |
+| 模型脚本标识 | 是 | **是** |
+| 导出当前/选中 | 是 | **是** |
+| 账号积分余额展示 | 是（本轮打开） | **是**（登录看余额） |
+| 服务器 B2 / HTTPS / 备份 | 运维项 | **是**（目标机） |
+| 平台代生成扣费全链路 | 代码在，本机未开 env | 开 env + 上游 Key 后再验 |
+
+## 结论
+
+1. **清单功能大体都已在代码里**；未勾选的主要是「人还没点」，不是「没写」。  
+2. **积分余额 UI 已打开**；**平台代生成**仍默认关，需你在 `.env` 配齐上游后再开。  
+3. 当前最稳路径：登录看余额/容量 → 继续 BYOK；要平台代生成再配 `API_PLATFORM_*`。

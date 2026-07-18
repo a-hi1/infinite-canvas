@@ -81,7 +81,8 @@ sudo docker compose -f docker-compose.local.yml up -d --build
 
 - 存储：`data/api/db.json` 的 `credit_ledger`（只追加）+ 用户字段 `credit_balance_cents`（缓存）
 - 单位：整数分（`cny_cents`），避免浮点
-- 用户：`GET /api/auth/me` 的 `credits.balance_cents`；`GET /api/credits/ledger` 查自己流水
+- 用户：`GET /api/auth/me` 的 `credits.balance_cents`（登录后账号弹层始终展示）；`GET /api/credits/ledger` 查自己流水
+- 平台代生成扣费与余额展示解耦：余额可先看；只有 `API_PLATFORM_*` 就绪且工作台打开开关时才扣平台额度，默认 BYOK 不扣
 - 管理员手工加额（运维，非前端入口）：
 
 ```bash

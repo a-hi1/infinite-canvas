@@ -41,8 +41,8 @@ export function AccountPopover() {
     const nearFull = max > 0 && used / max >= 0.9;
     const balanceCents = credits?.balance_cents ?? user.credit_balance_cents ?? 0;
     const capabilityParts = platformCapabilitySummary(user, credits);
-    // 平台扣费/支付产品面后置：未开启任何平台代生成时不展示积分余额，避免自用 BYOK 误以为在扣费。
-    const showPlatformCredits = capabilityParts.length > 0;
+    // 登录后始终展示云端积分余额（账本已存在）；平台代生成能力另用文案区分，避免“有余额却看不见”。
+    const platformReady = capabilityParts.length > 0;
 
     const content = (
         <div className="w-72 space-y-3">
@@ -52,17 +52,17 @@ export function AccountPopover() {
                 {user.plan_code ? <div className="mt-1 text-[11px] text-stone-400">套餐 {user.plan_code}</div> : null}
             </div>
 
-            {showPlatformCredits ? (
-                <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
-                    <div className="mb-1 flex items-center justify-between gap-2 text-xs text-stone-500 dark:text-stone-400">
-                        <span>平台积分余额</span>
-                        <span className="font-medium text-stone-700 dark:text-stone-200">{formatYuanFromCents(balanceCents)}</span>
-                    </div>
-                    <div className="text-[11px] leading-5 text-stone-400">
-                        {`平台代生成已开启：${capabilityParts.join("；")}。工作台可单独开关，默认仍用你自己的 API Key。`}
-                    </div>
+            <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
+                <div className="mb-1 flex items-center justify-between gap-2 text-xs text-stone-500 dark:text-stone-400">
+                    <span>云端积分余额</span>
+                    <span className="font-medium text-stone-700 dark:text-stone-200">{formatYuanFromCents(balanceCents)}</span>
                 </div>
-            ) : null}
+                <div className="text-[11px] leading-5 text-stone-400">
+                    {platformReady
+                        ? `平台代生成已开启：${capabilityParts.join("；")}。工作台可单独开关，默认仍用你自己的 API Key。`
+                        : "账本余额已启用；平台代生成仍关闭时不会从本机 BYOK 扣这份额度。管理员可用 grant 接口加额。"}
+                </div>
+            </div>
 
             <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
                 <div className="mb-2 flex items-center justify-between gap-2 text-xs text-stone-500 dark:text-stone-400">

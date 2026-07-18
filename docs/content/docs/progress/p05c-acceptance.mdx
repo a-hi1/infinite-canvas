@@ -130,6 +130,7 @@ sudo docker compose -f docker-compose.local.yml exec ai-proxy \
 | env 代理 | **WARN**：本机 `.env` 有 HTTP(S)_PROXY（本地 Clash 可用；服务器勿照搬） |
 | vidgen 出网 | **WARN**：ai-proxy 当前到不了 `vidgen.x.ai`（本地 BYOK 仍 OK；Grok media/from-url 可能 502） |
 | 仍须人工 | 登录上云 UI、幂等重试、跨用户、401 只清一次、未登录停 api 时生图/画布、服务器 B2 |
+| 实现核验 | 见 [清单实现核验](/docs/progress/checklist-implementation-status)（代码是否落地 vs 仍须人点） |
 
 ### 最短人工清单（验收时勾选）
 
@@ -140,6 +141,7 @@ sudo docker compose -f docker-compose.local.yml exec ai-proxy \
 - [ ] 透明背景开关可开可关
 - [ ] 模型脚本：无脚本=默认路径；有脚本时工作台/画布有「脚本」标识；清脚本回退
 - [ ] 导出：菜单「导出当前画布」/「导出选中节点」可出 zip
+- [ ] 登录账号弹层：可见云端积分余额（可为 ¥0.00）与云端容量
 
 ## 设计锚点（做下一步时仍要遵守）
 

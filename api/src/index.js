@@ -641,7 +641,7 @@ function handleMe(req, res) {
         return;
     }
     // usage 供前端账号区展示；limits 方便以后计费/套餐扩展而不改契约形态
-    // credits 仅展示余额；扣费尚未接入生成路径（默认仍 BYOK）
+    // credits：始终返回余额；平台代生成扣费仅在 API_PLATFORM_* 就绪且用户打开工作台开关时发生（默认仍 BYOK）
     const balance = creditsRepo.getBalanceCents(user.id);
     if (typeof user.credit_balance_cents !== "number") user.credit_balance_cents = balance;
     json(res, 200, {
