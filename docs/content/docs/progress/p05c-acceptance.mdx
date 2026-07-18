@@ -39,7 +39,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check-cloud-stack.ps1
 
 ## A. 双轨回归（发版门禁）
 
-- [ ] **停掉 api 容器**后，未登录仍可：生图 / 画布 / 素材 / 提示词库
+- [x] **停掉 api 容器**后，页面仍 200（自动 `smoke-dual-track`，BaseUrl `http://127.0.0.1:3011`）
+- [ ] **停掉 api 容器**后，未登录仍可：生图 / 画布 / 素材 / 提示词库（**仍须人工点验**）
 - [ ] 登录后生图：本机成功；在出网允许时云端列表可见、可预览
 - [ ] 上云失败时本机记录仍为成功，可「重试上云」
 - [ ] 用户 B 无法读取用户 A 的 `/api/files/:id`
@@ -50,11 +51,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check-cloud-stack.ps1
 
 ### B1. 本机开发
 
-- [ ] `docker compose -f docker-compose.local.yml -f docker-compose.dev-host.yml up -d`
-- [ ] 前端 `web` dev：`http://localhost:3000`（Vite 将 `/api`、`/ai-proxy` 转到 `3011`）
-- [ ] 登录不再出现误打到占用 8080 的其它服务导致的 `501`
-- [ ] 本机上云写入的是**本机** `./data/api`，不是服务器磁盘
-- [ ] 若使用 Clash 等：仅本机 `.env` 配置 `HTTP_PROXY`（**勿提交、勿照搬服务器**）
+- [x] compose 三服务 Up（`app`/`api`/`ai-proxy`，本机映射 `3001`+`3011`）— `check-cloud-stack`
+- [x] 页面 `http://127.0.0.1:3011/` → 200；`/api/health`、`/ai-proxy/health` OK；platform 默认关
+- [ ] 前端 `web` dev：`http://localhost:3000`（Vite 将 `/api`、`/ai-proxy` 转到 `3011`）— **仍须人工**
+- [ ] 登录不再出现误打到占用 8080 的其它服务导致的 `501` — **仍须人工**
+- [ ] 本机上云写入的是**本机** `./data/api`，不是服务器磁盘 — **仍须人工**
+- [x] 若使用 Clash 等：仅本机 `.env` 配置 `HTTP_PROXY`（脚本记 **WARN**：OK for local Clash；勿照搬服务器）
 
 ### B2. 服务器部署
 
@@ -117,6 +119,27 @@ sudo docker compose -f docker-compose.local.yml exec ai-proxy \
 | 多设备创作 | **P2 MVP**：项目列表/打开/保存 JSON，先本地后异步推云 |
 
 **禁止：** 跳过本清单直接支付；一次合并完整视频计费 + 全量素材库；大重构画布/AI 客户端；整仓 merge 上游。
+
+## G. 本机自动验收快照（可重复）
+
+| 项 | 结果 |
+| --- | --- |
+| 代码 tip | `main` / `a-hi1/main` 同步；含模型脚本、导出菜单等近期提交 |
+| `check-cloud-stack.ps1 -BaseUrl http://127.0.0.1:3011` | **硬失败 0**；app/api/ai-proxy Up；page/health OK；platform disabled OK |
+| `smoke-dual-track.ps1 -BaseUrl http://127.0.0.1:3011` | **硬失败 0**；停 api 页面 200，启回 health 恢复 |
+| env 代理 | **WARN**：本机 `.env` 有 HTTP(S)_PROXY（本地 Clash 可用；服务器勿照搬） |
+| vidgen 出网 | **WARN**：ai-proxy 当前到不了 `vidgen.x.ai`（本地 BYOK 仍 OK；Grok media/from-url 可能 502） |
+| 仍须人工 | 登录上云 UI、幂等重试、跨用户、401 只清一次、未登录停 api 时生图/画布、服务器 B2 |
+
+### 最短人工清单（验收时勾选）
+
+- [ ] 未登录：生图 / 画布 / 素材 / 提示词
+- [ ] 停 api：本地创作仍可用
+- [ ] 登录上云成功 / 失败可重试且本地仍成功
+- [ ] 画布/素材删除同步不复活
+- [ ] 透明背景开关可开可关
+- [ ] 模型脚本：无脚本=默认路径；有脚本时工作台/画布有「脚本」标识；清脚本回退
+- [ ] 导出：菜单「导出当前画布」/「导出选中节点」可出 zip
 
 ## 设计锚点（做下一步时仍要遵守）
 

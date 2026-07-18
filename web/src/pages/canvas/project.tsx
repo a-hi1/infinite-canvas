@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { BookOpen, Bot, Group, Home, ImageIcon, Images, List, Menu, Music2, Plus, Redo2, Settings2, Trash2, Undo2, Upload, Video } from "lucide-react";
+import { BookOpen, Bot, Download, Group, Home, ImageIcon, Images, List, Menu, Music2, Plus, Redo2, Settings2, Trash2, Undo2, Upload, Video } from "lucide-react";
 import { saveAs } from "file-saver";
 
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
@@ -19,6 +19,7 @@ import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { exportCanvasNodes, exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { mergeCanvasNodeAiConfig } from "@/lib/canvas/canvas-node-ai-config";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { App, Button, Dropdown, Modal } from "antd";
@@ -1658,6 +1659,45 @@ function InfiniteCanvasPage() {
         saveAs(node.metadata.content, `canvas-${node.type}-${node.id}.${node.type === CanvasNodeType.Video ? "mp4" : node.type === CanvasNodeType.Audio ? audioExtension(node.metadata.mimeType) : imageExtension(node.metadata.content)}`);
     }, []);
 
+    const exportCurrentCanvas = useCallback(async () => {
+        const project = currentProject || useCanvasStore.getState().projects.find((item) => item.id === projectId);
+        if (!project) return message.error("当前画布不存在");
+        const hide = message.loading("正在导出当前画布…", 0);
+        try {
+            const snapshot = {
+                ...project,
+                title: project.title || currentProject?.title || "未命名画布",
+                nodes,
+                connections,
+                chatSessions,
+                activeChatId,
+                backgroundMode,
+                showImageInfo,
+                viewport: viewportRef.current,
+            };
+            await exportCanvasProjects([snapshot], snapshot.title || "无限画布");
+            message.success("已导出当前画布");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "导出画布失败");
+        } finally {
+            hide();
+        }
+    }, [activeChatId, backgroundMode, chatSessions, connections, currentProject, message, nodes, projectId, showImageInfo]);
+
+    const exportSelectedNodes = useCallback(async () => {
+        const selected = nodes.filter((node) => selectedNodeIds.has(node.id));
+        if (!selected.length) return message.warning("请先选中要导出的节点");
+        const hide = message.loading(`正在导出 ${selected.length} 个节点…`, 0);
+        try {
+            await exportCanvasNodes(selected, `${currentProject?.title || "画布"}-选中元素`);
+            message.success(`已导出 ${selected.length} 个节点`);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "导出节点失败");
+        } finally {
+            hide();
+        }
+    }, [currentProject?.title, message, nodes, selectedNodeIds]);
+
     const saveNodeAsset = useCallback(
         async (node: CanvasNodeData) => {
             if (node.type === CanvasNodeType.Text) {
@@ -2634,6 +2674,9 @@ function InfiniteCanvasPage() {
                     onCreateProject={createAndOpenProject}
                     onDeleteProject={deleteCurrentProject}
                     onImportImage={() => handleUploadRequest()}
+                    onExportCanvas={() => void exportCurrentCanvas()}
+                    onExportSelected={() => void exportSelectedNodes()}
+                    canExportSelected={selectedNodeIds.size > 0}
                     onUndo={undoCanvas}
                     onRedo={redoCanvas}
                     agentOpen={assistantOpen}
@@ -2981,6 +3024,9 @@ function CanvasTopBar({
     onCreateProject,
     onDeleteProject,
     onImportImage,
+    onExportCanvas,
+    onExportSelected,
+    canExportSelected,
     onUndo,
     onRedo,
     agentOpen,
@@ -3001,6 +3047,9 @@ function CanvasTopBar({
     onCreateProject: () => void;
     onDeleteProject: () => void;
     onImportImage: () => void;
+    onExportCanvas: () => void;
+    onExportSelected: () => void;
+    canExportSelected: boolean;
     onUndo: () => void;
     onRedo: () => void;
     agentOpen: boolean;
@@ -3037,6 +3086,8 @@ function CanvasTopBar({
                                 { key: "delete", danger: true, icon: <Trash2 className="size-4" />, label: "删除当前画布", onClick: onDeleteProject },
                                 { type: "divider" },
                                 { key: "import", icon: <Upload className="size-4" />, label: "导入素材", onClick: onImportImage },
+                                { key: "export-canvas", icon: <Download className="size-4" />, label: "导出当前画布", onClick: onExportCanvas },
+                                { key: "export-selected", icon: <Download className="size-4" />, label: "导出选中节点", disabled: !canExportSelected, onClick: onExportSelected },
                                 { type: "divider" },
                                 { key: "undo", disabled: !canUndo, icon: <Undo2 className="size-4" />, label: <MenuLabel text="撤销" shortcut="⌘ Z" />, onClick: onUndo },
                                 { key: "redo", disabled: !canRedo, icon: <Redo2 className="size-4" />, label: <MenuLabel text="重做" shortcut="⌘ ⇧ Z / ⌘ Y" />, onClick: onRedo },
