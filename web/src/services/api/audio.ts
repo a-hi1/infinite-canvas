@@ -2,7 +2,8 @@ import axios from "axios";
 
 import { audioMimeType, normalizeAudioFormatValue, normalizeAudioSpeedValue, normalizeMiniMaxAudioFormatValue, normalizeMiniMaxAudioVoiceValue, normalizeOpenAiAudioVoiceValue } from "@/lib/audio-generation";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { buildApiUrl, isAiProxyBaseUrl, modelOptionName, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
+import { runModelPlugin } from "@/services/api/model-plugin";
+import { buildApiUrl, isAiProxyBaseUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 
 type RequestOptions = { signal?: AbortSignal };
 type MiniMaxT2AResponse = {
@@ -26,9 +27,48 @@ function aiHeaders(config: AiConfig) {
 export async function requestAudioGeneration(config: AiConfig, prompt: string, options?: RequestOptions): Promise<Blob> {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.audioModel);
     const model = requestConfig.model.trim();
+    const format = normalizeAudioFormatValue(config.audioFormat);
+    const script = resolveModelScript(config, config.model || config.audioModel);
+    if (script) {
+        if (!model) throw new Error("请先配置音频模型");
+        if (!requestConfig.baseUrl.trim()) throw new Error("请先配置 Base URL");
+        if (!requestConfig.apiKey.trim() && !isAiProxyBaseUrl(requestConfig.baseUrl)) throw new Error("请先配置 API Key");
+        try {
+            const result = await runModelPlugin({
+                capability: "audio",
+                script,
+                config: requestConfig,
+                prompt,
+                params: {
+                    voice: normalizeOpenAiAudioVoiceValue(config.audioVoice),
+                    format,
+                    speed: normalizeAudioSpeedValue(config.audioSpeed),
+                    instructions: config.audioInstructions.trim(),
+                },
+                signal: options?.signal,
+            });
+            return await audioPluginBlob(result, format);
+        } catch (error) {
+            throw new Error(readAxiosError(error, "音频生成失败"));
+        }
+    }
     assertAudioConfig(requestConfig, model);
     if (isMiniMaxAudioConfig(requestConfig, model)) return requestMiniMaxAudioGeneration(requestConfig, prompt, options);
     return requestOpenAiAudioGeneration(requestConfig, prompt, options);
+}
+
+async function audioPluginBlob(result: unknown, format: string): Promise<Blob> {
+    if (result instanceof Blob) return result.type.startsWith("audio/") ? result : new Blob([result], { type: audioMimeType(format) });
+    let source = "";
+    if (typeof result === "string") source = result;
+    else if (result && typeof result === "object") {
+        const record = result as Record<string, unknown>;
+        source = typeof record.b64_json === "string" ? record.b64_json : typeof record.data === "string" ? record.data : typeof record.url === "string" ? record.url : "";
+    }
+    if (!source) throw new Error("模型调用脚本没有返回音频");
+    const url = source.startsWith("data:") || /^https?:/i.test(source) ? source : `data:${audioMimeType(format)};base64,${source}`;
+    const blob = await (await fetch(url)).blob();
+    return blob.type.startsWith("audio/") ? blob : new Blob([blob], { type: audioMimeType(format) });
 }
 
 async function requestOpenAiAudioGeneration(config: AiConfig, prompt: string, options?: RequestOptions): Promise<Blob> {

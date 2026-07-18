@@ -39,6 +39,12 @@ export type AiConfig = {
     videoModels: string[];
     textModels: string[];
     audioModels: string[];
+    /**
+     * Optional per-model call scripts keyed by `channelId::model` (or bare model name).
+     * Empty / missing = system default request path. Kept as a side map so channel.models
+     * can stay string[] without an upstream ChannelModel object migration.
+     */
+    modelScripts: Record<string, string>;
     quality: string;
     size: string;
     /** OpenAI-compatible image background; only "transparent" is forwarded upstream. */
@@ -101,6 +107,7 @@ export const defaultConfig: AiConfig = {
     videoModels: [`${DEFAULT_CHANNEL_ID}::grok-imagine-video`],
     textModels: [`${DEFAULT_CHANNEL_ID}::gpt-5.5`],
     audioModels: [`${DEFAULT_CHANNEL_ID}::gpt-4o-mini-tts`],
+    modelScripts: {},
     quality: "auto",
     size: "1:1",
     background: "",
@@ -237,12 +244,48 @@ export const useConfigStore = create<ConfigStore>()(
                         videoModels: Array.isArray(persistedConfig.videoModels) ? normalizeModelList(config.videoModels, channels) : filterModelsByCapability(models, "video"),
                         textModels: Array.isArray(persistedConfig.textModels) ? normalizeModelList(config.textModels, channels) : filterModelsByCapability(models, "text"),
                         audioModels: Array.isArray(persistedConfig.audioModels) ? normalizeModelList(config.audioModels, channels) : filterModelsByCapability(models, "audio"),
+                        modelScripts: normalizeModelScripts(persistedConfig.modelScripts),
                     },
                 };
             },
         },
     ),
 );
+
+function normalizeModelScripts(value: unknown): Record<string, string> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const next: Record<string, string> = {};
+    for (const [key, script] of Object.entries(value as Record<string, unknown>)) {
+        const modelKey = key.trim();
+        const text = typeof script === "string" ? script.trim() : "";
+        if (!modelKey || !text) continue;
+        next[modelKey] = text;
+    }
+    return next;
+}
+
+/** User-authored model call script for a model option; empty means system default path. */
+export function resolveModelScript(config: AiConfig, value: string) {
+    const scripts = config.modelScripts || {};
+    const direct = scripts[value]?.trim();
+    if (direct) return direct;
+    const name = modelOptionName(value);
+    if (name && name !== value) {
+        const byName = scripts[name]?.trim();
+        if (byName) return byName;
+    }
+    return "";
+}
+
+export function setModelScript(config: AiConfig, modelValue: string, script: string): AiConfig {
+    const key = (modelValue || "").trim();
+    if (!key) return config;
+    const nextScripts = { ...(config.modelScripts || {}) };
+    const text = script.trim();
+    if (text) nextScripts[key] = text;
+    else delete nextScripts[key];
+    return { ...config, modelScripts: nextScripts };
+}
 
 function normalizeModelList(models: string[], channels: ModelChannel[]) {
     const allModelOptions = channels.flatMap((channel) => channel.models.map((model) => encodeChannelModel(channel.id, model)));

@@ -1,10 +1,11 @@
 import axios from "axios";
 
-import { buildApiUrl, isAiProxyBaseUrl, modelMatchesCapability, modelOptionName, resolveModelRequestConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { buildApiUrl, isAiProxyBaseUrl, modelMatchesCapability, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { ensureLocalImageDataUrl, imageToDataUrl } from "@/services/image-storage";
+import { normalizePluginImages, runModelPlugin } from "@/services/api/model-plugin";
 import type { ReferenceImage } from "@/types/image";
 
 export type AiTextMessage = {
@@ -723,6 +724,25 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
     assertImageModel(requestConfig.model);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
+    const script = resolveModelScript(config, config.model || config.imageModel);
+    if (script) {
+        try {
+            const quality = normalizeQuality(config.quality);
+            const requestSize = resolveRequestSize(quality, config.size);
+            const result = await runModelPlugin({
+                capability: "image",
+                script,
+                config: requestConfig,
+                prompt: withSystemPrompt(requestConfig, prompt),
+                images: [],
+                params: { size: requestSize, quality, count: n, background: normalizeBackground(config.background) },
+                signal: options?.signal,
+            });
+            return normalizePluginImages(result).map((dataUrl) => ({ id: nanoid(), dataUrl }));
+        } catch (error) {
+            throw new Error(readAxiosError(error, "请求失败"));
+        }
+    }
     if (requestConfig.apiFormat === "gemini") {
         try {
             return await requestGeminiImages(requestConfig, prompt, [], n, options);
@@ -763,6 +783,35 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     assertImageModel(requestConfig.model);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
+    const script = resolveModelScript(config, config.model || config.imageModel);
+    if (script) {
+        if (mask) throw new Error("自定义模型调用脚本暂不支持蒙版编辑，请清空脚本或改用系统默认调用");
+        try {
+            const quality = normalizeQuality(config.quality);
+            const requestSize = resolveRequestSize(quality, config.size);
+            const refs = await Promise.all(
+                references.map(async (image) => {
+                    try {
+                        return (await ensureLocalImageDataUrl(image)) || image.dataUrl || "";
+                    } catch {
+                        return image.dataUrl || "";
+                    }
+                }),
+            );
+            const result = await runModelPlugin({
+                capability: "image",
+                script,
+                config: requestConfig,
+                prompt: withSystemPrompt(requestConfig, requestPrompt),
+                images: refs.filter(Boolean),
+                params: { size: requestSize, quality, count: n, background: normalizeBackground(config.background) },
+                signal: options?.signal,
+            });
+            return normalizePluginImages(result).map((dataUrl) => ({ id: nanoid(), dataUrl }));
+        } catch (error) {
+            throw new Error(readAxiosError(error, "请求失败"));
+        }
+    }
     if (requestConfig.apiFormat === "gemini") {
         if (mask) throw new Error("Gemini 调用格式暂不支持蒙版编辑");
         try {
@@ -817,7 +866,21 @@ function assertImageModel(model: string) {
 export async function requestImageQuestion(config: AiConfig, messages: AiTextMessage[], onDelta: (text: string) => void, options?: RequestOptions) {
     const selectedTextModel = (config.textModel || config.model || "").trim();
     const requestConfig = resolveModelRequestConfig(config, selectedTextModel);
+    const script = resolveModelScript(config, selectedTextModel);
     try {
+        if (script) {
+            const answer =
+                (await runModelPlugin<string>({
+                    capability: "text",
+                    script,
+                    config: requestConfig,
+                    messages: withSystemMessage(requestConfig, messages),
+                    signal: options?.signal,
+                    onDelta,
+                })) || "没有返回内容";
+            if (answer === "没有返回内容") onDelta(answer);
+            return answer;
+        }
         if (requestConfig.apiFormat === "gemini") {
             const answer = (await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, messages), onDelta, options)).content || "没有返回内容";
             if (answer === "没有返回内容") onDelta(answer);

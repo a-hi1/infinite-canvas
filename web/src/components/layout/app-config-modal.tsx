@@ -1,13 +1,14 @@
-import { App, Button, Form, Input, Modal, Progress, Select, Tabs } from "antd";
-import { CircleAlert, Cloud, Plus, RefreshCw, Trash2, Wifi } from "lucide-react";
+import { App, Button, Form, Input, Modal, Progress, Select, Tabs, Tag } from "antd";
+import { CircleAlert, Cloud, Code2, Plus, RefreshCw, Trash2, Wifi } from "lucide-react";
 import { useState } from "react";
 
 import { ModelPicker } from "@/components/model-picker";
+import { ModelScriptEditor } from "@/components/layout/model-script-editor";
 import { fetchChannelModels } from "@/services/api/image";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
-import { AI_PROXY_BASE_URL, createModelChannel, defaultBaseUrlForApiFormat, encodeChannelModel, filterModelsByCapability, isAiProxyBaseUrl, modelOptionLabel, modelOptionsFromChannels, normalizeModelOptionValue, useConfigStore, type AiConfig, type ApiCallFormat, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { AI_PROXY_BASE_URL, createModelChannel, defaultBaseUrlForApiFormat, encodeChannelModel, filterModelsByCapability, isAiProxyBaseUrl, modelOptionLabel, modelOptionName, modelOptionsFromChannels, normalizeModelOptionValue, resolveModelScript, setModelScript, useConfigStore, type AiConfig, type ApiCallFormat, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -63,6 +64,7 @@ export function AppConfigModal() {
     const [syncingWebdav, setSyncingWebdav] = useState(false);
     const [webdavSyncStatus, setWebdavSyncStatus] = useState("");
     const [webdavDomainProgress, setWebdavDomainProgress] = useState(createWebdavDomainProgress);
+    const [scriptEditor, setScriptEditor] = useState<{ capability: ModelCapability; modelValue: string } | null>(null);
     const config = useConfigStore((state) => state.config);
     const webdav = useConfigStore((state) => state.webdav);
     const updateConfig = useConfigStore((state) => state.updateConfig);
@@ -339,6 +341,37 @@ export function AppConfigModal() {
                                         </Form.Item>
                                     ))}
                                 </div>
+                                <div className="mt-4 rounded-lg border border-stone-200 p-3 dark:border-stone-800">
+                                    <div className="text-sm font-semibold">模型调用脚本（可选）</div>
+                                    <div className="mt-1 text-xs leading-5 text-stone-500">
+                                        为默认模型编写自定义调用脚本以适配特殊中转站；<strong>留空则完全走系统默认路径</strong>，不影响现有 BYOK / Grok / Agnes / Seedance。脚本仅保存在本机配置，不会自动从远程安装。
+                                    </div>
+                                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                                        {modelGroups.map((group) => {
+                                            const modelValue = config[group.modelKey];
+                                            const hasScript = Boolean(resolveModelScript(config, modelValue));
+                                            return (
+                                                <div key={`script-${group.modelKey}`} className="flex items-center justify-between gap-2 rounded-md border border-stone-200 px-3 py-2 dark:border-stone-800">
+                                                    <div className="min-w-0">
+                                                        <div className="truncate text-sm font-medium">{group.defaultLabel}</div>
+                                                        <div className="mt-0.5 truncate text-xs text-stone-500">{modelValue ? modelOptionLabel(config, modelValue) : "未选择模型"}</div>
+                                                    </div>
+                                                    <div className="flex shrink-0 items-center gap-2">
+                                                        {hasScript ? <Tag color="blue">已自定义</Tag> : <Tag>默认</Tag>}
+                                                        <Button
+                                                            size="small"
+                                                            icon={<Code2 className="size-3.5" />}
+                                                            disabled={!modelValue}
+                                                            onClick={() => modelValue && setScriptEditor({ capability: group.capability, modelValue })}
+                                                        >
+                                                            编辑脚本
+                                                        </Button>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
                             </Form>
                         ),
                     },
@@ -430,6 +463,19 @@ export function AppConfigModal() {
                         ),
                     },
                 ]}
+            />
+            <ModelScriptEditor
+                open={Boolean(scriptEditor)}
+                capability={scriptEditor?.capability || "image"}
+                modelName={scriptEditor ? modelOptionName(scriptEditor.modelValue) : ""}
+                value={scriptEditor ? resolveModelScript(config, scriptEditor.modelValue) : ""}
+                onSave={(script) => {
+                    if (!scriptEditor) return;
+                    const next = setModelScript(config, scriptEditor.modelValue, script);
+                    updateConfig("modelScripts", next.modelScripts);
+                    message.success(script.trim() ? "模型调用脚本已保存" : "已恢复系统默认调用");
+                }}
+                onClose={() => setScriptEditor(null)}
             />
         </Modal>
     );
