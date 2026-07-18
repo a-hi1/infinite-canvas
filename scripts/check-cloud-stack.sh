@@ -74,6 +74,21 @@ else
 fi
 note ""
 
+note "-- platform readiness (opt-in; default off is OK) --"
+# Non-secret readiness from /api/health.platform (P1). Default false/false is expected for personal BYOK.
+if printf '%s' "$health_body" | grep -q '"platform"'; then
+  img_on="$(printf '%s' "$health_body" | grep -o '"image_enabled":[^,]*' | head -1 | cut -d: -f2 | tr -d ' ')"
+  vid_on="$(printf '%s' "$health_body" | grep -o '"video_enabled":[^,]*' | head -1 | cut -d: -f2 | tr -d ' ')"
+  if [[ "$img_on" == "true" || "$vid_on" == "true" ]]; then
+    warn "platform enabled: image_enabled=$img_on video_enabled=$vid_on (billing product still deferred unless you intentionally charge)"
+  else
+    ok "platform gateways disabled (default BYOK path; billing deferred)"
+  fi
+else
+  warn "api health has no platform field (rebuild api if you expect P1 readiness)"
+fi
+note ""
+
 note "-- env hygiene (optional .env) --"
 if [[ -f .env ]]; then
   if grep -Eiq 'HTTP_PROXY|HTTPS_PROXY' .env; then

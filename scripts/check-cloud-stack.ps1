@@ -82,6 +82,27 @@ try {
     Bad "ai-proxy health request failed: $($_.Exception.Message)"
   }
 }
+
+Note ""
+Note "-- platform readiness (opt-in; default off is OK) --"
+try {
+  $healthObj = Invoke-RestMethod -Uri "$BaseUrl/api/health" -TimeoutSec 8
+  $plat = $healthObj.data.platform
+  if ($null -eq $plat) {
+    Warn "api health has no platform field (rebuild api if you expect P1 readiness)"
+  } else {
+    $img = [bool]$plat.image_enabled
+    $vid = [bool]$plat.video_enabled
+    $admin = [bool]$plat.admin_configured
+    if (-not $img -and -not $vid) {
+      Ok "platform gateways disabled (default BYOK path; billing deferred)"
+    } else {
+      Warn ("platform enabled: image=$img video=$vid admin=$admin image_price_cents=$($plat.image_price_cents) video_price_cents=$($plat.video_price_cents)")
+    }
+  }
+} catch {
+  Warn "platform readiness parse skipped: $($_.Exception.Message)"
+}
 Note ""
 
 Note "-- env hygiene --"

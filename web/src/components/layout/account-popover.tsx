@@ -41,6 +41,8 @@ export function AccountPopover() {
     const nearFull = max > 0 && used / max >= 0.9;
     const balanceCents = credits?.balance_cents ?? user.credit_balance_cents ?? 0;
     const capabilityParts = platformCapabilitySummary(user, credits);
+    // 平台扣费/支付产品面后置：未开启任何平台代生成时不展示积分余额，避免自用 BYOK 误以为在扣费。
+    const showPlatformCredits = capabilityParts.length > 0;
 
     const content = (
         <div className="w-72 space-y-3">
@@ -50,17 +52,17 @@ export function AccountPopover() {
                 {user.plan_code ? <div className="mt-1 text-[11px] text-stone-400">套餐 {user.plan_code}</div> : null}
             </div>
 
-            <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
-                <div className="mb-1 flex items-center justify-between gap-2 text-xs text-stone-500 dark:text-stone-400">
-                    <span>平台积分余额</span>
-                    <span className="font-medium text-stone-700 dark:text-stone-200">{formatYuanFromCents(balanceCents)}</span>
+            {showPlatformCredits ? (
+                <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
+                    <div className="mb-1 flex items-center justify-between gap-2 text-xs text-stone-500 dark:text-stone-400">
+                        <span>平台积分余额</span>
+                        <span className="font-medium text-stone-700 dark:text-stone-200">{formatYuanFromCents(balanceCents)}</span>
+                    </div>
+                    <div className="text-[11px] leading-5 text-stone-400">
+                        {`平台代生成已开启：${capabilityParts.join("；")}。工作台可单独开关，默认仍用你自己的 API Key。`}
+                    </div>
                 </div>
-                <div className="text-[11px] leading-5 text-stone-400">
-                    {capabilityParts.length
-                        ? `平台代生成已开启：${capabilityParts.join("；")}。工作台可单独开关，默认仍用你自己的 API Key。`
-                        : "默认仍用你自己的 API Key 生成；服务器开启平台图/视频后，对应工作台才会出现平台积分开关。"}
-                </div>
-            </div>
+            ) : null}
 
             <div className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
                 <div className="mb-2 flex items-center justify-between gap-2 text-xs text-stone-500 dark:text-stone-400">

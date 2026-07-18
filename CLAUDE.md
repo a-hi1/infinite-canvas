@@ -55,7 +55,7 @@ P0.5 扫尾（运维与体验）：`GET /auth/me` 返回 `usage`（已用字节�
 
 **P1.0-C 已落地：** 积分账本 `credit_ledger`（append-only）+ 用户 `credit_balance_cents` 缓存；`GET /auth/me` 返回 `credits`；用户 `GET /api/credits/ledger`；管理员手工加额 `POST /api/admin/credits/grant`（`API_ADMIN_TOKEN`）。
 
-**P1.0-D / P1.0-E / P1.0-F / P1.0-G 已落地：** 可选平台图片网关 `POST /api/generate/image`（文生图 + 最多 4 张参考图 edits）与最小平台视频网关 `POST /api/generate/video`（仅 OpenAI 兼容文生视频）。均须对应 `API_PLATFORM_*_ENABLED=true` + 上游配置；成功后共用 `platform-billing` 落盘/幂等扣费。`/auth/me.credits` 分字段 `platform_image_enabled` / `platform_video_enabled`；`/health.platform` 暴露就绪态（无密钥）。图生图 JSON body 上限已放宽以容纳 base64 参考图。工作台各自可选开关，默认 BYOK。支付入账仍后置；平台视频暂无参考素材/Grok/Seedance 服务端路径。 
+**P1.0-D / P1.0-E / P1.0-F / P1.0-G 代码已落地，但产品面后置：** 可选平台图/视频网关与账本代码保留在仓库，**默认全部关闭**。当前自用策略：**平台扣积分与支付一并后置**——未开 `API_PLATFORM_*_ENABLED` 时账号弹层不展示积分余额，工作台不展示平台开关；用户继续 BYOK/本地生成。需要收费时再开 env + 支付。`/health.platform` 与 `check-cloud-stack` 可查看就绪态。平台视频暂无参考素材/Grok/Seedance 服务端路径。 
 
 P0.5b 安全/部署加固（为 P1 铺路，不改本地生成主路径）：`from-url` 白名单域名在 DNS 解析后拒绝内网地址、限制重定向跳数、拒绝 URL 内嵌账号；过期/吊销会话定期清理；`docker-compose.local.yml` 透传 Cookie Secure / 邀请码 / 容量等变量（Compose 从仓库根 `.env` 插值，示例见 `.env.api.example`）。同源自部署默认 `API_TRUST_PROXY_SAME_ORIGIN=true`：浏览器 Origin 与 `Host`/`X-Forwarded-Host`+协议一致时放行（解决 `http://公网IP:3001` 登录 403），跨站仍靠显式白名单；可设 `false` 回到仅白名单。Nginx 必须用 `$http_host`（保留端口）并设置 `X-Forwarded-Host`，不要只用 `$host`（会丢 `:3001`/`:3011`，表现为「localhost 能登、127.0.0.1:端口不能登」）。**当前优先真机验收云端出门条件，勿跳过验收直接做计费或画布全量同步。**
 
