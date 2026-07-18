@@ -115,10 +115,58 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
         notifyUnauthorized();
         throw new CloudApiError(payload?.msg || "请先登录", 401, payload?.reason);
     }
+    if (response.status === 409) {
+        // Canvas project conflict: cloud is newer; data may include cloud project snapshot.
+        const err = new CloudApiError(payload?.msg || "云端版本更新", 409, payload?.reason || "bad_request");
+        (err as CloudApiError & { data?: unknown }).data = payload?.data;
+        throw err;
+    }
     if (!response.ok || !payload || payload.code !== 0) {
         throw new CloudApiError(payload?.msg || `请求失败（${response.status}）`, response.status, payload?.reason);
     }
     return payload.data;
+}
+
+export type CloudProjectMeta = {
+    id: string;
+    title: string;
+    created_at?: string;
+    updated_at?: string;
+    bytes?: number;
+};
+
+export type CloudCanvasProject = {
+    id: string;
+    title: string;
+    createdAt: string;
+    updatedAt: string;
+    nodes: unknown[];
+    connections: unknown[];
+    chatSessions?: unknown[];
+    activeChatId?: string | null;
+    backgroundMode?: string;
+    showImageInfo?: boolean;
+    viewport?: { x: number; y: number; k: number };
+};
+
+export function listCloudProjects() {
+    return request<{ items: CloudProjectMeta[]; total: number }>("/projects");
+}
+
+export function getCloudProject(projectId: string) {
+    return request<{ meta: CloudProjectMeta; project: CloudCanvasProject }>(`/projects/${encodeURIComponent(projectId)}`);
+}
+
+export function putCloudProject(project: CloudCanvasProject, options?: { force?: boolean }) {
+    const qs = options?.force ? "?force=1" : "";
+    return request<{ meta: CloudProjectMeta; project: CloudCanvasProject; created?: boolean }>(`/projects/${encodeURIComponent(project.id)}${qs}`, {
+        method: "PUT",
+        body: JSON.stringify({ project }),
+    });
+}
+
+export function deleteCloudProject(projectId: string) {
+    return request<{ ok: boolean; id: string }>(`/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
 }
 
 export function getCloudMe() {

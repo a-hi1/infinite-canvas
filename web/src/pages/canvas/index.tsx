@@ -1,14 +1,16 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { App, Button } from "antd";
-import { Download, FileUp, Plus } from "lucide-react";
+import { CloudDownload, Download, FileUp, Plus } from "lucide-react";
 
 import { readZip } from "@/lib/zip";
 import { setMediaBlob } from "@/services/file-storage";
 import { setImageBlob } from "@/services/image-storage";
+import { pullAndMergeCanvasProjects } from "@/services/canvas-cloud-sync";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
 import { CanvasProjectCard } from "@/components/canvas/canvas-project-card";
 import type { CanvasExportFile } from "@/types/canvas-export";
+import { useAuthStore } from "@/stores/use-auth-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
@@ -19,10 +21,13 @@ export default function CanvasPage() {
     const [searchParams] = useSearchParams();
     const inputRef = useRef<HTMLInputElement>(null);
     const autoOpenRef = useRef(false);
+    const cloudPulledRef = useRef(false);
     const hydrated = useCanvasStore((state) => state.hydrated);
     const projects = useCanvasStore((state) => state.projects);
     const createProject = useCanvasStore((state) => state.createProject);
     const importProject = useCanvasStore((state) => state.importProject);
+    const cloudUser = useAuthStore((state) => state.user);
+    const [cloudSyncing, setCloudSyncing] = useState(false);
     const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);
     const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);
 
@@ -65,6 +70,34 @@ export default function CanvasPage() {
         enterProject(mode === "new" ? createProject(`无限画布 ${projects.length + 1}`) : projects[0]?.id || createProject(`无限画布 ${projects.length + 1}`));
     }, [createProject, hydrated, mode, projects]);
 
+    // Login once: soft pull cloud project list (local-first merge). Never blocks offline use.
+    useEffect(() => {
+        if (!hydrated || !cloudUser || cloudPulledRef.current) return;
+        cloudPulledRef.current = true;
+        setCloudSyncing(true);
+        void pullAndMergeCanvasProjects()
+            .then((result) => {
+                if (result.ok && result.pulled > 0) message.success(`已从云端合并 ${result.pulled} 个画布`);
+            })
+            .finally(() => setCloudSyncing(false));
+    }, [cloudUser, hydrated, message]);
+
+    const syncFromCloud = async () => {
+        if (!cloudUser) {
+            message.info("登录后可从云端拉取画布项目（本地草稿不会丢）");
+            return;
+        }
+        setCloudSyncing(true);
+        try {
+            const result = await pullAndMergeCanvasProjects();
+            if (!result.ok) message.warning("云端暂不可用，已保留本机画布");
+            else if (result.pulled > 0) message.success(`已合并 ${result.pulled} 个云端画布`);
+            else message.success("已与云端对齐（无更新）");
+        } finally {
+            setCloudSyncing(false);
+        }
+    };
+
     if (hydrated && (mode === "new" || mode === "recent")) return <main className="flex h-full items-center justify-center bg-background text-sm text-stone-500">正在打开画布...</main>;
 
     return (
@@ -74,6 +107,7 @@ export default function CanvasPage() {
                     <div>
                         <p className="text-xs text-stone-500">画布库</p>
                         <h1 className="mt-3 text-3xl font-semibold">无限画布</h1>
+                        <p className="mt-2 text-xs text-stone-500">默认保存在本机；登录后会异步同步项目 JSON 到云端，云失败不丢本地草稿。</p>
                     </div>
                     <div className="flex items-center gap-2">
                         {selectedIds.length ? (
@@ -91,6 +125,9 @@ export default function CanvasPage() {
                                 删除全部
                             </Button>
                         ) : null}
+                        <Button disabled={!hydrated || cloudSyncing} icon={<CloudDownload className="size-4" />} loading={cloudSyncing} onClick={() => void syncFromCloud()}>
+                            同步云端
+                        </Button>
                         <Button disabled={!hydrated} icon={<FileUp className="size-4" />} onClick={() => inputRef.current?.click()}>
                             导入画布
                         </Button>

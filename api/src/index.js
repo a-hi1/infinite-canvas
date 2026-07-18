@@ -4,13 +4,14 @@ import path from "node:path";
 import dns from "node:dns/promises";
 import { URL } from "node:url";
 
-import { createDb, publicCreditLedgerEntry, publicJob, publicUser } from "./db.js";
+import { createDb, publicCreditLedgerEntry, publicJob, publicProjectMeta, publicUser } from "./db.js";
 import { CLOUD_ERROR_REASON, CREDIT_LEDGER_TYPE, JOB_SOURCE, JOB_STATUS, JOB_TYPE, SAVE_STATUS, USER_STATUS } from "./model/cloud-domain.js";
 import { createUsersRepo } from "./repositories/users-repo.js";
 import { createSessionsRepo } from "./repositories/sessions-repo.js";
 import { createJobsRepo } from "./repositories/jobs-repo.js";
 import { createFilesRepo } from "./repositories/files-repo.js";
 import { createCreditsRepo } from "./repositories/credits-repo.js";
+import { createProjectsRepo } from "./repositories/projects-repo.js";
 import { decodePlatformReferenceDataUrl, generateOnePlatformImage, PLATFORM_IMAGE_REF_LIMIT } from "./platform-image.js";
 import { generateOnePlatformVideo } from "./platform-video.js";
 import { findExistingPlatformJob, persistPlatformResultAndCharge } from "./platform-billing.js";
@@ -108,6 +109,8 @@ const sessionsRepo = createSessionsRepo(db);
 const jobsRepo = createJobsRepo(db);
 const filesRepo = createFilesRepo(db);
 const creditsRepo = createCreditsRepo(db);
+const projectsRepo = createProjectsRepo(db);
+const maxProjectJsonBytes = Math.min(maxBodyBytes, Math.max(1024 * 1024, Number(process.env.API_MAX_PROJECT_JSON_BYTES || 8 * 1024 * 1024) || 8 * 1024 * 1024));
 // Keep JSON session table small before Postgres; does not affect active logins.
 try {
     const pruned = sessionsRepo.pruneExpired();
@@ -194,6 +197,12 @@ const server = http.createServer(async (req, res) => {
         if (req.method === "GET" && route === "/credits/ledger") return await handleListOwnCredits(req, res, url);
         if (req.method === "POST" && route === "/admin/credits/grant") return await handleAdminCreditGrant(req, res);
 
+        // Canvas projects (P2 MVP): JSON document sync; local-first, cloud optional.
+        if (req.method === "GET" && route === "/projects") return await handleListProjects(req, res);
+        if (req.method === "GET" && route.startsWith("/projects/")) return await handleGetProject(req, res, route.slice("/projects/".length));
+        if (req.method === "PUT" && route.startsWith("/projects/")) return await handlePutProject(req, res, route.slice("/projects/".length), url);
+        if (req.method === "DELETE" && route.startsWith("/projects/")) return await handleDeleteProject(req, res, route.slice("/projects/".length));
+
         // Platform generation (opt-in server-side; charges credits only on success).
         if (req.method === "POST" && route === "/generate/image") return await handlePlatformGenerateImage(req, res);
         if (req.method === "POST" && route === "/generate/video") return await handlePlatformGenerateVideo(req, res);
@@ -223,9 +232,72 @@ function setCors(res, origin, req) {
         res.setHeader("Access-Control-Allow-Credentials", "true");
     }
     res.setHeader("Vary", "Origin");
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     res.setHeader("Access-Control-Max-Age", "86400");
+}
+
+function handleListProjects(req, res) {
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const items = projectsRepo.listForUser(auth.user.id).map(publicProjectMeta);
+    json(res, 200, { items, total: items.length });
+}
+
+function handleGetProject(req, res, projectIdRaw) {
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const projectId = String(projectIdRaw || "").split(/[/?#]/)[0];
+    if (!projectId) return fail(res, 400, "缺少项目 id", CLOUD_ERROR_REASON.BAD_REQUEST);
+    const meta = projectsRepo.findForUser(projectId, auth.user.id);
+    if (!meta) return fail(res, 404, "项目不存在", CLOUD_ERROR_REASON.NOT_FOUND);
+    const document = projectsRepo.readDocument(projectId, auth.user.id);
+    if (!document) return fail(res, 404, "项目内容丢失", CLOUD_ERROR_REASON.NOT_FOUND);
+    json(res, 200, { meta: publicProjectMeta(meta), project: document });
+}
+
+async function handlePutProject(req, res, projectIdRaw, url) {
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const projectId = String(projectIdRaw || "").split(/[/?#]/)[0];
+    if (!projectId) return fail(res, 400, "缺少项目 id", CLOUD_ERROR_REASON.BAD_REQUEST);
+    const force = url.searchParams.get("force") === "1" || url.searchParams.get("force") === "true";
+    const body = await readJson(req, maxProjectJsonBytes);
+    const project = body?.project && typeof body.project === "object" ? body.project : body;
+    if (!project || typeof project !== "object") return fail(res, 400, "缺少项目内容", CLOUD_ERROR_REASON.BAD_REQUEST);
+    // Path id wins so clients cannot rewrite another id in body.
+    project.id = projectId;
+    try {
+        const result = projectsRepo.upsert(auth.user.id, project, { force });
+        db.flush();
+        json(res, 200, { meta: publicProjectMeta(result.meta), project: result.document, created: result.created }, result.created ? "已创建云端画布" : "已保存到云端");
+    } catch (error) {
+        if (error?.status === 409 && error.cloudProject) {
+            const cloudDoc = projectsRepo.readDocument(projectId, auth.user.id);
+            return json(
+                res,
+                409,
+                {
+                    conflict: true,
+                    meta: publicProjectMeta(error.cloudProject),
+                    project: cloudDoc,
+                },
+                error.message || "云端版本更新",
+            );
+        }
+        throw error;
+    }
+}
+
+function handleDeleteProject(req, res, projectIdRaw) {
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const projectId = String(projectIdRaw || "").split(/[/?#]/)[0];
+    if (!projectId) return fail(res, 400, "缺少项目 id", CLOUD_ERROR_REASON.BAD_REQUEST);
+    const deleted = projectsRepo.deleteForUser(projectId, auth.user.id);
+    if (!deleted) return fail(res, 404, "项目不存在", CLOUD_ERROR_REASON.NOT_FOUND);
+    db.flush();
+    json(res, 200, { ok: true, id: projectId }, "已删除云端画布");
 }
 
 /** First value of a possibly comma-stacked proxy header. */

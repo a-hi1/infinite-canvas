@@ -11,8 +11,10 @@ import { CLOUD_ERROR_REASON, CREDIT_CURRENCY, CREDIT_LEDGER_TYPE, FILE_STORAGE_B
 export function createDb(dataDir) {
     ensureDir(dataDir);
     const dbPath = path.join(dataDir, "db.json");
-    /** @type {{ users: any[], sessions: any[], jobs: any[], files: any[], credit_ledger: any[] }} */
-    let state = { users: [], sessions: [], jobs: [], files: [], credit_ledger: [] };
+    const projectsDir = path.join(dataDir, "projects");
+    ensureDir(projectsDir);
+    /** @type {{ users: any[], sessions: any[], jobs: any[], files: any[], credit_ledger: any[], projects: any[] }} */
+    let state = { users: [], sessions: [], jobs: [], files: [], credit_ledger: [], projects: [] };
 
     if (fs.existsSync(dbPath)) {
         try {
@@ -22,6 +24,7 @@ export function createDb(dataDir) {
             state.jobs ||= [];
             state.files ||= [];
             state.credit_ledger ||= [];
+            state.projects ||= [];
         } catch {
             // keep empty state if corrupt; operator can restore from backup
         }
@@ -254,6 +257,118 @@ export function createDb(dataDir) {
             return state.jobs.filter((j) => j.user_id === userId && j.status !== JOB_STATUS.DELETED && (!type || j.type === type)).length;
         },
 
+        listProjectsForUser(userId) {
+            return state.projects
+                .filter((p) => p.user_id === userId && !p.deleted_at)
+                .slice()
+                .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+        },
+
+        findProjectForUser(projectId, userId) {
+            return state.projects.find((p) => p.id === projectId && p.user_id === userId && !p.deleted_at) || null;
+        },
+
+        projectDocPath(userId, projectId) {
+            return path.join(projectsDir, userId, `${projectId}.json`);
+        },
+
+        readProjectDocument(projectId, userId) {
+            const meta = this.findProjectForUser(projectId, userId);
+            if (!meta) return null;
+            const docPath = this.projectDocPath(userId, projectId);
+            if (!fs.existsSync(docPath)) return null;
+            try {
+                return JSON.parse(fs.readFileSync(docPath, "utf8"));
+            } catch {
+                return null;
+            }
+        },
+
+        /**
+         * Upsert canvas project JSON. Conflict if cloud is newer and client does not force.
+         * Document is written under data/projects/{userId}/{projectId}.json
+         */
+        upsertProject(userId, project, { force = false } = {}) {
+            const id = String(project?.id || "").trim();
+            if (!id) {
+                const err = new Error("缺少项目 id");
+                err.status = 400;
+                err.reason = CLOUD_ERROR_REASON.BAD_REQUEST;
+                throw err;
+            }
+            const title = String(project?.title || "未命名画布").trim() || "未命名画布";
+            const updatedAt = String(project?.updatedAt || project?.updated_at || now());
+            const createdAt = String(project?.createdAt || project?.created_at || updatedAt);
+            const existing = state.projects.find((p) => p.id === id && p.user_id === userId);
+
+            if (existing && !existing.deleted_at && !force) {
+                const cloudTs = Date.parse(existing.updated_at || "") || 0;
+                const clientTs = Date.parse(updatedAt) || 0;
+                // Cloud is strictly newer → ask client to pull/merge.
+                if (cloudTs > clientTs) {
+                    const err = new Error("云端版本更新，请先拉取合并");
+                    err.status = 409;
+                    err.reason = CLOUD_ERROR_REASON.BAD_REQUEST;
+                    err.cloudProject = existing;
+                    throw err;
+                }
+            }
+
+            const doc = {
+                id,
+                title,
+                createdAt,
+                updatedAt,
+                nodes: Array.isArray(project?.nodes) ? project.nodes : [],
+                connections: Array.isArray(project?.connections) ? project.connections : [],
+                chatSessions: Array.isArray(project?.chatSessions) ? project.chatSessions : [],
+                activeChatId: project?.activeChatId ?? null,
+                backgroundMode: project?.backgroundMode || "lines",
+                showImageInfo: Boolean(project?.showImageInfo),
+                viewport: project?.viewport || { x: 0, y: 0, k: 1 },
+            };
+
+            const userDir = path.join(projectsDir, userId);
+            ensureDir(userDir);
+            const docPath = this.projectDocPath(userId, id);
+            const tmp = `${docPath}.tmp`;
+            fs.writeFileSync(tmp, JSON.stringify(doc));
+            fs.renameSync(tmp, docPath);
+
+            const bytes = Buffer.byteLength(JSON.stringify(doc));
+            const meta = {
+                id,
+                user_id: userId,
+                title,
+                created_at: existing?.created_at || createdAt,
+                updated_at: updatedAt,
+                bytes,
+                deleted_at: null,
+            };
+            if (existing) {
+                Object.assign(existing, meta);
+            } else {
+                state.projects.push(meta);
+            }
+            schedulePersist();
+            return { meta, document: doc, created: !existing };
+        },
+
+        deleteProjectForUser(projectId, userId) {
+            const existing = this.findProjectForUser(projectId, userId);
+            if (!existing) return null;
+            existing.deleted_at = now();
+            existing.updated_at = existing.deleted_at;
+            schedulePersist();
+            try {
+                const docPath = this.projectDocPath(userId, projectId);
+                if (fs.existsSync(docPath)) fs.unlinkSync(docPath);
+            } catch {
+                // best-effort file delete
+            }
+            return existing;
+        },
+
         getUserCreditBalanceCents(userId) {
             const user = this.findUserById(userId);
             if (!user) return 0;
@@ -375,6 +490,17 @@ export function publicCreditLedgerEntry(entry) {
         ref_type: entry.ref_type || "",
         ref_id: entry.ref_id || "",
         created_at: entry.created_at,
+    };
+}
+
+export function publicProjectMeta(meta) {
+    if (!meta) return null;
+    return {
+        id: meta.id,
+        title: meta.title,
+        created_at: meta.created_at,
+        updated_at: meta.updated_at,
+        bytes: meta.bytes || 0,
     };
 }
 

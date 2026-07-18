@@ -6,6 +6,15 @@ import { localForageStorage } from "@/lib/localforage-storage";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
 
+function scheduleCloudPush(projectId: string) {
+    // Lazy import avoids circular init with cloud-api / auth store.
+    void import("@/services/canvas-cloud-sync")
+        .then((mod) => mod.schedulePushCanvasProject(projectId))
+        .catch(() => {
+            // cloud optional
+        });
+}
+
 export type CanvasProject = {
     id: string;
     title: string;
@@ -104,20 +113,29 @@ export const useCanvasStore = create<CanvasStore>()(
             openProject: (id) => {
                 return get().projects.find((item) => item.id === id) || null;
             },
-            renameProject: (id, title) =>
+            renameProject: (id, title) => {
                 set((state) => ({
                     projects: state.projects.map((project) => (project.id === id ? { ...project, title: title.trim() || project.title, updatedAt: new Date().toISOString() } : project)),
-                })),
-            deleteProjects: (ids) =>
+                }));
+                scheduleCloudPush(id);
+            },
+            deleteProjects: (ids) => {
                 set((state) => {
                     const projects = state.projects.filter((project) => !ids.includes(project.id));
                     return { projects };
-                }),
+                });
+                // Best-effort cloud delete; local already removed.
+                void import("@/services/canvas-cloud-sync")
+                    .then((mod) => Promise.all(ids.map((id) => mod.removeCloudCanvasProject(id))))
+                    .catch(() => undefined);
+            },
             replaceProjects: (projects) => set({ projects }),
-            updateProject: (id, patch) =>
+            updateProject: (id, patch) => {
                 set((state) => ({
                     projects: state.projects.map((project) => (project.id === id ? { ...project, ...patch, updatedAt: new Date().toISOString() } : project)),
-                })),
+                }));
+                scheduleCloudPush(id);
+            },
         }),
         {
             name: CANVAS_STORE_KEY,

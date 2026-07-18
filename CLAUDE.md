@@ -43,7 +43,9 @@
 
 **浏览器代理 ≠ Docker 出网**：系统/Clash 美国代理只影响浏览器。视频上云若走 `/ai-proxy/media` 或 `api` 的 `from-url`，是容器去拉 `vidgen.x.ai`；容器访问超时时会 502。本机可在根目录 `.env` 设置 `HTTP_PROXY`/`HTTPS_PROXY=http://host.docker.internal:代理端口` 后重建 `api` 与 `ai-proxy`。服务器不要默认照搬本机 789x 代理。
 
-**当前主线（收费后置）：** 本地 BYOK 稳定 + 云历史双轨可回归 + 上游能力按矩阵切片。平台扣积分/支付**后置**。
+**当前主线（收费后置）：** 本地 BYOK 稳定 + 云历史双轨可回归 + **画布项目 JSON 云同步（P2.0-A）** + 上游能力按矩阵切片。平台扣积分/支付/画布扣积分**后置**（应先有上云再谈画布计费）。
+
+**P2.0-A：** `GET/PUT/DELETE /api/projects`；文档落在 `data/api/projects/{userId}/{id}.json`；前端本地 IndexedDB 为主，登录后防抖推送与列表拉取合并；**不同步**节点媒体 blob（仍本机 storageKey）。
 
 **P0.5c：** 清单 `docs/content/docs/progress/p05c-acceptance.mdx`；自动 `scripts/check-cloud-stack.*` + `scripts/smoke-dual-track.*`；仍须人工 UI 上云与服务器 B2。本机上云占本机 `./data/api`，服务器占服务器 `./data/api`。
 
