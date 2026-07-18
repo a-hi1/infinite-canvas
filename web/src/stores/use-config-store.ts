@@ -218,34 +218,40 @@ export const useConfigStore = create<ConfigStore>()(
                 if (!Array.isArray(persistedConfig.channels)) config.channels = [];
                 const channels = normalizeChannels(config);
                 const models = modelOptionsFromChannels(channels);
+                const imageModels = Array.isArray(persistedConfig.imageModels) ? normalizeModelList(config.imageModels, channels) : filterModelsByCapability(models, "image");
+                const videoModels = Array.isArray(persistedConfig.videoModels) ? normalizeModelList(config.videoModels, channels) : filterModelsByCapability(models, "video");
+                const textModels = Array.isArray(persistedConfig.textModels) ? normalizeModelList(config.textModels, channels) : filterModelsByCapability(models, "text");
+                const audioModels = Array.isArray(persistedConfig.audioModels) ? normalizeModelList(config.audioModels, channels) : filterModelsByCapability(models, "audio");
+                // Prune on load so deleted channels/models do not keep dead scripts in localStorage forever.
+                const mergedConfig = pruneModelScripts({
+                    ...config,
+                    channelMode: "local",
+                    apiFormat: normalizeApiFormat(config.apiFormat),
+                    channels,
+                    models,
+                    imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
+                    videoModel: normalizeModelOptionValue(config.videoModel || "grok-imagine-video", channels),
+                    textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
+                    audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
+                    audioVoice: config.audioVoice || defaultConfig.audioVoice,
+                    audioFormat: config.audioFormat || defaultConfig.audioFormat,
+                    audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
+                    audioInstructions: config.audioInstructions || "",
+                    videoSeconds: config.videoSeconds || defaultConfig.videoSeconds,
+                    vquality: config.vquality || "720",
+                    videoGenerateAudio: config.videoGenerateAudio || "true",
+                    videoWatermark: config.videoWatermark || "false",
+                    canvasImageCount: config.canvasImageCount || defaultConfig.canvasImageCount,
+                    imageModels,
+                    videoModels,
+                    textModels,
+                    audioModels,
+                    modelScripts: normalizeModelScripts(persistedConfig.modelScripts),
+                });
                 return {
                     ...current,
                     webdav: { ...defaultWebdavSyncConfig, ...persistedWebdav },
-                    config: {
-                        ...config,
-                        channelMode: "local",
-                        apiFormat: normalizeApiFormat(config.apiFormat),
-                        channels,
-                        models,
-                        imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
-                        videoModel: normalizeModelOptionValue(config.videoModel || "grok-imagine-video", channels),
-                        textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
-                        audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
-                        audioVoice: config.audioVoice || defaultConfig.audioVoice,
-                        audioFormat: config.audioFormat || defaultConfig.audioFormat,
-                        audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
-                        audioInstructions: config.audioInstructions || "",
-                        videoSeconds: config.videoSeconds || defaultConfig.videoSeconds,
-                        vquality: config.vquality || "720",
-                        videoGenerateAudio: config.videoGenerateAudio || "true",
-                        videoWatermark: config.videoWatermark || "false",
-                        canvasImageCount: config.canvasImageCount || defaultConfig.canvasImageCount,
-                        imageModels: Array.isArray(persistedConfig.imageModels) ? normalizeModelList(config.imageModels, channels) : filterModelsByCapability(models, "image"),
-                        videoModels: Array.isArray(persistedConfig.videoModels) ? normalizeModelList(config.videoModels, channels) : filterModelsByCapability(models, "video"),
-                        textModels: Array.isArray(persistedConfig.textModels) ? normalizeModelList(config.textModels, channels) : filterModelsByCapability(models, "text"),
-                        audioModels: Array.isArray(persistedConfig.audioModels) ? normalizeModelList(config.audioModels, channels) : filterModelsByCapability(models, "audio"),
-                        modelScripts: normalizeModelScripts(persistedConfig.modelScripts),
-                    },
+                    config: mergedConfig,
                 };
             },
         },
@@ -284,18 +290,16 @@ export function resolveModelScript(config: AiConfig, value: string) {
     const decoded = decodeChannelModel(key);
     if (decoded) {
         // Qualified model: do not fall back to bare name (avoids cross-channel script reuse).
-        // Allow exact legacy key only if someone stored the same qualified string differently — already checked.
         return "";
     }
 
-    // Bare model name: only the bare key, or a single channel-qualified script for that name.
+    // Bare model name: legacy bare key first; otherwise only the script for the same channel
+    // that resolveModelChannel would use for the real request (not "any single qualified match").
     const bare = scripts[key]?.trim();
     if (bare) return bare;
-    const qualifiedMatches = Object.entries(scripts)
-        .filter(([scriptKey, script]) => Boolean(script?.trim()) && modelOptionName(scriptKey) === key && isChannelModelValue(scriptKey))
-        .map(([, script]) => script.trim());
-    if (qualifiedMatches.length === 1) return qualifiedMatches[0];
-    return "";
+    const channel = resolveModelChannel(config, key);
+    if (!channel?.id) return "";
+    return scripts[encodeChannelModel(channel.id, key)]?.trim() || "";
 }
 
 export function setModelScript(config: AiConfig, modelValue: string, script: string): AiConfig {
