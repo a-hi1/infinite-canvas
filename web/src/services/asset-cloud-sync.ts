@@ -16,12 +16,18 @@ import { useAssetStore, type Asset } from "@/stores/use-asset-store";
 
 const tombstoneStore = localforage.createInstance({ name: "infinite-canvas", storeName: "asset_cloud_sync" });
 const TOMBSTONE_KEY = "tombstones";
+const SNAPSHOT_KEY = "last_synced_snapshot";
 const PUSH_DEBOUNCE_MS = 1800;
 const MAX_TOMBSTONES = 20000;
 let pushTimer: ReturnType<typeof setTimeout> | null = null;
 let syncing: Promise<AssetSyncResult> | null = null;
 let resyncRequested = false;
 const pendingTombstones = new Map<string, CloudAssetTombstone>();
+let lastSyncedSnapshot: AssetSyncSnapshot | null = null;
+let lastSyncedLoaded = false;
+let lastSyncFailed = false;
+let statusVersion = 0;
+const statusListeners = new Set<() => void>();
 
 export type AssetSyncResult = {
     ok: boolean;
@@ -32,8 +38,115 @@ export type AssetSyncResult = {
     reason?: "not_logged_in" | "network";
 };
 
+type AssetSyncSnapshot = {
+    updatedAt: string;
+    assetIds: string[];
+    signatures: Record<string, string>;
+};
+
+export type AssetCloudBadge = "local" | "pending" | "synced" | "failed";
+
 function isLoggedIn() {
     return Boolean(useAuthStore.getState().user);
+}
+
+function notifyStatusListeners() {
+    statusVersion += 1;
+    statusListeners.forEach((listener) => listener());
+}
+
+export function subscribeAssetCloudStatus(listener: () => void) {
+    statusListeners.add(listener);
+    return () => {
+        statusListeners.delete(listener);
+    };
+}
+
+export function getAssetCloudStatusVersion() {
+    return statusVersion;
+}
+
+function assetSignature(asset: Asset) {
+    const mediaKey =
+        asset.kind === "image" || asset.kind === "video"
+            ? String(asset.data.storageKey || "")
+            : asset.kind === "text"
+              ? String(asset.data.content || "")
+              : "";
+    return `${asset.updatedAt}|${asset.kind}|${asset.title}|${mediaKey}`;
+}
+
+function buildSnapshot(assets: Asset[], updatedAt: string): AssetSyncSnapshot {
+    const signatures: Record<string, string> = {};
+    for (const asset of assets) signatures[asset.id] = assetSignature(asset);
+    return {
+        updatedAt,
+        assetIds: assets.map((asset) => asset.id).sort(),
+        signatures,
+    };
+}
+
+async function ensureSyncedSnapshotLoaded() {
+    if (lastSyncedLoaded) return lastSyncedSnapshot;
+    lastSyncedLoaded = true;
+    const stored = await tombstoneStore.getItem<AssetSyncSnapshot>(SNAPSHOT_KEY);
+    if (stored && typeof stored === "object" && stored.signatures) {
+        lastSyncedSnapshot = {
+            updatedAt: String(stored.updatedAt || ""),
+            assetIds: Array.isArray(stored.assetIds) ? stored.assetIds.map(String) : Object.keys(stored.signatures),
+            signatures: stored.signatures,
+        };
+    }
+    return lastSyncedSnapshot;
+}
+
+async function writeSyncedSnapshot(snapshot: AssetSyncSnapshot) {
+    lastSyncedSnapshot = snapshot;
+    lastSyncedLoaded = true;
+    lastSyncFailed = false;
+    await tombstoneStore.setItem(SNAPSHOT_KEY, snapshot);
+    notifyStatusListeners();
+}
+
+export function getAssetCloudBadge(asset: Asset, options?: { loggedIn?: boolean; syncing?: boolean }): AssetCloudBadge {
+    const loggedIn = options?.loggedIn ?? isLoggedIn();
+    if (!loggedIn) return "local";
+    if (options?.syncing) return "pending";
+    if (lastSyncFailed) return "failed";
+    const snapshot = lastSyncedSnapshot;
+    if (!snapshot) return "pending";
+    const signature = snapshot.signatures[asset.id];
+    if (!signature) return "pending";
+    return signature === assetSignature(asset) ? "synced" : "pending";
+}
+
+export function getAssetLibraryCloudSummary(assets: Asset[], options?: { loggedIn?: boolean; syncing?: boolean }) {
+    const loggedIn = options?.loggedIn ?? isLoggedIn();
+    if (!loggedIn) {
+        return { label: "仅本机", detail: "登录后可同步到云端", tone: "local" as const, synced: 0, pending: assets.length, failed: 0 };
+    }
+    if (options?.syncing) {
+        return { label: "同步中", detail: "正在上传/拉取素材清单与媒体", tone: "pending" as const, synced: 0, pending: assets.length, failed: 0 };
+    }
+    if (lastSyncFailed) {
+        return { label: "上云失败", detail: "可点击「同步云端」重试，本机素材不受影响", tone: "failed" as const, synced: 0, pending: 0, failed: assets.length };
+    }
+    let synced = 0;
+    let pending = 0;
+    for (const asset of assets) {
+        if (getAssetCloudBadge(asset, { loggedIn: true }) === "synced") synced += 1;
+        else pending += 1;
+    }
+    if (!assets.length) {
+        return { label: lastSyncedSnapshot ? "已上云" : "待同步", detail: lastSyncedSnapshot ? "云端清单为空" : "新增素材后会自动同步", tone: lastSyncedSnapshot ? ("synced" as const) : ("pending" as const), synced: 0, pending: 0, failed: 0 };
+    }
+    if (pending === 0) {
+        return { label: "已上云", detail: `${synced} 条素材已与云端对齐`, tone: "synced" as const, synced, pending: 0, failed: 0 };
+    }
+    if (synced === 0) {
+        return { label: "待同步", detail: `${pending} 条素材尚未确认上云`, tone: "pending" as const, synced: 0, pending, failed: 0 };
+    }
+    return { label: "部分已上云", detail: `已上云 ${synced} · 待同步 ${pending}`, tone: "pending" as const, synced, pending, failed: 0 };
 }
 
 function asTime(value: string | undefined) {
@@ -100,16 +213,28 @@ export async function recordAssetDeletion(assetId: string, deletedAt = new Date(
     pendingTombstones.set(assetId, { id: assetId, deletedAt });
     const current = await readLocalTombstones();
     await writeLocalTombstones(current);
+    // Local delete immediately makes cloud snapshot stale.
+    lastSyncFailed = false;
+    notifyStatusListeners();
     schedulePushAssetManifest();
 }
 
 export function schedulePushAssetManifest() {
     if (!isLoggedIn()) return;
+    // Local CRUD makes previous "synced" badge provisional until next successful push.
+    lastSyncFailed = false;
+    notifyStatusListeners();
     if (pushTimer) clearTimeout(pushTimer);
     pushTimer = setTimeout(() => {
         pushTimer = null;
         void syncAssetManifestNow({ pull: false });
     }, PUSH_DEBOUNCE_MS);
+}
+
+export async function hydrateAssetCloudStatus() {
+    await ensureSyncedSnapshotLoaded();
+    notifyStatusListeners();
+    return lastSyncedSnapshot;
 }
 
 async function hydrateMergedAssets(assets: Asset[]) {
@@ -251,6 +376,8 @@ export async function syncAssetManifestNow(_options?: { pull?: boolean }): Promi
                 useAssetStore.getState().replaceAssets(finalAssets);
             }
 
+            await writeSyncedSnapshot(buildSnapshot(finalAssets, savedManifest.updatedAt || finalMerged.updatedAt));
+
             return {
                 ok: true,
                 merged: Math.max(0, finalAssets.length - localAssets.length + finalMerged.deleted),
@@ -260,6 +387,8 @@ export async function syncAssetManifestNow(_options?: { pull?: boolean }): Promi
             };
         } catch (error) {
             console.warn("asset cloud sync failed", error);
+            lastSyncFailed = true;
+            notifyStatusListeners();
             return { ok: false, merged: 0, deleted: 0, mediaDownloaded: 0, mediaUploaded: 0, reason: "network" };
         } finally {
             syncing = null;

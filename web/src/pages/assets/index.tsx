@@ -1,15 +1,24 @@
 import { CloudDownload, Copy, Download, ImagePlus, PencilLine, Search, Trash2, Upload, VideoIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useNavigate } from "react-router-dom";
 import { App, Button, Card, Drawer, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Spin, Tag, Typography } from "antd";
 import { saveAs } from "file-saver";
 
 import { useCopyText } from "@/hooks/use-copy-text";
+import { cloudSyncColor } from "@/lib/cloud-sync";
 import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
 import { uploadMediaFile } from "@/services/file-storage";
 import { uploadImage } from "@/services/image-storage";
 import { cn } from "@/lib/utils";
-import { syncAssetManifestNow } from "@/services/asset-cloud-sync";
+import {
+    getAssetCloudBadge,
+    getAssetCloudStatusVersion,
+    getAssetLibraryCloudSummary,
+    hydrateAssetCloudStatus,
+    subscribeAssetCloudStatus,
+    syncAssetManifestNow,
+    type AssetCloudBadge,
+} from "@/services/asset-cloud-sync";
 import { useAuthStore } from "@/stores/use-auth-store";
 import { useAssetStore, type Asset, type AssetKind, type ImageAsset, type VideoAsset } from "@/stores/use-asset-store";
 import { exportAssets, readAssetPackage } from "./asset-transfer";
@@ -50,6 +59,8 @@ export default function AssetsPage() {
     const cloudUser = useAuthStore((state) => state.user);
     const cloudPullDoneRef = useRef(false);
     const [cloudSyncing, setCloudSyncing] = useState(false);
+    // Force re-render when sync snapshot changes outside React state (after successful/failed sync).
+    const cloudStatusVersion = useSyncExternalStore(subscribeAssetCloudStatus, getAssetCloudStatusVersion, () => 0);
     const [keyword, setKeyword] = useState("");
     const [kindFilter, setKindFilter] = useState<AssetKind | "all">("all");
     const [page, setPage] = useState(1);
@@ -86,6 +97,10 @@ export default function AssetsPage() {
         setPage((value) => Math.min(value, maxPage));
     }, [filteredAssets.length, pageSize]);
 
+    useEffect(() => {
+        void hydrateAssetCloudStatus();
+    }, []);
+
     // One safe login pull. It merges by updatedAt + tombstones and never deletes local-only newer data.
     useEffect(() => {
         if (!hydrated || !cloudUser || cloudPullDoneRef.current) return;
@@ -99,6 +114,13 @@ export default function AssetsPage() {
             })
             .finally(() => setCloudSyncing(false));
     }, [cloudUser, hydrated, message]);
+
+    const cloudSummary = useMemo(
+        () => getAssetLibraryCloudSummary(validAssets, { loggedIn: Boolean(cloudUser), syncing: cloudSyncing }),
+        // cloudStatusVersion intentionally forces refresh after sync snapshot writes.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [validAssets, cloudUser, cloudSyncing, cloudStatusVersion],
+    );
 
     const syncCloudAssets = async () => {
         if (!cloudUser) {
@@ -363,6 +385,23 @@ export default function AssetsPage() {
                     <div className="mx-auto max-w-5xl text-center">
                         <h1 className="text-4xl font-semibold tracking-tight text-stone-950 dark:text-stone-100">我的素材</h1>
                         <p className="mt-3 text-sm text-stone-500 dark:text-stone-400">长期保存文本、图片、视频；默认保存在本机，登录后可同步清单与 storageKey 媒体到云端。</p>
+                        <div className="mt-4 flex justify-center">
+                            <Tag
+                                className="m-0 inline-flex h-7 items-center rounded-full px-3 text-xs"
+                                color={
+                                    cloudSummary.tone === "synced"
+                                        ? "success"
+                                        : cloudSummary.tone === "failed"
+                                          ? "error"
+                                          : cloudSummary.tone === "pending"
+                                            ? "processing"
+                                            : "default"
+                                }
+                            >
+                                {cloudSummary.label}
+                                {cloudSummary.detail ? ` · ${cloudSummary.detail}` : ""}
+                            </Tag>
+                        </div>
                     </div>
 
                     <div className="mx-auto mt-8 w-full max-w-2xl">
@@ -458,6 +497,7 @@ export default function AssetsPage() {
                                     <AssetCard
                                         key={asset.id}
                                         asset={asset}
+                                        cloudBadge={getAssetCloudBadge(asset, { loggedIn: Boolean(cloudUser), syncing: cloudSyncing })}
                                         onOpen={() => setPreviewAsset(asset)}
                                         onEdit={() => openEdit(asset)}
                                         onCopy={copyAssetText}
@@ -645,8 +685,23 @@ export default function AssetsPage() {
     );
 }
 
+function assetCloudBadgeLabel(badge: AssetCloudBadge) {
+    if (badge === "synced") return "已上云";
+    if (badge === "pending") return "待同步";
+    if (badge === "failed") return "上云失败";
+    return "仅本机";
+}
+
+function assetCloudBadgeColor(badge: AssetCloudBadge) {
+    if (badge === "synced") return cloudSyncColor("synced");
+    if (badge === "pending") return cloudSyncColor("pending");
+    if (badge === "failed") return cloudSyncColor("failed");
+    return cloudSyncColor("skipped");
+}
+
 function AssetCard({
     asset,
+    cloudBadge,
     onOpen,
     onEdit,
     onCopy,
@@ -656,6 +711,7 @@ function AssetCard({
     onDelete,
 }: {
     asset: Asset;
+    cloudBadge: AssetCloudBadge;
     onOpen: () => void;
     onEdit: () => void;
     onCopy: (asset: Asset) => void;
@@ -672,7 +728,7 @@ function AssetCard({
             className="overflow-hidden"
             styles={{ body: { padding: 0 } }}
             cover={
-                <button type="button" className="block w-full text-left" onClick={onOpen}>
+                <button type="button" className="relative block w-full text-left" onClick={onOpen}>
                     {asset.kind === "video" && asset.data.url ? (
                         <video src={asset.data.url} muted playsInline preload="metadata" className="aspect-[4/3] w-full bg-black object-cover" />
                     ) : cover ? (
@@ -680,6 +736,9 @@ function AssetCard({
                     ) : (
                         <div className="flex aspect-[4/3] items-center justify-center bg-stone-100 p-5 text-center text-sm leading-6 text-stone-600 dark:bg-stone-900 dark:text-stone-300">{asset.kind === "text" ? asset.data.content : "暂无封面"}</div>
                     )}
+                    <Tag className="absolute right-2 top-2 m-0 rounded-md px-1.5 text-[11px] shadow-sm" color={assetCloudBadgeColor(cloudBadge)}>
+                        {assetCloudBadgeLabel(cloudBadge)}
+                    </Tag>
                 </button>
             }
         >
@@ -692,7 +751,12 @@ function AssetCard({
                                 {asset.source || "未标注来源"}
                             </Typography.Text>
                         </div>
-                        <Tag className="m-0 shrink-0 text-[11px]">{asset.kind === "image" ? "图片" : asset.kind === "video" ? "视频" : "文本"}</Tag>
+                        <div className="flex shrink-0 flex-col items-end gap-1">
+                            <Tag className="m-0 text-[11px]">{asset.kind === "image" ? "图片" : asset.kind === "video" ? "视频" : "文本"}</Tag>
+                            <Tag className="m-0 text-[11px]" color={assetCloudBadgeColor(cloudBadge)}>
+                                {assetCloudBadgeLabel(cloudBadge)}
+                            </Tag>
+                        </div>
                     </div>
                     <Typography.Paragraph type="secondary" ellipsis={{ rows: 3 }} className="!mb-0 !mt-2 !text-xs !leading-5">
                         {summary}
@@ -754,6 +818,12 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                     ) : (
                         <div className="rounded-lg border border-stone-200 bg-stone-50 p-5 text-sm leading-6 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">{asset.kind === "text" ? asset.data.content : "暂无封面"}</div>
                     )}
+                    <div className="flex flex-wrap gap-2">
+                        <Tag className="m-0">{asset.kind === "image" ? "图片" : asset.kind === "video" ? "视频" : "文本"}</Tag>
+                        <Tag className="m-0" color={assetCloudBadgeColor(getAssetCloudBadge(asset))}>
+                            {assetCloudBadgeLabel(getAssetCloudBadge(asset))}
+                        </Tag>
+                    </div>
                     <div>
                         <Typography.Title level={4} className="!mb-2">
                             {asset.title}
