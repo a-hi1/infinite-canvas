@@ -4,7 +4,8 @@ import { Button, Segmented } from "antd";
 
 import { ModelPicker } from "@/components/model-picker";
 import { AGNES_VIDEO_SIZE, agnesVideoModeHint, agnesVideoTextOnlyError, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
-import { defaultConfig, modelMatchesCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { mergeCanvasNodeAiConfig, resolveCanvasModeModel } from "@/lib/canvas/canvas-node-ai-config";
+import { useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { CreditSymbol, requestCreditCost } from "@/constant/credits";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -28,7 +29,7 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const mode = node.metadata?.generationMode || "image";
-    const config = buildNodeConfig(globalConfig, node, mode);
+    const config = mergeCanvasNodeAiConfig(globalConfig, node, mode);
     const count = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const credits = requestCreditCost({ channelMode: config.channelMode, model: config.model, count: mode === "image" ? count : 1 });
     const chipStyle = { background: theme.node.fill, borderColor: theme.node.stroke, color: theme.node.text };
@@ -50,7 +51,7 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                             const nextMode = value as CanvasGenerationMode;
                             onConfigChange(node.id, {
                                 generationMode: nextMode,
-                                model: resolveModeModel(globalConfig, node.metadata?.model, nextMode),
+                                model: resolveCanvasModeModel(globalConfig, node.metadata?.model, nextMode),
                             });
                         }}
                         options={[
@@ -160,34 +161,6 @@ function InputChip({ label, value, style }: { label: string; value: string; styl
             <span className="font-medium">{value}</span>
         </div>
     );
-}
-
-function resolveModeModel(globalConfig: AiConfig, currentModel: string | undefined, mode: CanvasGenerationMode) {
-    const defaultModel = mode === "image" ? globalConfig.imageModel : mode === "video" ? globalConfig.videoModel : mode === "audio" ? globalConfig.audioModel : globalConfig.textModel;
-    const fallbackModel = mode === "image" ? defaultConfig.imageModel : mode === "video" ? defaultConfig.videoModel : mode === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
-    if (currentModel && modelMatchesCapability(currentModel, mode)) return currentModel;
-    if (defaultModel && modelMatchesCapability(defaultModel, mode)) return defaultModel;
-    return fallbackModel || defaultModel || currentModel || globalConfig.model || defaultConfig.model;
-}
-
-function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: CanvasGenerationMode): AiConfig {
-    return {
-        ...globalConfig,
-        model: resolveModeModel(globalConfig, node.metadata?.model, mode),
-        quality: node.metadata?.quality || globalConfig.quality || defaultConfig.quality,
-        size: node.metadata?.size || globalConfig.size || defaultConfig.size,
-        // Prefer explicit node value (including "") so turning transparent off is not refilled by global config.
-        background: node.metadata?.background !== undefined ? node.metadata.background : globalConfig.background || defaultConfig.background || "",
-        videoSeconds: node.metadata?.seconds || globalConfig.videoSeconds || defaultConfig.videoSeconds,
-        vquality: node.metadata?.vquality || globalConfig.vquality || defaultConfig.vquality,
-        videoGenerateAudio: node.metadata?.generateAudio || globalConfig.videoGenerateAudio || defaultConfig.videoGenerateAudio,
-        videoWatermark: node.metadata?.watermark || globalConfig.videoWatermark || defaultConfig.videoWatermark,
-        audioVoice: node.metadata?.audioVoice || globalConfig.audioVoice || defaultConfig.audioVoice,
-        audioFormat: node.metadata?.audioFormat || globalConfig.audioFormat || defaultConfig.audioFormat,
-        audioSpeed: node.metadata?.audioSpeed || globalConfig.audioSpeed || defaultConfig.audioSpeed,
-        audioInstructions: node.metadata?.audioInstructions || globalConfig.audioInstructions || defaultConfig.audioInstructions,
-        count: String(node.metadata?.count || (mode === "image" ? globalConfig.canvasImageCount || globalConfig.count : globalConfig.count) || defaultConfig.count),
-    };
 }
 
 function videoModelPatch(config: AiConfig, model: string, mode: CanvasGenerationMode): Partial<CanvasNodeMetadata> {

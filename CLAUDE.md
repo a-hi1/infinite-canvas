@@ -34,7 +34,7 @@
 - AI API 请求：`web/src/services/api/`。
 - 本地图片/文件存储：`web/src/services/image-storage.ts`、`web/src/services/file-storage.ts`。
 
-主应用默认仍可由浏览器前端直接请求用户配置的 AI Base URL。AI API Key、Base URL、画布项目、素材和生成记录默认保存在浏览器本地。
+主应用默认仍可由浏览器前端直接请求用户配置的 AI Base URL。AI API Key、Base URL 默认保存在浏览器本地。画布项目、素材和生成记录默认本地优先；登录后可选云同步（云失败不丢本地）。
 
 可选云端模式（`api` 服务）：用户注册登录后，图片/视频工作台在**本地生成成功之后**异步把结果上传到服务器（`POST /api/jobs/image|video`），文件按用户隔离存储，经 `GET /api/files/:id` 鉴权访问。工作台历史侧栏支持「本机 / 云端」切换查看云端列表（预览/下载/删除）。本机记录带 `cloudSync` 状态（pending/synced/failed/skipped），失败可在本机列表重试上云，且不得把本地生成成功改成失败。上云优先本地 blob/`storageKey`；若结果只是 `imgen.x.ai`/`vidgen.x.ai` 等远程 URL（浏览器 CORS 无法 fetch），走 `POST /api/jobs/{type}/from-url` 由服务端白名单拉取后落盘。上传幂等：同一用户 + 同一 `client_local_id` 重复提交返回已有任务（`deduped: true`），为后续计费防双扣预留。未登录时行为与原先一致；云 API 不可用时不得阻断本地功能。本地开发时 Vite 将 `/api` 与 `/ai-proxy` 默认代理到 `http://127.0.0.1:3011`（需先起  
 `docker compose -f docker-compose.local.yml -f docker-compose.dev-host.yml up -d`）。  

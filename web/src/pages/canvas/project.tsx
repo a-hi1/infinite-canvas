@@ -8,17 +8,18 @@ import { requestEdit, requestGeneration, requestImageQuestion } from "@/services
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { DOCS_URL } from "@/constant/env";
-import { defaultConfig, modelMatchesCapability, type AiConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { defaultConfig, type AiConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { resolveImageUrl, uploadImage, type UploadedImage } from "@/services/image-storage";
 import { resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
-import { AGNES_VIDEO_SIZE, agnesVideoRequestError, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
+import { agnesVideoRequestError, isAgnesVideoConfig } from "@/lib/agnes-video";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { mergeCanvasNodeAiConfig } from "@/lib/canvas/canvas-node-ai-config";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { App, Button, Dropdown, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
@@ -3384,40 +3385,8 @@ function getInputSummary(inputs: NodeGenerationInput[]) {
     };
 }
 
-function resolveGenerationModel(config: AiConfig, currentModel: string | undefined, mode: CanvasNodeGenerationMode) {
-    const defaultModel = mode === "image" ? config.imageModel : mode === "video" ? config.videoModel : mode === "audio" ? config.audioModel : config.textModel;
-    const fallbackModel = mode === "image" ? defaultConfig.imageModel : mode === "video" ? defaultConfig.videoModel : mode === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
-    if (currentModel && modelMatchesCapability(currentModel, mode)) return currentModel;
-    if (defaultModel && modelMatchesCapability(defaultModel, mode)) return defaultModel;
-    return fallbackModel || defaultModel || currentModel || config.model || defaultConfig.model;
-}
-
 function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | undefined, mode: CanvasNodeGenerationMode): AiConfig {
-    const merged = {
-        ...config,
-        model: resolveGenerationModel(config, node?.metadata?.model, mode),
-        quality: node?.metadata?.quality || config.quality || defaultConfig.quality,
-        size: node?.metadata?.size || config.size || defaultConfig.size,
-        // Prefer explicit node value (including "") so turning transparent off is not refilled by global config.
-        background: node?.metadata?.background !== undefined ? node.metadata.background : config.background || defaultConfig.background || "",
-        videoSeconds: node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds,
-        vquality: node?.metadata?.vquality || config.vquality || defaultConfig.vquality,
-        videoGenerateAudio: node?.metadata?.generateAudio || config.videoGenerateAudio || defaultConfig.videoGenerateAudio,
-        videoWatermark: node?.metadata?.watermark || config.videoWatermark || defaultConfig.videoWatermark,
-        audioVoice: node?.metadata?.audioVoice || config.audioVoice || defaultConfig.audioVoice,
-        audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,
-        audioSpeed: node?.metadata?.audioSpeed || config.audioSpeed || defaultConfig.audioSpeed,
-        audioInstructions: node?.metadata?.audioInstructions || config.audioInstructions || defaultConfig.audioInstructions,
-        count: String(node?.metadata?.count || (mode === "image" ? config.canvasImageCount || config.count : config.count) || defaultConfig.count),
-    };
-    if (mode !== "video" || !isAgnesVideoConfig(merged)) return merged;
-    return {
-        ...merged,
-        size: AGNES_VIDEO_SIZE,
-        videoSeconds: String(normalizeAgnesDuration(merged.videoSeconds)),
-        videoGenerateAudio: "false",
-        videoWatermark: "false",
-    };
+    return mergeCanvasNodeAiConfig(config, node, mode, { applyAgnesVideoDefaults: true });
 }
 
 function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
