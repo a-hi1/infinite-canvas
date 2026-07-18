@@ -252,7 +252,8 @@ export const useConfigStore = create<ConfigStore>()(
     ),
 );
 
-const MODEL_SCRIPT_STORE_MAX_CHARS = 80_000;
+/** Shared soft cap for local model-call scripts (store + runtime + editor). */
+export const MODEL_SCRIPT_MAX_CHARS = 80_000;
 
 function normalizeModelScripts(value: unknown): Record<string, string> {
     if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -262,7 +263,7 @@ function normalizeModelScripts(value: unknown): Record<string, string> {
         const text = typeof script === "string" ? script.trim() : "";
         if (!modelKey || !text) continue;
         // Persist only bounded scripts; oversized values are dropped on load to protect local storage.
-        if (text.length > MODEL_SCRIPT_STORE_MAX_CHARS) continue;
+        if (text.length > MODEL_SCRIPT_MAX_CHARS) continue;
         next[modelKey] = text;
     }
     return next;
@@ -305,8 +306,8 @@ export function setModelScript(config: AiConfig, modelValue: string, script: str
     const nextScripts = { ...(config.modelScripts || {}) };
     const text = script.trim();
     if (text) {
-        if (text.length > MODEL_SCRIPT_STORE_MAX_CHARS) {
-            throw new Error(`模型调用脚本过长（最多 ${MODEL_SCRIPT_STORE_MAX_CHARS} 字符）`);
+        if (text.length > MODEL_SCRIPT_MAX_CHARS) {
+            throw new Error(`模型调用脚本过长（最多 ${MODEL_SCRIPT_MAX_CHARS} 字符）`);
         }
         nextScripts[key] = text;
         // Drop legacy bare duplicate when upgrading to channel-qualified key.
@@ -320,30 +321,36 @@ export function setModelScript(config: AiConfig, modelValue: string, script: str
     return { ...config, modelScripts: nextScripts };
 }
 
-/** Known model option keys currently present in channels / capability lists. */
+/** Exact channel-qualified keys and bare model names still present in config. */
 export function knownModelScriptKeys(config: AiConfig) {
-    const keys = new Set<string>();
+    const exact = new Set<string>();
+    const bare = new Set<string>();
     for (const channel of config.channels || []) {
         for (const model of channel.models || []) {
             const name = model.trim();
             if (!name) continue;
-            keys.add(encodeChannelModel(channel.id, name));
-            keys.add(name);
+            exact.add(encodeChannelModel(channel.id, name));
+            bare.add(name);
         }
     }
     for (const value of [...(config.models || []), config.model, config.imageModel, config.videoModel, config.textModel, config.audioModel, ...(config.imageModels || []), ...(config.videoModels || []), ...(config.textModels || []), ...(config.audioModels || [])]) {
         const key = (value || "").trim();
         if (!key) continue;
-        keys.add(key);
-        keys.add(modelOptionName(key));
+        exact.add(key);
+        bare.add(modelOptionName(key));
+        const decoded = decodeChannelModel(key);
+        if (decoded) exact.add(encodeChannelModel(decoded.channelId, decoded.model));
     }
-    return keys;
+    return { exact, bare };
 }
 
-/** Remove scripts whose model/channel no longer exists (keeps local config tidy). */
+/**
+ * Remove scripts whose model/channel no longer exists.
+ * Channel-qualified keys (`A::gpt`) are dropped when channel A is gone even if bare `gpt` still exists on channel B.
+ */
 export function pruneModelScripts(config: AiConfig): AiConfig {
     const scripts = config.modelScripts || {};
-    const known = knownModelScriptKeys(config);
+    const { exact, bare } = knownModelScriptKeys(config);
     let changed = false;
     const next: Record<string, string> = {};
     for (const [key, script] of Object.entries(scripts)) {
@@ -352,11 +359,9 @@ export function pruneModelScripts(config: AiConfig): AiConfig {
             changed = true;
             continue;
         }
-        if (known.has(key) || known.has(modelOptionName(key))) {
-            next[key] = text;
-        } else {
-            changed = true;
-        }
+        const keep = isChannelModelValue(key) ? exact.has(key) : bare.has(key) || exact.has(key);
+        if (keep) next[key] = text;
+        else changed = true;
     }
     return changed ? { ...config, modelScripts: next } : config;
 }

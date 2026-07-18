@@ -445,15 +445,7 @@ export function AppConfigModal() {
                                                                 size="small"
                                                                 icon={<Code2 className="size-3.5" />}
                                                                 onClick={() => {
-                                                                    const capability =
-                                                                        modelGroups.find((group) => config[group.modelKey] === item.key || (config[group.modelsKey] || []).includes(item.key))?.capability ||
-                                                                        (modelOptionName(item.key).match(/video|sora|veo|seedance|agnes|kling|wan|hailuo/i)
-                                                                            ? "video"
-                                                                            : modelOptionName(item.key).match(/tts|audio|speech|voice|music|sound/i)
-                                                                              ? "audio"
-                                                                              : modelOptionName(item.key).match(/image|dall|seedream|flux|imagen|sdxl|gpt-image/i)
-                                                                                ? "image"
-                                                                                : "text");
+                                                                    const capability = resolveScriptEditorCapability(config, item.key);
                                                                     setScriptTargetByCapability((current) => ({ ...current, [capability]: item.key }));
                                                                     setScriptEditor({ capability, modelValue: item.key });
                                                                 }}
@@ -581,6 +573,22 @@ export function AppConfigModal() {
             />
         </Modal>
     );
+}
+
+/** Prefer capability lists / defaults over name regex when opening a configured script. */
+function resolveScriptEditorCapability(config: AiConfig, modelKey: string): ModelCapability {
+    const exact = modelGroups.find((group) => config[group.modelKey] === modelKey || (config[group.modelsKey] || []).includes(modelKey));
+    if (exact) return exact.capability;
+    const name = modelOptionName(modelKey);
+    const byName = modelGroups.find((group) => {
+        if (modelOptionName(config[group.modelKey] || "") === name) return true;
+        return (config[group.modelsKey] || []).some((value) => modelOptionName(value) === name);
+    });
+    if (byName) return byName.capability;
+    if (name.match(/video|sora|veo|seedance|agnes|kling|wan|hailuo/i)) return "video";
+    if (name.match(/tts|audio|speech|voice|music|sound/i)) return "audio";
+    if (name.match(/image|dall|seedream|flux|imagen|sdxl|gpt-image/i)) return "image";
+    return "text";
 }
 
 function withChannels(config: AiConfig, channels: ModelChannel[]): AiConfig {

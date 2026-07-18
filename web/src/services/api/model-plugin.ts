@@ -1,11 +1,13 @@
 import axios, { type AxiosRequestConfig } from "axios";
 
-import { buildApiUrl, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { buildApiUrl, MODEL_SCRIPT_MAX_CHARS, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 
 type RequestOptions = { signal?: AbortSignal };
 
+/** Re-export store cap so editor/runtime share one constant. */
+export { MODEL_SCRIPT_MAX_CHARS };
+
 /** Soft limits for local-only user scripts — not a sandbox, just blast-radius control. */
-export const MODEL_SCRIPT_MAX_CHARS = 80_000;
 const MODEL_SCRIPT_RUN_TIMEOUT_MS = 10 * 60 * 1000;
 const MODEL_SCRIPT_MAX_SLEEP_MS = 30_000;
 const MODEL_SCRIPT_MIN_POLL_INTERVAL_MS = 500;
