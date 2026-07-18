@@ -77,22 +77,31 @@ export default function CanvasPage() {
         setCloudSyncing(true);
         void pullAndMergeCanvasProjects()
             .then((result) => {
-                if (result.ok && result.pulled > 0) message.success(`已从云端合并 ${result.pulled} 个画布`);
+                if (result.ok && (result.pulled > 0 || (result.mediaDownloaded || 0) > 0)) {
+                    const parts = [];
+                    if (result.pulled > 0) parts.push(`${result.pulled} 个画布`);
+                    if ((result.mediaDownloaded || 0) > 0) parts.push(`${result.mediaDownloaded} 个媒体`);
+                    message.success(`已从云端合并 ${parts.join("、")}`);
+                }
             })
             .finally(() => setCloudSyncing(false));
     }, [cloudUser, hydrated, message]);
 
     const syncFromCloud = async () => {
         if (!cloudUser) {
-            message.info("登录后可从云端拉取画布项目（本地草稿不会丢）");
+            message.info("登录后可从云端拉取画布项目与媒体（本地草稿不会丢）");
             return;
         }
         setCloudSyncing(true);
         try {
             const result = await pullAndMergeCanvasProjects();
             if (!result.ok) message.warning("云端暂不可用，已保留本机画布");
-            else if (result.pulled > 0) message.success(`已合并 ${result.pulled} 个云端画布`);
-            else message.success("已与云端对齐（无更新）");
+            else if (result.pulled > 0 || (result.mediaDownloaded || 0) > 0) {
+                const parts = [];
+                if (result.pulled > 0) parts.push(`${result.pulled} 个画布`);
+                if ((result.mediaDownloaded || 0) > 0) parts.push(`${result.mediaDownloaded} 个媒体`);
+                message.success(`已合并 ${parts.join("、")}`);
+            } else message.success("已与云端对齐（无更新）");
         } finally {
             setCloudSyncing(false);
         }
@@ -107,7 +116,7 @@ export default function CanvasPage() {
                     <div>
                         <p className="text-xs text-stone-500">画布库</p>
                         <h1 className="mt-3 text-3xl font-semibold">无限画布</h1>
-                        <p className="mt-2 text-xs text-stone-500">默认保存在本机；登录后会异步同步项目 JSON 到云端，云失败不丢本地草稿。</p>
+                        <p className="mt-2 text-xs text-stone-500">默认保存在本机；登录后会异步同步项目 JSON 与节点媒体（storageKey），云失败不丢本地草稿。</p>
                     </div>
                     <div className="flex items-center gap-2">
                         {selectedIds.length ? (

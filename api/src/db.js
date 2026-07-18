@@ -153,6 +153,8 @@ export function createDb(dataDir) {
                 kind: record.kind,
                 storage_backend: FILE_STORAGE_BACKEND.LOCAL,
                 storage_key: record.storageKey,
+                // Optional client-side key (e.g. image:xxx) for canvas media dedup across devices.
+                client_key: String(record.clientKey || "").trim(),
                 mime: record.mime,
                 bytes: record.bytes || 0,
                 width: record.width || 0,
@@ -168,6 +170,12 @@ export function createDb(dataDir) {
 
         findFileForUser(fileId, userId) {
             return state.files.find((f) => f.id === fileId && f.user_id === userId && !f.deleted_at) || null;
+        },
+
+        findFileByClientKey(userId, clientKey) {
+            const key = String(clientKey || "").trim();
+            if (!key) return null;
+            return state.files.find((f) => f.user_id === userId && !f.deleted_at && String(f.client_key || "").trim() === key) || null;
         },
 
         softDeleteFile(fileId, userId) {

@@ -203,6 +203,10 @@ const server = http.createServer(async (req, res) => {
         if (req.method === "PUT" && route.startsWith("/projects/")) return await handlePutProject(req, res, route.slice("/projects/".length), url);
         if (req.method === "DELETE" && route.startsWith("/projects/")) return await handleDeleteProject(req, res, route.slice("/projects/".length));
 
+        // Canvas media blobs keyed by client storageKey (image:/video:/audio:...).
+        if (req.method === "POST" && route === "/blobs") return await handleUploadCanvasBlob(req, res);
+        if (req.method === "GET" && route.startsWith("/blobs/by-key/")) return await handleGetCanvasBlobByKey(req, res, decodeURIComponent(route.slice("/blobs/by-key/".length)));
+
         // Platform generation (opt-in server-side; charges credits only on success).
         if (req.method === "POST" && route === "/generate/image") return await handlePlatformGenerateImage(req, res);
         if (req.method === "POST" && route === "/generate/video") return await handlePlatformGenerateVideo(req, res);
@@ -298,6 +302,114 @@ function handleDeleteProject(req, res, projectIdRaw) {
     if (!deleted) return fail(res, 404, "项目不存在", CLOUD_ERROR_REASON.NOT_FOUND);
     db.flush();
     json(res, 200, { ok: true, id: projectId }, "已删除云端画布");
+}
+
+const CLIENT_STORAGE_KEY_RE = /^(image|video|audio|file|video-reference|audio-reference):[A-Za-z0-9_-]+$/;
+
+/**
+ * POST /api/blobs  multipart: client_key + file
+ * Idempotent by user + client_key (local storageKey). Used by canvas media sync.
+ */
+async function handleUploadCanvasBlob(req, res) {
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const ip = clientIp(req);
+    if (!rateLimit(uploadHits, `${auth.user.id}:blob:${ip}`, 120, 60 * 60 * 1000)) {
+        return fail(res, 429, "上传过于频繁", CLOUD_ERROR_REASON.UPLOAD_RATE_LIMITED);
+    }
+    const contentType = String(req.headers["content-type"] || "");
+    if (!contentType.includes("multipart/form-data")) return fail(res, 400, "请使用 multipart 上传", CLOUD_ERROR_REASON.BAD_REQUEST);
+
+    const raw = await readBody(req, maxBodyBytes);
+    const { fields, file } = parseMultipart(raw, contentType);
+    if (!file?.data?.length) return fail(res, 400, "缺少文件", CLOUD_ERROR_REASON.BAD_REQUEST);
+
+    const clientKey = String(fields.client_key || fields.clientKey || fields.storage_key || "").trim();
+    if (!CLIENT_STORAGE_KEY_RE.test(clientKey)) {
+        return fail(res, 400, "client_key 无效（期望 image:/video:/audio: 等本地 storageKey）", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+
+    const existing = filesRepo.findByClientKey(auth.user.id, clientKey);
+    if (existing) {
+        try {
+            const absExisting = safeJoin(uploadsDir, ...String(existing.storage_key).split("/"));
+            if (fs.existsSync(absExisting)) {
+                return json(res, 200, publicBlobFile(existing, { deduped: true }), "已存在相同媒体，未重复上传");
+            }
+        } catch {
+            // rewrite below
+        }
+    }
+
+    const sniffed = sniffMime(file.data) || file.mime || "application/octet-stream";
+    const isImage = sniffed.startsWith("image/") || clientKey.startsWith("image:");
+    const isVideo = sniffed.startsWith("video/") || clientKey.startsWith("video");
+    const maxBytes = isImage ? maxImageBytes : isVideo ? maxVideoBytes : maxBodyBytes;
+    if (file.data.length > maxBytes) return fail(res, 413, "文件过大", CLOUD_ERROR_REASON.PAYLOAD_TOO_LARGE);
+    if (filesRepo.countUserBytes(auth.user.id) + file.data.length > maxUserBytes) {
+        return fail(res, 413, "云端存储空间不足", CLOUD_ERROR_REASON.STORAGE_QUOTA_EXCEEDED);
+    }
+
+    const kind = isImage ? "image" : isVideo ? "video" : "file";
+    const fileRow = writeUserBlobFile({
+        userId: auth.user.id,
+        clientKey,
+        kind,
+        sniffed,
+        bytes: file.data,
+        filename: file.filename,
+    });
+    if (existing && existing.id !== fileRow.id) {
+        filesRepo.softDeleteForUser(existing.id, auth.user.id);
+    }
+    db.flush();
+    json(res, 200, publicBlobFile(fileRow, { deduped: false }), "已上传画布媒体");
+}
+
+function writeUserBlobFile({ userId, clientKey, kind, sniffed, bytes, filename }) {
+    const fileId = randomId();
+    const ext = extForMime(sniffed) || path.extname(filename || "") || (kind === "image" ? ".png" : kind === "video" ? ".mp4" : ".bin");
+    const relKey = path.posix.join(userId, "blobs", `${fileId}${ext}`);
+    const abs = safeJoin(uploadsDir, ...relKey.split("/"));
+    ensureDir(path.dirname(abs));
+    fs.writeFileSync(abs, bytes);
+    return filesRepo.create({
+        userId,
+        kind,
+        storageKey: relKey,
+        clientKey,
+        mime: sniffed,
+        bytes: bytes.length,
+        width: 0,
+        height: 0,
+        durationMs: 0,
+    });
+}
+
+function publicBlobFile(file, extra = {}) {
+    if (!file) return null;
+    return {
+        id: file.id,
+        client_key: file.client_key || "",
+        kind: file.kind,
+        mime: file.mime,
+        bytes: file.bytes,
+        url: `/api/files/${file.id}`,
+        ...extra,
+    };
+}
+
+async function handleGetCanvasBlobByKey(req, res, clientKeyRaw) {
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const clientKey = String(clientKeyRaw || "").split(/[/?#]/)[0];
+    if (!CLIENT_STORAGE_KEY_RE.test(clientKey)) {
+        return fail(res, 400, "client_key 无效", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    const file = filesRepo.findByClientKey(auth.user.id, clientKey);
+    if (!file) return fail(res, 404, "媒体不存在", CLOUD_ERROR_REASON.NOT_FOUND);
+    // Reuse binary streaming path.
+    return handleGetFile(req, res, file.id);
 }
 
 /** First value of a possibly comma-stacked proxy header. */

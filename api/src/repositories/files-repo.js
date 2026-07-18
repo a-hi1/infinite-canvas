@@ -10,6 +10,9 @@ export function createFilesRepo(db) {
         findForUser(fileId, userId) {
             return db.findFileForUser(fileId, userId);
         },
+        findByClientKey(userId, clientKey) {
+            return db.findFileByClientKey(userId, clientKey);
+        },
         softDeleteForUser(fileId, userId) {
             return db.softDeleteFile(fileId, userId);
         },

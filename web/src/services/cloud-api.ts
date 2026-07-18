@@ -169,6 +169,36 @@ export function deleteCloudProject(projectId: string) {
     return request<{ ok: boolean; id: string }>(`/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
 }
 
+export type CloudBlobFile = {
+    id: string;
+    client_key: string;
+    kind: string;
+    mime: string;
+    bytes: number;
+    url: string;
+    deduped?: boolean;
+};
+
+/** Upload local canvas media blob keyed by client storageKey (image:/video:/...). */
+export async function uploadCloudBlob(input: { clientKey: string; blob: Blob; filename?: string }) {
+    const form = new FormData();
+    form.append("client_key", input.clientKey);
+    form.append("file", input.blob, input.filename || "blob.bin");
+    return request<CloudBlobFile>("/blobs", { method: "POST", body: form });
+}
+
+/** Download canvas media by client storageKey into a Blob (auth cookie). */
+export async function downloadCloudBlobByKey(clientKey: string) {
+    const response = await fetch(`/api/blobs/by-key/${encodeURIComponent(clientKey)}`, { credentials: "include" });
+    if (response.status === 401) {
+        notifyUnauthorized();
+        throw new CloudApiError("请先登录", 401, "auth_required");
+    }
+    if (response.status === 404) throw new CloudApiError("媒体不存在", 404, "not_found");
+    if (!response.ok) throw new CloudApiError(`下载媒体失败（${response.status}）`, response.status);
+    return response.blob();
+}
+
 export function getCloudMe() {
     return request<{
         user: CloudUser | null;

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
++ [新增] P2.0-B：画布节点媒体 blob 云同步（按 storageKey 幂等上传/下载，配合项目 JSON）。
 + [新增] P2.0-A：画布项目 JSON 云同步（本地优先、登录后异步推送/拉取合并；云失败不丢草稿）。
 + [新增] 上游跟进矩阵文档与双轨冒烟脚本（`smoke-dual-track`），固化后续切片开发流程。
 + [新增] 图像设置支持「透明背景」开关（BYOK 路径转发 `background=transparent`，依赖上游支持）。

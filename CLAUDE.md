@@ -45,7 +45,7 @@
 
 **当前主线（收费后置）：** 本地 BYOK 稳定 + 云历史双轨可回归 + **画布项目 JSON 云同步（P2.0-A）** + 上游能力按矩阵切片。平台扣积分/支付/画布扣积分**后置**（应先有上云再谈画布计费）。
 
-**P2.0-A：** `GET/PUT/DELETE /api/projects`；文档落在 `data/api/projects/{userId}/{id}.json`；前端本地 IndexedDB 为主，登录后防抖推送与列表拉取合并；**不同步**节点媒体 blob（仍本机 storageKey）。
+**P2.0-A / P2.0-B：** `GET/PUT/DELETE /api/projects` + `POST /api/blobs` / `GET /api/blobs/by-key/:clientKey`。项目 JSON 与节点 `storageKey` 媒体本地优先同步；推送先媒体后 JSON；拉取补齐缺失 blob。云失败不丢本地。素材库全量同步与 Postgres 仍未做。
 
 **P0.5c：** 清单 `docs/content/docs/progress/p05c-acceptance.mdx`；自动 `scripts/check-cloud-stack.*` + `scripts/smoke-dual-track.*`；仍须人工 UI 上云与服务器 B2。本机上云占本机 `./data/api`，服务器占服务器 `./data/api`。
 
