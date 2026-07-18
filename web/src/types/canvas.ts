@@ -15,6 +15,8 @@ export enum CanvasNodeType {
     Config = "config",
     Video = "video",
     Audio = "audio",
+    /** Visual container; children reference it via metadata.groupId. Not connectable. */
+    Group = "group",
 }
 
 export type CanvasNodeStatus = "idle" | "success" | "loading" | "error";
@@ -57,6 +59,8 @@ export type CanvasNodeMetadata = {
     mimeType?: string;
     bytes?: number;
     durationMs?: number;
+    /** Parent group node id when this node is nested in a group. */
+    groupId?: string;
 };
 
 export type CanvasNodeData = {

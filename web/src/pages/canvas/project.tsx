@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { BookOpen, Bot, Home, ImageIcon, Images, List, Menu, Music2, Plus, Redo2, Settings2, Trash2, Undo2, Upload, Video } from "lucide-react";
+import { BookOpen, Bot, Group, Home, ImageIcon, Images, List, Menu, Music2, Plus, Redo2, Settings2, Trash2, Undo2, Upload, Video } from "lucide-react";
 import { saveAs } from "file-saver";
 
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
@@ -229,6 +229,7 @@ function NodeCreateMenu({ position, onCreate, onClose }: { position: Position; o
                 <ConnectionCreateOption theme={theme} icon={<Video className="size-5" />} title="视频" onClick={() => onCreate(CanvasNodeType.Video)} />
                 <ConnectionCreateOption theme={theme} icon={<Music2 className="size-5" />} title="音频" onClick={() => onCreate(CanvasNodeType.Audio)} />
                 <ConnectionCreateOption theme={theme} icon={<Settings2 className="size-5" />} title="生成配置" description="模型、尺寸、数量和输入顺序" onClick={() => onCreate(CanvasNodeType.Config)} />
+                <ConnectionCreateOption theme={theme} icon={<Group className="size-5" />} title="组" description="拖入节点进行分组整理" onClick={() => onCreate(CanvasNodeType.Group)} />
             </div>
         </div>
     );
@@ -348,6 +349,7 @@ function InfiniteCanvasPage() {
     const [collapsingBatchIds, setCollapsingBatchIds] = useState<Set<string>>(new Set());
     const [openingBatchIds, setOpeningBatchIds] = useState<Set<string>>(new Set());
     const [isNodeDragging, setIsNodeDragging] = useState(false);
+    const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
 
     const nodesRef = useRef(nodes);
     const connectionsRef = useRef(connections);
@@ -749,6 +751,14 @@ function InfiniteCanvasPage() {
         });
         return map;
     }, [nodes]);
+    const groupChildCountById = useMemo(() => {
+        const map = new Map<string, number>();
+        nodes.forEach((node) => {
+            const groupId = node.metadata?.groupId;
+            if (groupId) map.set(groupId, (map.get(groupId) || 0) + 1);
+        });
+        return map;
+    }, [nodes]);
     const batchMotionById = useMemo(() => {
         const map = new Map<string, { x: number; y: number; index: number }>();
         nodes.forEach((node) => {
@@ -860,7 +870,7 @@ function InfiniteCanvasPage() {
             setNodes((prev) => [...prev, newNode]);
             setSelectedNodeIds(new Set([newNode.id]));
             setSelectedConnectionId(null);
-            if (type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio) setDialogNodeId(newNode.id);
+            if (type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group) setDialogNodeId(newNode.id);
         },
         [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter],
     );
@@ -875,6 +885,10 @@ function InfiniteCanvasPage() {
             setNodes((prev) => {
                 const next = prev.filter((node) => !allIds.has(node.id));
                 return next.map((node) => {
+                    const groupId = node.metadata?.groupId;
+                    if (groupId && allIds.has(groupId)) {
+                        return { ...node, metadata: { ...node.metadata, groupId: undefined } };
+                    }
                     const childIds = node.metadata?.batchChildIds?.filter((childId) => !allIds.has(childId));
                     if (!node.metadata?.isBatchRoot || childIds?.length === node.metadata.batchChildIds?.length) return node;
                     const primaryImageId = childIds?.includes(node.metadata.primaryImageId || "") ? node.metadata.primaryImageId : childIds?.[0];
@@ -958,7 +972,7 @@ function InfiniteCanvasPage() {
         setNodes((prev) => [...prev, next]);
         setSelectedNodeIds(new Set([id]));
         setSelectedConnectionId(null);
-        setDialogNodeId(id);
+        if (next.type !== CanvasNodeType.Group) setDialogNodeId(id);
     }, []);
 
     const copySelectedNodes = useCallback(() => {
@@ -1013,6 +1027,12 @@ function InfiniteCanvasPage() {
             };
         });
 
+        const pastedNodes = nextNodes.map((node) => {
+            const groupId = node.metadata?.groupId;
+            if (!groupId) return node;
+            return { ...node, metadata: { ...node.metadata, groupId: idMap.get(groupId) } };
+        });
+
         const nextConnections = clipboard.connections.flatMap((connection, index) => {
             const fromNodeId = idMap.get(connection.fromNodeId);
             const toNodeId = idMap.get(connection.toNodeId);
@@ -1027,12 +1047,12 @@ function InfiniteCanvasPage() {
             ];
         });
 
-        setNodes((prev) => [...prev, ...nextNodes]);
+        setNodes((prev) => [...prev, ...pastedNodes]);
         setConnections((prev) => [...prev, ...nextConnections]);
-        setSelectedNodeIds(new Set(nextNodes.map((node) => node.id)));
+        setSelectedNodeIds(new Set(pastedNodes.map((node) => node.id)));
         setSelectedConnectionId(null);
         setContextMenu(null);
-        setDialogNodeId(nextNodes[0]?.id || null);
+        setDialogNodeId(pastedNodes[0]?.type === CanvasNodeType.Group ? null : pastedNodes[0]?.id || null);
         return true;
     }, [getCanvasCenter]);
 
@@ -1163,7 +1183,13 @@ function InfiniteCanvasPage() {
         setSelectedNodeIds(nextSelected);
         const dragIds = new Set(nextSelected);
         currentNodes.forEach((node) => {
-            if (nextSelected.has(node.id)) node.metadata?.batchChildIds?.forEach((childId) => dragIds.add(childId));
+            if (!nextSelected.has(node.id)) return;
+            node.metadata?.batchChildIds?.forEach((childId) => dragIds.add(childId));
+            if (node.type === CanvasNodeType.Group) {
+                currentNodes.forEach((child) => {
+                    if (child.metadata?.groupId === node.id) dragIds.add(child.id);
+                });
+            }
         });
         dragRef.current = {
             isDraggingNode: true,
@@ -1194,14 +1220,23 @@ function InfiniteCanvasPage() {
         historyPausedRef.current = false;
         nodeDraggingRef.current = false;
         setIsNodeDragging(false);
+        setDropTargetGroupId(null);
         if (dragRef.current.hasMoved && clientX != null && clientY != null) {
-            setNodes((prev) =>
-                prev.map((node) => {
+            const movedIds = new Set(initialPositions.map((item) => item.id));
+            setNodes((prev) => {
+                const moved = prev.map((node) => {
                     const initial = initialPositions.find((item) => item.id === node.id);
-                    if (!initial) return node;
-                    return { ...node, position: { x: initial.x + dx, y: initial.y + dy } };
-                }),
-            );
+                    return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
+                });
+                const targetGroup = findGroupDropTarget(movedIds, moved);
+                if (targetGroup) return snapNodesIntoGroup(movedIds, moved, targetGroup);
+                return moved.map((node) => {
+                    if (!movedIds.has(node.id) || node.type === CanvasNodeType.Group) return node;
+                    const groupId = findContainingGroupId(node, moved);
+                    if (node.metadata?.groupId === groupId) return node;
+                    return { ...node, metadata: { ...node.metadata, groupId } };
+                });
+            });
         }
 
         dragRef.current.isDraggingNode = false;
@@ -1211,7 +1246,7 @@ function InfiniteCanvasPage() {
             const clickedNode = nodesRef.current.find((node) => node.id === clickedNodeId);
             if (clickedNode?.type === CanvasNodeType.Text) {
                 setDialogNodeId((current) => (current === clickedNodeId ? current : null));
-            } else {
+            } else if (clickedNode?.type !== CanvasNodeType.Group) {
                 setDialogNodeId(clickedNodeId);
             }
         }
@@ -1228,6 +1263,13 @@ function InfiniteCanvasPage() {
                 if (Math.abs(event.clientX - dragRef.current.startX) > 3 || Math.abs(event.clientY - dragRef.current.startY) > 3) {
                     dragRef.current.hasMoved = true;
                 }
+
+                const movedIds = new Set(initialPositions.map((item) => item.id));
+                const previewNodes = nodesRef.current.map((node) => {
+                    const initial = initialPositions.find((item) => item.id === node.id);
+                    return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
+                });
+                setDropTargetGroupId(findGroupDropTarget(movedIds, previewNodes)?.id || null);
 
                 if (rafRef.current) cancelAnimationFrame(rafRef.current);
                 rafRef.current = requestAnimationFrame(() => {
@@ -2664,6 +2706,8 @@ function InfiniteCanvasPage() {
                             editRequestNonce={editingNodeId === node.id ? editRequestNonce : 0}
                             showPanel={dialogNodeId === node.id && !selectionBox}
                             batchCount={batchChildCountById.get(node.id) || 0}
+                            groupChildCount={groupChildCountById.get(node.id) || 0}
+                            isGroupDropTarget={dropTargetGroupId === node.id}
                             batchExpanded={Boolean(node.metadata?.imageBatchExpanded)}
                             batchClosing={Boolean(node.metadata?.batchRootId && collapsingBatchIds.has(node.metadata.batchRootId))}
                             batchOpening={openingBatchIds.has(node.id)}
@@ -2802,6 +2846,7 @@ function InfiniteCanvasPage() {
                     onAddAudio={() => createNode(CanvasNodeType.Audio)}
                     onAddText={() => createNode(CanvasNodeType.Text)}
                     onAddConfig={() => createNode(CanvasNodeType.Config)}
+                    onAddGroup={() => createNode(CanvasNodeType.Group)}
                     onUndo={undoCanvas}
                     onRedo={redoCanvas}
                     onUpload={() => handleUploadRequest()}
@@ -3259,10 +3304,68 @@ function getConnectionTargetAnchor(node: CanvasNodeData, current: ConnectionHand
     };
 }
 
+function findGroupDropTarget(movedIds: Set<string>, nodes: CanvasNodeData[]) {
+    if (nodes.some((node) => movedIds.has(node.id) && node.type === CanvasNodeType.Group)) return null;
+    const movingNodes = nodes.filter((node) => movedIds.has(node.id) && node.type !== CanvasNodeType.Group);
+    if (!movingNodes.length) return null;
+    return (
+        [...nodes]
+            .reverse()
+            .find((group) => {
+                if (group.type !== CanvasNodeType.Group || movedIds.has(group.id)) return false;
+                return movingNodes.some((node) => {
+                    const centerX = node.position.x + node.width / 2;
+                    const centerY = node.position.y + node.height / 2;
+                    return centerX >= group.position.x && centerX <= group.position.x + group.width && centerY >= group.position.y && centerY <= group.position.y + group.height;
+                });
+            }) || null
+    );
+}
+
+function snapNodesIntoGroup(movedIds: Set<string>, nodes: CanvasNodeData[], group: CanvasNodeData) {
+    const movingNodes = nodes.filter((node) => movedIds.has(node.id) && node.type !== CanvasNodeType.Group);
+    if (!movingNodes.length) return nodes;
+    const pad = 24;
+    const bounds = nodeBounds(movingNodes);
+    const left = group.position.x + pad;
+    const top = group.position.y + pad;
+    const right = group.position.x + group.width - pad;
+    const bottom = group.position.y + group.height - pad;
+    const dx = bounds.right - bounds.left > right - left ? left - bounds.left : bounds.left < left ? left - bounds.left : bounds.right > right ? right - bounds.right : 0;
+    const dy = bounds.bottom - bounds.top > bottom - top ? top - bounds.top : bounds.top < top ? top - bounds.top : bounds.bottom > bottom ? bottom - bounds.bottom : 0;
+    return nodes.map((node) => {
+        if (!movedIds.has(node.id) || node.type === CanvasNodeType.Group) return node;
+        return { ...node, position: { x: node.position.x + dx, y: node.position.y + dy }, metadata: { ...node.metadata, groupId: group.id } };
+    });
+}
+
+function nodeBounds(nodes: CanvasNodeData[]) {
+    return nodes.reduce(
+        (acc, node) => ({
+            left: Math.min(acc.left, node.position.x),
+            top: Math.min(acc.top, node.position.y),
+            right: Math.max(acc.right, node.position.x + node.width),
+            bottom: Math.max(acc.bottom, node.position.y + node.height),
+        }),
+        { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity },
+    );
+}
+
+function findContainingGroupId(node: CanvasNodeData, nodes: CanvasNodeData[]) {
+    const centerX = node.position.x + node.width / 2;
+    const centerY = node.position.y + node.height / 2;
+    return (
+        [...nodes]
+            .reverse()
+            .find((group) => group.type === CanvasNodeType.Group && group.id !== node.id && centerX >= group.position.x && centerX <= group.position.x + group.width && centerY >= group.position.y && centerY <= group.position.y + group.height)?.id || undefined
+    );
+}
+
 function normalizeConnection(firstNodeId: string, secondNodeId: string, nodes: CanvasNodeData[], firstHandleType: "source" | "target") {
     const first = nodes.find((node) => node.id === firstNodeId);
     const second = nodes.find((node) => node.id === secondNodeId);
     if (!first || !second || first.id === second.id) return null;
+    if (first.type === CanvasNodeType.Group || second.type === CanvasNodeType.Group) return null;
     if (first.type === CanvasNodeType.Config && second.type === CanvasNodeType.Config) return null;
     if (second.type === CanvasNodeType.Config) return { fromNodeId: first.id, toNodeId: second.id };
     if (first.type === CanvasNodeType.Config && firstHandleType === "target") return { fromNodeId: second.id, toNodeId: first.id };
