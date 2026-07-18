@@ -88,11 +88,22 @@ sudo docker compose -f docker-compose.local.yml exec ai-proxy \
 - [ ] 仓库与日志无真实上游 Key / 本机代理密码
 - [ ] Canvas Agent 未对公网暴露
 
-## E. P0.5c 出门条件 → 才能开 P1/P2
+## E. 自动化已覆盖 vs 仍须人工
+
+| 类别 | 状态 | 说明 |
+| --- | --- | --- |
+| `check-cloud-stack.*` | 可重复自动 | compose 三服务、页面、`/api/health`、`/ai-proxy/health`、platform 默认关、env 代理卫生 |
+| `smoke-dual-track.*` | 可重复自动 | 停 `api` 后页面仍 200，`/api` 失败/502，再启回 health |
+| A 中 UI 双轨（登录上云、幂等点两次、跨用户、401 只清一次） | **仍须人工** | 依赖真实账号与浏览器 |
+| B2 服务器分册 | **仍须人工** | 目标机 `git pull` + compose + 备份 + HTTPS |
+| C vidgen 出网 | 半自动 | 脚本 WARN 即可；勿当登录 bug |
+| 平台扣积分 / 支付 | **后置** | 网关代码可在、默认关；不作为 P0.5c 出门条件 |
+
+## F. P0.5c 出门条件 → 才能扩大收费面 / P2
 
 同时满足：
 
-1. A 双轨门禁通过  
+1. A 双轨门禁通过（自动 smoke + 人工 UI 勾选项）  
 2. B2 服务器检查通过（若该环境要给他人用）  
 3. C 类限制已写进运维认知（本清单 / `cloud-api`）  
 4. 无未关闭的 P0 级正确性缺陷  
@@ -101,11 +112,11 @@ sudo docker compose -f docker-compose.local.yml exec ai-proxy \
 
 | 目标 | 下一期 |
 | --- | --- |
-| 控成本 / 藏平台 Key / 额度 | **P1**：先存储缝 → 账本 → 仅图片 `/api/generate/image`，默认 BYOK |
+| 本地体验 / 上游切片 | 组节点、模型脚本等（见 [上游跟进矩阵](/docs/progress/upstream-follow)） |
+| 控成本 / 藏平台 Key / 额度 | 再开 `API_PLATFORM_*` + **支付入账**（后置；默认 BYOK） |
 | 多设备创作 | **P2 MVP**：项目列表/打开/保存 JSON，先本地后异步推云 |
-| 都要 | 小并行：P1 只到图片网关+手工积分；P2 只到项目 JSON |
 
-**禁止：** 跳过本清单直接支付；一次合并完整视频计费 + 全量素材库；大重构画布/AI 客户端。
+**禁止：** 跳过本清单直接支付；一次合并完整视频计费 + 全量素材库；大重构画布/AI 客户端；整仓 merge 上游。
 
 ## 设计锚点（做下一步时仍要遵守）
 

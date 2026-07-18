@@ -1,0 +1,81 @@
+---
+title: 上游跟进矩阵
+description: basketikun 上游能力只读跟踪与切片移植优先级（禁止整仓 merge）
+---
+
+# 上游跟进矩阵
+
+本文档给后续开发/新会话用：**只读跟踪上游，按切片移植**。  
+**不是**版本号对齐清单；本 fork 主线仍是本地 BYOK + 可选云历史 + `ai-proxy`。
+
+## 对照基线（写文档时）
+
+| 项 | 值 |
+| --- | --- |
+| 自用 remote | `a-hi1` → `https://github.com/a-hi1/infinite-canvas.git` |
+| 上游 remote | `origin` → `basketikun/infinite-canvas`（只 fetch，默认不 push） |
+| 分叉点 | 约 `568f0f1`（2026-07-05） |
+| 本 fork tip（参考） | `main` / `a-hi1/main` |
+| 上游 tip（参考） | `origin/main` 约 `v0.9.0` 量级 |
+| 禁止 | 整仓 `merge`/`rebase` 上游；用上游 `docker-compose`/`nginx`/`Dockerfile` 覆盖本仓库端口与 `/api` `/ai-proxy` |
+
+核对命令：
+
+```bash
+git fetch origin --tags --prune
+git merge-base HEAD origin/main
+git rev-list --left-right --count HEAD...origin/main
+git log --oneline HEAD..origin/main | head
+```
+
+## 硬规则
+
+1. 推送：`git push a-hi1 main`（不要默认 `origin`）。
+2. 部署心脏锁定：`3001:3000`、dev-host `3011`、`nginx` 的 `/api/` `/ai-proxy/`、`$http_host` 保留端口。
+3. 一次一事：一个移植分支只带一个能力切片；合入前跑 `scripts/check-cloud-stack.*` + 双轨冒烟。
+4. 安全：远程插件/自定义脚本默认按「不可信代码」评估；平台扣积分与支付产品面后置。
+5. 文档：切片完成后更新本表「状态」列，并写 `pending-test.mdx`；勿只改代码不改矩阵。
+
+## 能力矩阵
+
+| 上游能力（约版本） | 对本 fork 价值 | 冲突/风险面 | 状态 | 建议时机 |
+| --- | --- | --- | --- | --- |
+| 透明背景生图（0.8.2） | 中 | 低：`image` 设置 + OpenAI 兼容请求字段 | **已移植**（BYOK） | 已完成 |
+| 组节点（0.7.x） | 中高 | 中：选择/拖拽/工具条/节点类型 | 候选 | 本地体验下一刀 |
+| 模型自定义 JS 调用脚本（0.8.x） | 高 | 中高：与 `services/api/*`、中转特判交叉 | 候选 | 中期；新渠道优先脚本 |
+| 画布插件系统 + SDK + registry（0.8/0.9） | 很高 | **很高**：节点注册/打包/远程脚本安全 | 观察 | 独立工程；先白名单策略 |
+| Agent 全站侧栏 / streamdown / site tools（0.7） | 中（视使用频率） | 中高：布局与 Agent 状态 | 低优先 | 仅高频 Codex 全站时 |
+| 0.9 画布面板调宽/资产卡/多选导出 | 中 | 高：与本 fork 画布改动冲突 | 观察 | 先 diff 再切片 |
+| 提示词源自定义脚本抓取（0.9） | 中 | 中：与本库提示词改造叠层 | 候选 | 确认不破坏现有库后再做 |
+| 上游极简 compose/nginx | 无 | **禁止覆盖** | 拒绝 | — |
+| GA/百度统计等 | 低 | 低 | 忽略 | 自用不需要 |
+
+## 推荐移植顺序（减少返工）
+
+```text
+1. 本地 BYOK 体验小切片（透明背景 ✅ → 组节点 → 上游单文件 bugfix）
+2. 中转兼容长期解（模型调用脚本；旧特判只维护不扩张）
+3. 插件系统（独立分支 + 安全白名单；勿与计费/云同步并行大改）
+4. 收费产品（开 API_PLATFORM_* + 支付入账）— 明确后置
+5. P2 画布/素材云同步 + Postgres — 与插件大改错开
+```
+
+## 切片作业清单（每次移植照抄）
+
+1. `git fetch origin`；记下上游 commit/tag 与涉及路径。  
+2. 新分支：`feat/upstream-<slice-name>`（基于当前 `a-hi1/main`）。  
+3. 只改能力相关文件；**不碰** `docker-compose*.yml` / `nginx.conf` / 端口约定，除非切片本身就是部署修复。  
+4. 本地验证：未登录 BYOK 生图/画布仍可用；若动云相关再跑 `check-cloud-stack` + `smoke-dual-track`。  
+5. 更新：本矩阵状态、`pending-test.mdx`、必要时 `CLAUDE.md`。  
+6. `git push a-hi1 <branch>` 或合入 `main` 后推 `a-hi1`。
+
+## 与 P1 / P0.5c 的关系
+
+| 线 | 目标 | 与上游关系 |
+| --- | --- | --- |
+| P0.5c | 双轨云历史可运维、可回归 | 无关上游画布扩展 |
+| P1 底座（A～G） | 可选平台网关+账本代码，**默认关** | 自研；不依赖上游 |
+| P1 收费产品 | 支付+默认扣积分体验 | **后置** |
+| 上游切片 | 画布/中转扩展能力 | 本表 |
+
+新会话接手：先读本文件 + `todo.mdx` + `git remote -v`，不要假设应整包升到上游版本号。

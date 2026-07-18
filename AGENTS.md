@@ -95,5 +95,5 @@
 - Docker 静态资源路径和 `/ai-proxy` 转发仍需用户实际部署验证，文档中不要过度承诺生产部署已经完全验证。
 - 可选云端 `api`：本地是默认轨，云故障不得阻断本地生成；登录默认仍 BYOK，平台额度以后必须显式开关。`API_ALLOWED_ORIGINS` 禁止 `*`；同源经反代访问时默认允许 Origin 与 Host/X-Forwarded 一致（`API_TRUST_PROXY_SAME_ORIGIN`，可关）；`from-url` 只能拉白名单 https 媒体，DNS 解析后拒绝内网地址。公网 HTTPS 必须 `API_COOKIE_SECURE=true`。不要跳过云端验收直接做计费。
 - Compose 云端变量从仓库根目录 `.env` 插值（参考 `.env.api.example`），真实 `.env` / `.env.proxy` 不要提交。
-- 云端：本地默认 + 可选云历史；`scripts/check-cloud-stack.*` 做健康检查。平台扣积分与支付后置。浏览器代理不等于 Docker 出网；本机 `data/api` 与服务器 `data/api` 分离。
-- 上游 basketikun **禁止整仓 merge/rebase**；按能力切片只读跟踪后移植。`docker-compose` / `nginx` / 端口 `3001`/`3011` 禁止被上游覆盖。推送走 `a-hi1`，不要默认 `origin`。
+- 云端：本地默认 + 可选云历史；`scripts/check-cloud-stack.*` + `scripts/smoke-dual-track.*` 做健康/双轨冒烟。平台扣积分与支付后置。浏览器代理不等于 Docker 出网；本机 `data/api` 与服务器 `data/api` 分离。
+- 上游 basketikun **禁止整仓 merge/rebase**；矩阵见 `docs/content/docs/progress/upstream-follow.mdx`。`docker-compose` / `nginx` / 端口 `3001`/`3011` 禁止被上游覆盖。推送走 `a-hi1`，不要默认 `origin`。
