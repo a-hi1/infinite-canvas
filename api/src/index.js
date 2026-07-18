@@ -12,6 +12,7 @@ import { createJobsRepo } from "./repositories/jobs-repo.js";
 import { createFilesRepo } from "./repositories/files-repo.js";
 import { createCreditsRepo } from "./repositories/credits-repo.js";
 import { createProjectsRepo } from "./repositories/projects-repo.js";
+import { createAssetsRepo } from "./repositories/assets-repo.js";
 import { decodePlatformReferenceDataUrl, generateOnePlatformImage, PLATFORM_IMAGE_REF_LIMIT } from "./platform-image.js";
 import { generateOnePlatformVideo } from "./platform-video.js";
 import { findExistingPlatformJob, persistPlatformResultAndCharge } from "./platform-billing.js";
@@ -110,6 +111,7 @@ const jobsRepo = createJobsRepo(db);
 const filesRepo = createFilesRepo(db);
 const creditsRepo = createCreditsRepo(db);
 const projectsRepo = createProjectsRepo(db);
+const assetsRepo = createAssetsRepo(db);
 const maxProjectJsonBytes = Math.min(maxBodyBytes, Math.max(1024 * 1024, Number(process.env.API_MAX_PROJECT_JSON_BYTES || 8 * 1024 * 1024) || 8 * 1024 * 1024));
 // Keep JSON session table small before Postgres; does not affect active logins.
 try {
@@ -203,9 +205,13 @@ const server = http.createServer(async (req, res) => {
         if (req.method === "PUT" && route.startsWith("/projects/")) return await handlePutProject(req, res, route.slice("/projects/".length), url);
         if (req.method === "DELETE" && route.startsWith("/projects/")) return await handleDeleteProject(req, res, route.slice("/projects/".length));
 
-        // Canvas media blobs keyed by client storageKey (image:/video:/audio:...).
+        // Canvas/asset media blobs keyed by client storageKey (image:/video:/audio:...).
         if (req.method === "POST" && route === "/blobs") return await handleUploadCanvasBlob(req, res);
         if (req.method === "GET" && route.startsWith("/blobs/by-key/")) return await handleGetCanvasBlobByKey(req, res, decodeURIComponent(route.slice("/blobs/by-key/".length)));
+
+        // Asset library manifest (P2): one user-level document + tombstones; media uses /blobs.
+        if (req.method === "GET" && route === "/assets") return await handleGetAssetManifest(req, res);
+        if (req.method === "PUT" && route === "/assets") return await handlePutAssetManifest(req, res, url);
 
         // Platform generation (opt-in server-side; charges credits only on success).
         if (req.method === "POST" && route === "/generate/image") return await handlePlatformGenerateImage(req, res);
@@ -304,7 +310,70 @@ function handleDeleteProject(req, res, projectIdRaw) {
     json(res, 200, { ok: true, id: projectId }, "已删除云端画布");
 }
 
-const CLIENT_STORAGE_KEY_RE = /^(image|video|audio|file|video-reference|audio-reference):[A-Za-z0-9_-]+$/;
+const CLIENT_STORAGE_KEY_RE = /^(image|video|video-asset|audio|file|video-reference|audio-reference):[A-Za-z0-9_-]+$/;
+const ASSET_MANIFEST_JSON_LIMIT = Math.min(maxBodyBytes, 12 * 1024 * 1024);
+const ASSET_MAX_ITEMS = 10000;
+const ASSET_MAX_TOMBSTONES = 20000;
+
+function normalizeAssetManifestInput(body) {
+    const source = body?.manifest && typeof body.manifest === "object" ? body.manifest : body;
+    const updatedAt = String(source?.updatedAt || source?.updated_at || "").trim();
+    if (!Number.isFinite(Date.parse(updatedAt))) throw httpError("素材清单 updatedAt 无效", 400, CLOUD_ERROR_REASON.BAD_REQUEST);
+    if (!Array.isArray(source?.assets) || source.assets.length > ASSET_MAX_ITEMS) {
+        throw httpError(`assets 必须是数组且最多 ${ASSET_MAX_ITEMS} 条`, 400, CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    if (!Array.isArray(source?.tombstones) || source.tombstones.length > ASSET_MAX_TOMBSTONES) {
+        throw httpError(`tombstones 必须是数组且最多 ${ASSET_MAX_TOMBSTONES} 条`, 400, CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    // Keep document extensible but reject invalid top-level rows / huge IDs.
+    for (const asset of source.assets) {
+        if (!asset || typeof asset !== "object") throw httpError("素材记录无效", 400, CLOUD_ERROR_REASON.BAD_REQUEST);
+        const id = String(asset.id || "").trim();
+        if (!id || id.length > 160) throw httpError("素材 id 无效", 400, CLOUD_ERROR_REASON.BAD_REQUEST);
+        if (!["text", "image", "video"].includes(String(asset.kind || ""))) throw httpError("素材 kind 无效", 400, CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    const tombstones = source.tombstones.map((row) => {
+        const id = String(row?.id || "").trim();
+        const deletedAt = String(row?.deletedAt || row?.deleted_at || "").trim();
+        if (!id || id.length > 160 || !Number.isFinite(Date.parse(deletedAt))) throw httpError("素材墓碑无效", 400, CLOUD_ERROR_REASON.BAD_REQUEST);
+        return { id, deletedAt };
+    });
+    return { version: 1, updatedAt, assets: source.assets, tombstones };
+}
+
+function handleGetAssetManifest(req, res) {
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const result = assetsRepo.getForUser(auth.user.id);
+    json(res, 200, {
+        meta: result.meta
+            ? { updated_at: result.meta.updated_at, bytes: result.meta.bytes || 0, asset_count: result.meta.asset_count || 0, tombstone_count: result.meta.tombstone_count || 0 }
+            : null,
+        manifest: result.manifest,
+    });
+}
+
+async function handlePutAssetManifest(req, res, url) {
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const force = url.searchParams.get("force") === "1" || url.searchParams.get("force") === "true";
+    const body = await readJson(req, ASSET_MANIFEST_JSON_LIMIT);
+    const manifest = normalizeAssetManifestInput(body);
+    try {
+        const result = assetsRepo.putForUser(auth.user.id, manifest, { force });
+        db.flush();
+        json(res, 200, {
+            meta: { updated_at: result.meta.updated_at, bytes: result.meta.bytes, asset_count: result.meta.asset_count, tombstone_count: result.meta.tombstone_count },
+            manifest: result.manifest,
+            created: result.created,
+        }, result.created ? "已创建云端素材清单" : "已保存云端素材清单");
+    } catch (error) {
+        if (error?.status === 409 && error.cloudAssetManifest) {
+            return json(res, 409, { conflict: true, manifest: error.cloudAssetManifest }, error.message || "云端素材清单更新", { reason: CLOUD_ERROR_REASON.SYNC_CONFLICT });
+        }
+        throw error;
+    }
+}
 
 /**
  * POST /api/blobs  multipart: client_key + file

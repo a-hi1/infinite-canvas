@@ -12,9 +12,11 @@ export function createDb(dataDir) {
     ensureDir(dataDir);
     const dbPath = path.join(dataDir, "db.json");
     const projectsDir = path.join(dataDir, "projects");
+    const assetsDir = path.join(dataDir, "assets");
     ensureDir(projectsDir);
-    /** @type {{ users: any[], sessions: any[], jobs: any[], files: any[], credit_ledger: any[], projects: any[] }} */
-    let state = { users: [], sessions: [], jobs: [], files: [], credit_ledger: [], projects: [] };
+    ensureDir(assetsDir);
+    /** @type {{ users: any[], sessions: any[], jobs: any[], files: any[], credit_ledger: any[], projects: any[], asset_manifests: any[] }} */
+    let state = { users: [], sessions: [], jobs: [], files: [], credit_ledger: [], projects: [], asset_manifests: [] };
 
     if (fs.existsSync(dbPath)) {
         try {
@@ -25,6 +27,7 @@ export function createDb(dataDir) {
             state.files ||= [];
             state.credit_ledger ||= [];
             state.projects ||= [];
+            state.asset_manifests ||= [];
         } catch {
             // keep empty state if corrupt; operator can restore from backup
         }
@@ -375,6 +378,79 @@ export function createDb(dataDir) {
                 // best-effort file delete
             }
             return existing;
+        },
+
+        assetManifestPath(userId) {
+            return path.join(assetsDir, userId, "manifest.json");
+        },
+
+        readAssetManifest(userId) {
+            const meta = state.asset_manifests.find((item) => item.user_id === userId) || null;
+            const docPath = this.assetManifestPath(userId);
+            if (!meta || !fs.existsSync(docPath)) {
+                return {
+                    meta: null,
+                    manifest: { version: 1, updatedAt: "", assets: [], tombstones: [] },
+                };
+            }
+            try {
+                const manifest = JSON.parse(fs.readFileSync(docPath, "utf8"));
+                return { meta, manifest };
+            } catch {
+                return {
+                    meta,
+                    manifest: { version: 1, updatedAt: meta.updated_at || "", assets: [], tombstones: [] },
+                };
+            }
+        },
+
+        /**
+         * Upsert one user-level asset manifest. A strictly newer cloud revision conflicts unless forced.
+         * Tombstones prevent deleted assets from being resurrected on another device.
+         */
+        upsertAssetManifest(userId, input, { force = false } = {}) {
+            const updatedAt = String(input?.updatedAt || input?.updated_at || now());
+            if (!Number.isFinite(Date.parse(updatedAt))) {
+                const err = new Error("updatedAt 无效");
+                err.status = 400;
+                err.reason = CLOUD_ERROR_REASON.BAD_REQUEST;
+                throw err;
+            }
+            const existing = state.asset_manifests.find((item) => item.user_id === userId) || null;
+            if (existing && !force) {
+                const cloudTs = Date.parse(existing.updated_at || "") || 0;
+                const clientTs = Date.parse(updatedAt) || 0;
+                if (cloudTs > clientTs) {
+                    const err = new Error("云端素材清单更新，请先合并");
+                    err.status = 409;
+                    err.reason = CLOUD_ERROR_REASON.SYNC_CONFLICT;
+                    err.cloudAssetManifest = this.readAssetManifest(userId).manifest;
+                    throw err;
+                }
+            }
+
+            const assets = Array.isArray(input?.assets) ? input.assets : [];
+            const tombstones = Array.isArray(input?.tombstones) ? input.tombstones : [];
+            const manifest = { version: 1, updatedAt, assets, tombstones };
+            const raw = JSON.stringify(manifest);
+            const userDir = path.join(assetsDir, userId);
+            ensureDir(userDir);
+            const docPath = this.assetManifestPath(userId);
+            const tmp = `${docPath}.tmp`;
+            fs.writeFileSync(tmp, raw);
+            fs.renameSync(tmp, docPath);
+
+            const meta = {
+                user_id: userId,
+                updated_at: updatedAt,
+                bytes: Buffer.byteLength(raw),
+                asset_count: assets.length,
+                tombstone_count: tombstones.length,
+            };
+            if (existing) Object.assign(existing, meta);
+            else state.asset_manifests.push(meta);
+            schedulePersist();
+            return { meta, manifest, created: !existing };
         },
 
         getUserCreditBalanceCents(userId) {

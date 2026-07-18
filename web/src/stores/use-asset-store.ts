@@ -12,6 +12,22 @@ export type ImageAsset = AssetBase<"image"> & { data: { dataUrl: string; storage
 export type VideoAsset = AssetBase<"video"> & { data: { url: string; storageKey?: string; width: number; height: number; bytes: number; mimeType: string } };
 export type Asset = TextAsset | ImageAsset | VideoAsset;
 
+function scheduleAssetCloudPush() {
+    void import("@/services/asset-cloud-sync")
+        .then((mod) => mod.schedulePushAssetManifest())
+        .catch(() => {
+            // Cloud is optional; local persistence remains authoritative.
+        });
+}
+
+function recordAssetCloudDeletion(id: string) {
+    void import("@/services/asset-cloud-sync")
+        .then((mod) => mod.recordAssetDeletion(id))
+        .catch(() => {
+            // Cloud is optional; local deletion already succeeded.
+        });
+}
+
 type AssetBase<T extends AssetKind> = {
     id: string;
     kind: T;
@@ -110,18 +126,23 @@ export const useAssetStore = create<AssetStore>()(
                 const now = new Date().toISOString();
                 const id = nanoid();
                 set((state) => ({ assets: [{ ...asset, id, createdAt: now, updatedAt: now } as Asset, ...state.assets] }));
+                scheduleAssetCloudPush();
                 return id;
             },
-            updateAsset: (id, patch) =>
+            updateAsset: (id, patch) => {
                 set((state) => ({
                     assets: state.assets.map((asset) => (asset.id === id ? ({ ...asset, ...patch, updatedAt: new Date().toISOString() } as Asset) : asset)),
-                })),
-            removeAsset: (id) =>
+                }));
+                scheduleAssetCloudPush();
+            },
+            removeAsset: (id) => {
                 set((state) => {
                     const assets = state.assets.filter((asset) => asset.id !== id);
                     get().cleanupImages({ assets });
                     return { assets };
-                }),
+                });
+                recordAssetCloudDeletion(id);
+            },
             replaceAssets: (assets) => set({ assets }),
             cleanupImages: (extra) => {
                 window.setTimeout(async () => {

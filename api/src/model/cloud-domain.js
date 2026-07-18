@@ -93,6 +93,7 @@ export const CLOUD_ERROR_REASON = {
     ADMIN_NOT_CONFIGURED: "admin_not_configured",
     CREDITS_INSUFFICIENT: "credits_insufficient",
     USER_NOT_FOUND: "user_not_found",
+    SYNC_CONFLICT: "sync_conflict",
     PLATFORM_GENERATE_DISABLED: "platform_generate_disabled",
     PLATFORM_UPSTREAM_NOT_CONFIGURED: "platform_upstream_not_configured",
     PLATFORM_UPSTREAM_FAILED: "platform_upstream_failed",

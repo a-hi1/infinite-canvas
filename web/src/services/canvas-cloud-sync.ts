@@ -17,15 +17,12 @@ import {
     uploadCloudBlob,
     type CloudCanvasProject,
 } from "@/services/cloud-api";
-import { getMediaBlob, setMediaBlob } from "@/services/file-storage";
-import { getImageBlob, setImageBlob } from "@/services/image-storage";
+import { downloadMissingCloudBlobs, uploadReferencedCloudBlobs } from "@/services/cloud-blob-sync";
 import { useAuthStore } from "@/stores/use-auth-store";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 
 const pushTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const PUSH_DEBOUNCE_MS = 1500;
-const MEDIA_CONCURRENCY = 3;
-const STORAGE_KEY_RE = /^(image|video|audio|file|video-reference|audio-reference):[A-Za-z0-9_-]+$/;
 
 function isLoggedIn() {
     return Boolean(useAuthStore.getState().user);
@@ -63,92 +60,6 @@ function fromCloudProject(project: CloudCanvasProject): CanvasProject {
     };
 }
 
-function collectStorageKeys(value: unknown, keys = new Set<string>()) {
-    if (typeof value === "string") {
-        if (STORAGE_KEY_RE.test(value)) keys.add(value);
-        return keys;
-    }
-    if (!value || typeof value !== "object") return keys;
-    if ("storageKey" in value && typeof (value as { storageKey?: string }).storageKey === "string") {
-        const k = (value as { storageKey: string }).storageKey;
-        if (STORAGE_KEY_RE.test(k)) keys.add(k);
-    }
-    for (const child of Object.values(value as Record<string, unknown>)) {
-        if (Array.isArray(child)) child.forEach((item) => collectStorageKeys(item, keys));
-        else collectStorageKeys(child, keys);
-    }
-    return keys;
-}
-
-async function getLocalBlob(storageKey: string) {
-    if (storageKey.startsWith("image:")) return getImageBlob(storageKey);
-    return getMediaBlob(storageKey);
-}
-
-async function setLocalBlob(storageKey: string, blob: Blob) {
-    if (storageKey.startsWith("image:")) return setImageBlob(storageKey, blob);
-    return setMediaBlob(storageKey, blob);
-}
-
-async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>) {
-    let index = 0;
-    const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
-        while (index < items.length) {
-            const current = items[index++];
-            await worker(current);
-        }
-    });
-    await Promise.all(runners);
-}
-
-/** Upload local blobs referenced by project; skip missing/remote-only keys. */
-async function uploadProjectMedia(project: CanvasProject) {
-    const keys = [...collectStorageKeys(project)];
-    if (!keys.length) return { uploaded: 0, skipped: 0 };
-    let uploaded = 0;
-    let skipped = 0;
-    await runPool(keys, MEDIA_CONCURRENCY, async (key) => {
-        try {
-            const blob = await getLocalBlob(key);
-            if (!blob || blob.size <= 0) {
-                skipped += 1;
-                return;
-            }
-            await uploadCloudBlob({ clientKey: key, blob, filename: key.replace(":", "-") });
-            uploaded += 1;
-        } catch (error) {
-            // Non-fatal: JSON still useful without every blob.
-            console.warn("canvas media upload failed", key, error);
-            skipped += 1;
-        }
-    });
-    return { uploaded, skipped };
-}
-
-/** Download missing blobs for a project document after JSON merge. */
-async function downloadProjectMedia(project: CanvasProject) {
-    const keys = [...collectStorageKeys(project)];
-    if (!keys.length) return { downloaded: 0, missing: 0 };
-    let downloaded = 0;
-    let missing = 0;
-    await runPool(keys, MEDIA_CONCURRENCY, async (key) => {
-        try {
-            const local = await getLocalBlob(key);
-            if (local && local.size > 0) return;
-            const blob = await downloadCloudBlobByKey(key);
-            if (!blob.size) {
-                missing += 1;
-                return;
-            }
-            await setLocalBlob(key, blob);
-            downloaded += 1;
-        } catch (error) {
-            if (isCloudApiError(error) && error.status === 404) missing += 1;
-            else console.warn("canvas media download failed", key, error);
-        }
-    });
-    return { downloaded, missing };
-}
 
 /** Debounced push after local save. Safe no-op when logged out / offline. */
 export function schedulePushCanvasProject(projectId: string) {
@@ -168,7 +79,7 @@ export async function pushCanvasProjectNow(projectId: string, options?: { force?
     if (!local) return { ok: false as const, reason: "missing_local" as const };
     try {
         // Media first so other devices can resolve storageKeys after JSON lands.
-        await uploadProjectMedia(local);
+        await uploadReferencedCloudBlobs(local);
         const result = await putCloudProject(toCloudProject(local), { force: options?.force });
         return { ok: true as const, created: Boolean(result.created) };
     } catch (error) {
@@ -200,7 +111,7 @@ export async function pullAndMergeCanvasProjects() {
             const localTs = local ? Date.parse(local.updatedAt || "") || 0 : 0;
             if (local && localTs >= cloudTs) {
                 // Still try fill missing media for local project that is already newest JSON.
-                const media = await downloadProjectMedia(local);
+                const media = await downloadMissingCloudBlobs(local);
                 mediaDownloaded += media.downloaded;
                 continue;
             }
@@ -213,7 +124,7 @@ export async function pullAndMergeCanvasProjects() {
                 } else {
                     latest.replaceProjects([cloudProject, ...latest.projects]);
                 }
-                const media = await downloadProjectMedia(cloudProject);
+                const media = await downloadMissingCloudBlobs(cloudProject);
                 mediaDownloaded += media.downloaded;
                 merged += 1;
                 pulled += 1;

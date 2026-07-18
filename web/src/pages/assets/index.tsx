@@ -1,4 +1,4 @@
-import { Copy, Download, ImagePlus, PencilLine, Search, Trash2, Upload, VideoIcon } from "lucide-react";
+import { CloudDownload, Copy, Download, ImagePlus, PencilLine, Search, Trash2, Upload, VideoIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { App, Button, Card, Drawer, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Spin, Tag, Typography } from "antd";
@@ -9,6 +9,8 @@ import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
 import { uploadMediaFile } from "@/services/file-storage";
 import { uploadImage } from "@/services/image-storage";
 import { cn } from "@/lib/utils";
+import { syncAssetManifestNow } from "@/services/asset-cloud-sync";
+import { useAuthStore } from "@/stores/use-auth-store";
 import { useAssetStore, type Asset, type AssetKind, type ImageAsset, type VideoAsset } from "@/stores/use-asset-store";
 import { exportAssets, readAssetPackage } from "./asset-transfer";
 
@@ -45,6 +47,9 @@ export default function AssetsPage() {
     const addAsset = useAssetStore((state) => state.addAsset);
     const updateAsset = useAssetStore((state) => state.updateAsset);
     const removeAsset = useAssetStore((state) => state.removeAsset);
+    const cloudUser = useAuthStore((state) => state.user);
+    const cloudPullDoneRef = useRef(false);
+    const [cloudSyncing, setCloudSyncing] = useState(false);
     const [keyword, setKeyword] = useState("");
     const [kindFilter, setKindFilter] = useState<AssetKind | "all">("all");
     const [page, setPage] = useState(1);
@@ -80,6 +85,39 @@ export default function AssetsPage() {
         const maxPage = Math.max(1, Math.ceil(filteredAssets.length / pageSize));
         setPage((value) => Math.min(value, maxPage));
     }, [filteredAssets.length, pageSize]);
+
+    // One safe login pull. It merges by updatedAt + tombstones and never deletes local-only newer data.
+    useEffect(() => {
+        if (!hydrated || !cloudUser || cloudPullDoneRef.current) return;
+        cloudPullDoneRef.current = true;
+        setCloudSyncing(true);
+        void syncAssetManifestNow({ pull: true })
+            .then((result) => {
+                if (!result.ok) return;
+                const changes = result.merged + result.deleted + result.mediaDownloaded;
+                if (changes > 0) message.success(`素材云同步完成（更新 ${changes} 项）`);
+            })
+            .finally(() => setCloudSyncing(false));
+    }, [cloudUser, hydrated, message]);
+
+    const syncCloudAssets = async () => {
+        if (!cloudUser) {
+            message.info("登录后可同步素材清单与本地媒体，云失败不影响本机素材");
+            return;
+        }
+        setCloudSyncing(true);
+        try {
+            const result = await syncAssetManifestNow({ pull: true });
+            if (!result.ok) {
+                message.warning("云端素材暂不可用，本机素材已保留");
+                return;
+            }
+            const changed = result.merged + result.deleted + result.mediaDownloaded + result.mediaUploaded;
+            message.success(changed > 0 ? `素材同步完成（处理 ${changed} 项）` : "素材已与云端对齐（无更新）");
+        } finally {
+            setCloudSyncing(false);
+        }
+    };
 
     const openCreate = () => {
         setEditingAsset(null);
@@ -324,7 +362,7 @@ export default function AssetsPage() {
                 <div className="pb-8">
                     <div className="mx-auto max-w-5xl text-center">
                         <h1 className="text-4xl font-semibold tracking-tight text-stone-950 dark:text-stone-100">我的素材</h1>
-                        <p className="mt-3 text-sm text-stone-500 dark:text-stone-400">长期保存文本、图片、视频；文本可一键带去生图/视频，媒体可在工作台作为参考插入。</p>
+                        <p className="mt-3 text-sm text-stone-500 dark:text-stone-400">长期保存文本、图片、视频；默认保存在本机，登录后可同步清单与 storageKey 媒体到云端。</p>
                     </div>
 
                     <div className="mx-auto mt-8 w-full max-w-2xl">
@@ -369,6 +407,15 @@ export default function AssetsPage() {
                                 </div>
                             </div>
                             <div className="flex flex-wrap gap-4">
+                                <button
+                                    type="button"
+                                    disabled={!hydrated || cloudSyncing}
+                                    className="inline-flex cursor-pointer items-center gap-1.5 text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-stone-300"
+                                    onClick={() => void syncCloudAssets()}
+                                >
+                                    <CloudDownload className={`size-4 ${cloudSyncing ? "animate-pulse" : ""}`} />
+                                    {cloudSyncing ? "同步中..." : "同步云端"}
+                                </button>
                                 <button
                                     type="button"
                                     disabled={!hydrated}

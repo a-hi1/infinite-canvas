@@ -169,6 +169,30 @@ export function deleteCloudProject(projectId: string) {
     return request<{ ok: boolean; id: string }>(`/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
 }
 
+export type CloudAssetTombstone = { id: string; deletedAt: string };
+export type CloudAssetManifest<T = Record<string, unknown>> = {
+    version: 1;
+    updatedAt: string;
+    assets: T[];
+    tombstones: CloudAssetTombstone[];
+};
+
+export function getCloudAssetManifest<T = Record<string, unknown>>() {
+    return request<{
+        meta: { updated_at?: string; bytes?: number; asset_count?: number; tombstone_count?: number } | null;
+        manifest: CloudAssetManifest<T>;
+    }>("/assets");
+}
+
+export function putCloudAssetManifest<T = Record<string, unknown>>(manifest: CloudAssetManifest<T>, options?: { force?: boolean }) {
+    const qs = options?.force ? "?force=1" : "";
+    return request<{
+        meta: { updated_at?: string; bytes?: number; asset_count?: number; tombstone_count?: number };
+        manifest: CloudAssetManifest<T>;
+        created?: boolean;
+    }>(`/assets${qs}`, { method: "PUT", body: JSON.stringify({ manifest }) });
+}
+
 export type CloudBlobFile = {
     id: string;
     client_key: string;

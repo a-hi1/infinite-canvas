@@ -132,6 +132,16 @@ curl -sS -X POST http://127.0.0.1:3011/api/admin/credits/grant \
 - **范围：** 项目 JSON + 节点引用的本地 `storageKey` 媒体（`POST /api/blobs`，按 `client_key` 幂等；`GET /api/blobs/by-key/:key`）
 - 远程仅 URL、无本地 blob 的媒体不会上传（与 CORS/临时链一致）
 - 与 WebDAV `app-sync` 并存：WebDAV 仍是可选整包同步；本接口是账号维度的项目/媒体同步
+
+### 素材库云同步（P2.0-C）
+
+- 接口（需登录）：`GET /api/assets`、`PUT /api/assets`（可选 `?force=1`）
+- 存储：元数据在 `db.json` 的 `asset_manifests`；清单 JSON 在 `data/api/assets/{userId}/manifest.json`
+- 清单字段：`assets[]` + `tombstones[]`（删除墓碑，防止另一设备把已删素材复活）
+- 策略：本地优先；登录后素材页自动拉一次，并支持「同步云端」；增删改防抖推送；云失败不丢本机
+- 媒体：复用 `POST /api/blobs` / `GET /api/blobs/by-key/:key`（与画布同一套幂等 key）
+- 冲突：云端 `updatedAt` 更新时返回 409 `sync_conflict`；前端合并后可 force 回写
+
 ### 访问地址与登录 403
 
 浏览器打开 `http://服务器IP:3001` 时，登录请求会带 `Origin: http://服务器IP:3001`。  

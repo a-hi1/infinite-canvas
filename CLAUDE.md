@@ -43,9 +43,9 @@
 
 **浏览器代理 ≠ Docker 出网**：系统/Clash 美国代理只影响浏览器。视频上云若走 `/ai-proxy/media` 或 `api` 的 `from-url`，是容器去拉 `vidgen.x.ai`；容器访问超时时会 502。本机可在根目录 `.env` 设置 `HTTP_PROXY`/`HTTPS_PROXY=http://host.docker.internal:代理端口` 后重建 `api` 与 `ai-proxy`。服务器不要默认照搬本机 789x 代理。
 
-**当前主线（收费后置）：** 本地 BYOK 稳定 + 云历史双轨可回归 + **画布项目 JSON 云同步（P2.0-A）** + 上游能力按矩阵切片。平台扣积分/支付/画布扣积分**后置**（应先有上云再谈画布计费）。
+**当前主线（收费后置）：** 本地 BYOK 稳定 + 云历史双轨可回归 + **画布/素材云同步（P2.0-A/B/C）** + 上游能力按矩阵切片。平台扣积分/支付/画布扣积分**后置**（应先有上云再谈计费）。
 
-**P2.0-A / P2.0-B：** `GET/PUT/DELETE /api/projects` + `POST /api/blobs` / `GET /api/blobs/by-key/:clientKey`。项目 JSON 与节点 `storageKey` 媒体本地优先同步；推送先媒体后 JSON；拉取补齐缺失 blob。云失败不丢本地。素材库全量同步与 Postgres 仍未做。
+**P2.0-A / P2.0-B / P2.0-C：** `GET/PUT/DELETE /api/projects` + `POST /api/blobs` / `GET /api/blobs/by-key/:clientKey` + `GET/PUT /api/assets`（用户级素材 manifest + tombstones）。项目 JSON、画布媒体、素材清单本地优先同步；推送先媒体后清单/JSON；拉取补齐缺失 blob。云失败不丢本地。Postgres / S3 仍未做。
 
 **P0.5c：** 清单 `docs/content/docs/progress/p05c-acceptance.mdx`；自动 `scripts/check-cloud-stack.*` + `scripts/smoke-dual-track.*`；仍须人工 UI 上云与服务器 B2。本机上云占本机 `./data/api`，服务器占服务器 `./data/api`。
 
