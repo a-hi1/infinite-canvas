@@ -41,6 +41,8 @@ export type AiConfig = {
     audioModels: string[];
     quality: string;
     size: string;
+    /** OpenAI-compatible image background; only "transparent" is forwarded upstream. */
+    background: string;
     count: string;
     canvasImageCount: string;
 };
@@ -101,6 +103,7 @@ export const defaultConfig: AiConfig = {
     audioModels: [`${DEFAULT_CHANNEL_ID}::gpt-4o-mini-tts`],
     quality: "auto",
     size: "1:1",
+    background: "",
     count: "1",
     canvasImageCount: "1",
 };

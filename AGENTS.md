@@ -19,16 +19,14 @@
 - 补充时写成明确、可执行的规则，避免只写模糊描述。
 - 新规则应放到最相关的章节；找不到合适章节时放到“项目注意事项”。
 
-## 后端规范
+## 后端 / 可选云端规范
 
-- 后端使用 Go + Gin + GORM。
-- `handler/` 只处理 HTTP 入参、调用 service、返回 `OK` / `Fail`。
-- `service/` 放业务逻辑、默认值、校验、时间、ID、鉴权等处理。
-- `repository/` 只做数据库访问和 GORM 查询。
-- `model/` 只定义数据结构、枚举和简单模型方法。
-- 列表接口优先沿用 `model.Query`、`Normalize`、分页和标签筛选方式。
-- 业务接口保持 `{ code, data, msg }` 的响应结构。
-- 新增数据表时同步更新 `docs/backend-database.md`。
+- **当前主路径无强制 Go 后端。** 主应用是静态前端；可选云端在 `api/`（Node 22），可选 AI 代理在 `ai-proxy/`（Node 22）。
+- `api/`：HTTP 入参与路由在 `api/src/index.js`；JSON 文件库在 `api/src/db.js`；领域常量在 `api/src/model/`；数据访问经 `api/src/repositories/*` façade（为后续 Postgres 预留，暂不换库）。
+- 云端响应优先 `{ code, data, msg, reason? }`；业务分支优先稳定 `reason`，不要长期靠中文 `msg`。
+- 平台代生成网关（`/api/generate/*`）与积分账本代码可存在，但**默认关闭**；平台扣积分与支付产品面后置。勿在默认路径强绑计费。
+- 不要把真实 API Key、`.env`、`.env.proxy` 写入仓库。
+- 历史文档若仍写 Go + Gin + GORM / 管理后台，以本仓库 `api/` + 静态前端现状为准，勿按旧后端脚手架新建代码。
 
 ## 前端规范
 
@@ -97,4 +95,5 @@
 - Docker 静态资源路径和 `/ai-proxy` 转发仍需用户实际部署验证，文档中不要过度承诺生产部署已经完全验证。
 - 可选云端 `api`：本地是默认轨，云故障不得阻断本地生成；登录默认仍 BYOK，平台额度以后必须显式开关。`API_ALLOWED_ORIGINS` 禁止 `*`；同源经反代访问时默认允许 Origin 与 Host/X-Forwarded 一致（`API_TRUST_PROXY_SAME_ORIGIN`，可关）；`from-url` 只能拉白名单 https 媒体，DNS 解析后拒绝内网地址。公网 HTTPS 必须 `API_COOKIE_SECURE=true`。不要跳过云端验收直接做计费。
 - Compose 云端变量从仓库根目录 `.env` 插值（参考 `.env.api.example`），真实 `.env` / `.env.proxy` 不要提交。
-- 云端下一阶段优先 P0.5c 验稳收口（`docs/content/docs/progress/p05c-acceptance.mdx` + `scripts/check-cloud-stack.*`），不要跳过验收直接做计费或画布全量同步。浏览器代理不等于 Docker 出网；本机 `data/api` 与服务器 `data/api` 分离。
+- 云端：本地默认 + 可选云历史；`scripts/check-cloud-stack.*` 做健康检查。平台扣积分与支付后置。浏览器代理不等于 Docker 出网；本机 `data/api` 与服务器 `data/api` 分离。
+- 上游 basketikun **禁止整仓 merge/rebase**；按能力切片只读跟踪后移植。`docker-compose` / `nginx` / 端口 `3001`/`3011` 禁止被上游覆盖。推送走 `a-hi1`，不要默认 `origin`。

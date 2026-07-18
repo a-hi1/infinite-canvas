@@ -45,7 +45,7 @@
 
 **P0.5c 当前主线（验稳收口，非新功能浪潮）：** 双轨回归 + 本机/服务器环境分册 + vidgen 预期写清后再开 P1/P2。清单见 `docs/content/docs/progress/p05c-acceptance.mdx`；健康检查 `scripts/check-cloud-stack.sh` / `scripts/check-cloud-stack.ps1`。本机上云占本机 `./data/api`，服务器上云占服务器 `./data/api`，互不影响。`api` / `ai-proxy` 新增了更强的 `/health` 字段与请求 ID 日志前缀；相关代码更新后需重建容器才能生效。
 
-**上游跟进（basketikun）：** 上游已到 `v0.8.2` 量级（插件系统、组节点、透明背景、模型自定义脚本等），与本 fork 在 2026-07-05 附近分叉后路线不同：上游偏画布扩展，本仓库偏 `api` 云历史 + `ai-proxy` + 中转适配。策略是**不整仓 merge/rebase**，按能力切片只读跟踪后移植；`docker-compose` / `nginx` / 端口约定（`3001` / dev-host `3011`）禁止被上游覆盖。候选清单见 `docs/content/docs/progress/todo.mdx`。 
+**上游跟进（basketikun）：** 上游已到 `v0.9.0` 量级（插件系统、组节点、透明背景、模型脚本、画布面板等），与本 fork 在 2026-07-05 附近分叉后路线不同：上游偏画布扩展，本仓库偏 `api` 云历史 + `ai-proxy` + 中转适配。策略是**不整仓 merge/rebase**，按能力切片只读跟踪后移植；`docker-compose` / `nginx` / 端口约定（`3001` / dev-host `3011`）禁止被上游覆盖。已移植：透明背景生图（BYOK）。其余候选见 `docs/content/docs/progress/todo.mdx`。 
 
 P0.5 扫尾（运维与体验）：`GET /auth/me` 返回 `usage`（已用字节、任务数）与 `limits`（容量上限），供顶栏账号弹层展示；受保护接口 401 时前端统一清登录态（`infinite-canvas:cloud-unauthorized` 事件），避免连环报错；未登录生成成功轻提示「登录后可跨设备回看」；上云失败若为空间不足则明确提示。备份脚本：`scripts/backup-api-data.sh` / `scripts/backup-api-data.ps1`。更完整说明见 `docs/content/docs/overview/cloud-api.mdx`。公网 HTTPS 必须设 `API_COOKIE_SECURE=true` 并收紧 `API_ALLOWED_ORIGINS`（禁止 `*`）。云端错误 envelope 已开始增加稳定 `reason` 字段，后续前端判断应优先依赖 reason，而不是长期靠中文字符串。 
 
