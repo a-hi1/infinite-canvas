@@ -1,12 +1,28 @@
 import { Check, Download, Pencil, Trash2, X } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Button, Input } from "antd";
+import { Button, Input, Tag } from "antd";
 
+import { cloudSyncColor } from "@/lib/cloud-sync";
+import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
+import type { CanvasCloudBadge } from "@/services/canvas-cloud-sync";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
-import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 
-export function CanvasProjectCard({ project }: { project: CanvasProject }) {
+function canvasCloudBadgeLabel(badge: CanvasCloudBadge) {
+    if (badge === "synced") return "已上云";
+    if (badge === "pending") return "待同步";
+    if (badge === "failed") return "上云失败";
+    return "仅本机";
+}
+
+function canvasCloudBadgeColor(badge: CanvasCloudBadge) {
+    if (badge === "synced") return cloudSyncColor("synced");
+    if (badge === "pending") return cloudSyncColor("pending");
+    if (badge === "failed") return cloudSyncColor("failed");
+    return cloudSyncColor("skipped");
+}
+
+export function CanvasProjectCard({ project, cloudBadge = "local" }: { project: CanvasProject; cloudBadge?: CanvasCloudBadge }) {
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
     const renameProject = useCanvasStore((state) => state.renameProject);
@@ -42,13 +58,18 @@ export function CanvasProjectCard({ project }: { project: CanvasProject }) {
                 ) : (
                     <button
                         type="button"
-                        className="min-w-0 cursor-pointer text-left"
+                        className="min-w-0 flex-1 cursor-pointer text-left"
                         onClick={(event) => {
                             event.stopPropagation();
                             open();
                         }}
                     >
-                        <h2 className="truncate text-xl font-semibold">{project.title}</h2>
+                        <div className="flex items-start justify-between gap-2">
+                            <h2 className="min-w-0 truncate text-xl font-semibold">{project.title}</h2>
+                            <Tag className="m-0 shrink-0 rounded-md px-1.5 text-[11px]" color={canvasCloudBadgeColor(cloudBadge)}>
+                                {canvasCloudBadgeLabel(cloudBadge)}
+                            </Tag>
+                        </div>
                         <p className="mt-3 text-sm leading-6 text-stone-600 dark:text-stone-400">
                             {project.nodes.length} 个节点 · {project.connections.length} 条连线
                         </p>

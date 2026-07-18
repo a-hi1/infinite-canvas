@@ -1,12 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { App, Button } from "antd";
+import { App, Button, Tag } from "antd";
 import { CloudDownload, Download, FileUp, Plus } from "lucide-react";
 
 import { readZip } from "@/lib/zip";
 import { setMediaBlob } from "@/services/file-storage";
 import { setImageBlob } from "@/services/image-storage";
-import { pullAndMergeCanvasProjects } from "@/services/canvas-cloud-sync";
+import {
+    getCanvasLibraryCloudSummary,
+    getCanvasProjectCloudBadge,
+    getCanvasCloudStatusVersion,
+    hydrateCanvasCloudStatus,
+    pullAndMergeCanvasProjects,
+    subscribeCanvasCloudStatus,
+} from "@/services/canvas-cloud-sync";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
 import { CanvasProjectCard } from "@/components/canvas/canvas-project-card";
 import type { CanvasExportFile } from "@/types/canvas-export";
@@ -28,6 +35,7 @@ export default function CanvasPage() {
     const importProject = useCanvasStore((state) => state.importProject);
     const cloudUser = useAuthStore((state) => state.user);
     const [cloudSyncing, setCloudSyncing] = useState(false);
+    const cloudStatusVersion = useSyncExternalStore(subscribeCanvasCloudStatus, getCanvasCloudStatusVersion, () => 0);
     const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);
     const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);
 
@@ -70,6 +78,10 @@ export default function CanvasPage() {
         enterProject(mode === "new" ? createProject(`无限画布 ${projects.length + 1}`) : projects[0]?.id || createProject(`无限画布 ${projects.length + 1}`));
     }, [createProject, hydrated, mode, projects]);
 
+    useEffect(() => {
+        void hydrateCanvasCloudStatus();
+    }, []);
+
     // Login once: soft pull cloud project list (local-first merge). Never blocks offline use.
     useEffect(() => {
         if (!hydrated || !cloudUser || cloudPulledRef.current) return;
@@ -86,6 +98,13 @@ export default function CanvasPage() {
             })
             .finally(() => setCloudSyncing(false));
     }, [cloudUser, hydrated, message]);
+
+    const cloudSummary = useMemo(
+        () => getCanvasLibraryCloudSummary(projects, { loggedIn: Boolean(cloudUser), syncing: cloudSyncing }),
+        // cloudStatusVersion refreshes badges after push/pull snapshot writes.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [projects, cloudUser, cloudSyncing, cloudStatusVersion],
+    );
 
     const syncFromCloud = async () => {
         if (!cloudUser) {
@@ -117,6 +136,23 @@ export default function CanvasPage() {
                         <p className="text-xs text-stone-500">画布库</p>
                         <h1 className="mt-3 text-3xl font-semibold">无限画布</h1>
                         <p className="mt-2 text-xs text-stone-500">默认保存在本机；登录后会异步同步项目 JSON 与节点媒体（storageKey），云失败不丢本地草稿。</p>
+                        <div className="mt-3">
+                            <Tag
+                                className="m-0 inline-flex h-7 items-center rounded-full px-3 text-xs"
+                                color={
+                                    cloudSummary.tone === "synced"
+                                        ? "success"
+                                        : cloudSummary.tone === "failed"
+                                          ? "error"
+                                          : cloudSummary.tone === "pending"
+                                            ? "processing"
+                                            : "default"
+                                }
+                            >
+                                {cloudSummary.label}
+                                {cloudSummary.detail ? ` · ${cloudSummary.detail}` : ""}
+                            </Tag>
+                        </div>
                     </div>
                     <div className="flex items-center gap-2">
                         {selectedIds.length ? (
@@ -151,7 +187,11 @@ export default function CanvasPage() {
                 ) : projects.length ? (
                     <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
                         {projects.map((project) => (
-                            <CanvasProjectCard key={project.id} project={project} />
+                            <CanvasProjectCard
+                                key={project.id}
+                                project={project}
+                                cloudBadge={getCanvasProjectCloudBadge(project, { loggedIn: Boolean(cloudUser), syncing: cloudSyncing })}
+                            />
                         ))}
                     </div>
                 ) : (

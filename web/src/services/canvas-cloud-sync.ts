@@ -26,11 +26,131 @@ const pushTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const PUSH_DEBOUNCE_MS = 1500;
 const tombstoneStore = localforage.createInstance({ name: "infinite-canvas", storeName: "canvas_cloud_sync" });
 const TOMBSTONE_KEY = "project_tombstones";
+const SNAPSHOT_KEY = "last_synced_snapshot";
 const MAX_TOMBSTONES = 5000;
 const pendingTombstones = new Map<string, { id: string; deletedAt: string }>();
+const failedProjectIds = new Set<string>();
+let lastSyncedSnapshot: CanvasSyncSnapshot | null = null;
+let lastSyncedLoaded = false;
+let statusVersion = 0;
+const statusListeners = new Set<() => void>();
+
+type CanvasSyncSnapshot = {
+    signatures: Record<string, string>;
+};
+
+export type CanvasCloudBadge = "local" | "pending" | "synced" | "failed";
 
 function isLoggedIn() {
     return Boolean(useAuthStore.getState().user);
+}
+
+function notifyStatusListeners() {
+    statusVersion += 1;
+    statusListeners.forEach((listener) => listener());
+}
+
+export function subscribeCanvasCloudStatus(listener: () => void) {
+    statusListeners.add(listener);
+    return () => {
+        statusListeners.delete(listener);
+    };
+}
+
+export function getCanvasCloudStatusVersion() {
+    return statusVersion;
+}
+
+function projectSignature(project: Pick<CanvasProject, "updatedAt" | "title">) {
+    return `${project.updatedAt}|${project.title}`;
+}
+
+async function ensureSyncedSnapshotLoaded() {
+    if (lastSyncedLoaded) return lastSyncedSnapshot;
+    lastSyncedLoaded = true;
+    const stored = await tombstoneStore.getItem<CanvasSyncSnapshot>(SNAPSHOT_KEY);
+    if (stored && typeof stored === "object" && stored.signatures) {
+        lastSyncedSnapshot = { signatures: stored.signatures };
+    }
+    return lastSyncedSnapshot;
+}
+
+async function writeSyncedSnapshot(snapshot: CanvasSyncSnapshot) {
+    lastSyncedSnapshot = snapshot;
+    lastSyncedLoaded = true;
+    await tombstoneStore.setItem(SNAPSHOT_KEY, snapshot);
+    notifyStatusListeners();
+}
+
+async function markProjectsSynced(projects: Array<Pick<CanvasProject, "id" | "updatedAt" | "title">>) {
+    await ensureSyncedSnapshotLoaded();
+    const signatures = { ...(lastSyncedSnapshot?.signatures || {}) };
+    for (const project of projects) {
+        signatures[project.id] = projectSignature(project);
+        failedProjectIds.delete(project.id);
+    }
+    await writeSyncedSnapshot({ signatures });
+}
+
+export function getCanvasProjectCloudBadge(
+    project: Pick<CanvasProject, "id" | "updatedAt" | "title">,
+    options?: { loggedIn?: boolean; syncing?: boolean },
+): CanvasCloudBadge {
+    const loggedIn = options?.loggedIn ?? isLoggedIn();
+    if (!loggedIn) return "local";
+    if (options?.syncing || pushTimers.has(project.id)) return "pending";
+    if (failedProjectIds.has(project.id)) return "failed";
+    const signature = lastSyncedSnapshot?.signatures[project.id];
+    if (!signature) return "pending";
+    return signature === projectSignature(project) ? "synced" : "pending";
+}
+
+export function getCanvasLibraryCloudSummary(
+    projects: Array<Pick<CanvasProject, "id" | "updatedAt" | "title">>,
+    options?: { loggedIn?: boolean; syncing?: boolean },
+) {
+    const loggedIn = options?.loggedIn ?? isLoggedIn();
+    if (!loggedIn) {
+        return { label: "仅本机", detail: "登录后可同步到云端", tone: "local" as const, synced: 0, pending: projects.length, failed: 0 };
+    }
+    if (options?.syncing) {
+        return { label: "同步中", detail: "正在上传/拉取画布与媒体", tone: "pending" as const, synced: 0, pending: projects.length, failed: 0 };
+    }
+    let synced = 0;
+    let pending = 0;
+    let failed = 0;
+    for (const project of projects) {
+        const badge = getCanvasProjectCloudBadge(project, { loggedIn: true, syncing: false });
+        if (badge === "synced") synced += 1;
+        else if (badge === "failed") failed += 1;
+        else pending += 1;
+    }
+    if (!projects.length) {
+        return {
+            label: lastSyncedSnapshot ? "已上云" : "待同步",
+            detail: lastSyncedSnapshot ? "云端暂无画布" : "新建画布后会自动同步",
+            tone: lastSyncedSnapshot ? ("synced" as const) : ("pending" as const),
+            synced: 0,
+            pending: 0,
+            failed: 0,
+        };
+    }
+    if (failed > 0) {
+        return { label: "上云失败", detail: `${failed} 个画布同步失败，可重试`, tone: "failed" as const, synced, pending, failed };
+    }
+    if (pending === 0) {
+        return { label: "已上云", detail: `${synced} 个画布已与云端对齐`, tone: "synced" as const, synced, pending: 0, failed: 0 };
+    }
+    if (synced === 0) {
+        return { label: "待同步", detail: `${pending} 个画布尚未确认上云`, tone: "pending" as const, synced: 0, pending, failed: 0 };
+    }
+    return { label: "部分已上云", detail: `已上云 ${synced} · 待同步 ${pending}`, tone: "pending" as const, synced, pending, failed: 0 };
+}
+
+export async function hydrateCanvasCloudStatus() {
+    await ensureSyncedSnapshotLoaded();
+    notifyStatusListeners();
+    return lastSyncedSnapshot;
 }
 
 function asTime(value?: string) {
@@ -103,14 +223,18 @@ export function schedulePushCanvasProject(projectId: string) {
     if (!isLoggedIn()) return;
     // A recreated/imported project with same id should not stay tombstoned.
     pendingTombstones.delete(projectId);
+    failedProjectIds.delete(projectId);
     void readLocalTombstones().then((rows) => writeLocalTombstones(rows.filter((row) => row.id !== projectId)));
+    notifyStatusListeners();
     const prev = pushTimers.get(projectId);
     if (prev) clearTimeout(prev);
     const timer = setTimeout(() => {
         pushTimers.delete(projectId);
+        notifyStatusListeners();
         void pushCanvasProjectNow(projectId);
     }, PUSH_DEBOUNCE_MS);
     pushTimers.set(projectId, timer);
+    notifyStatusListeners();
 }
 
 export async function pushCanvasProjectNow(projectId: string, options?: { force?: boolean }) {
@@ -124,13 +248,18 @@ export async function pushCanvasProjectNow(projectId: string, options?: { force?
         // Successful push means this id is alive again.
         const rows = await readLocalTombstones();
         await writeLocalTombstones(rows.filter((row) => row.id !== projectId));
+        await markProjectsSynced([local]);
         return { ok: true as const, created: Boolean(result.created) };
     } catch (error) {
         if (isCloudApiError(error) && error.status === 409) {
             const data = (error as CloudApiError & { data?: { project?: CloudCanvasProject } }).data;
+            failedProjectIds.add(projectId);
+            notifyStatusListeners();
             return { ok: false as const, reason: "conflict" as const, cloud: data?.project ? fromCloudProject(data.project) : null };
         }
         console.warn("canvas cloud push failed", error);
+        failedProjectIds.add(projectId);
+        notifyStatusListeners();
         return { ok: false as const, reason: "network" as const };
     }
 }
@@ -203,17 +332,36 @@ export async function pullAndMergeCanvasProjects() {
             }
         }
         await writeLocalTombstones(remainingTombstones);
+        // After a successful pull/merge pass, mark currently local projects that match cloud updatedAt as synced.
+        const localProjects = useCanvasStore.getState().projects;
+        const cloudUpdated = new Map(items.map((item) => [item.id, item.updated_at || ""]));
+        const confirmed = localProjects.filter((project) => {
+            const cloudAt = cloudUpdated.get(project.id);
+            return cloudAt && asTime(cloudAt) === asTime(project.updatedAt);
+        });
+        if (confirmed.length) await markProjectsSynced(confirmed);
+        else notifyStatusListeners();
         return { ok: true as const, merged, pulled, listed: items.length, mediaDownloaded, suppressed };
     } catch (error) {
         console.warn("canvas cloud list failed", error);
+        notifyStatusListeners();
         return { ok: false as const, merged: 0, pulled: 0, mediaDownloaded: 0 };
     }
 }
 
 export async function recordCanvasProjectDeletion(projectId: string, deletedAt = new Date().toISOString()) {
     pendingTombstones.set(projectId, { id: projectId, deletedAt });
+    failedProjectIds.delete(projectId);
     const rows = await readLocalTombstones();
     await writeLocalTombstones(rows);
+    await ensureSyncedSnapshotLoaded();
+    if (lastSyncedSnapshot?.signatures[projectId]) {
+        const signatures = { ...lastSyncedSnapshot.signatures };
+        delete signatures[projectId];
+        await writeSyncedSnapshot({ signatures });
+    } else {
+        notifyStatusListeners();
+    }
     // Best-effort immediate cloud delete; tombstone covers offline/failures.
     await removeCloudCanvasProject(projectId);
 }
@@ -224,9 +372,11 @@ export async function removeCloudCanvasProject(projectId: string) {
         await deleteCloudProject(projectId);
         const rows = await readLocalTombstones();
         await writeLocalTombstones(rows.filter((row) => row.id !== projectId));
+        notifyStatusListeners();
         return true;
     } catch (error) {
         console.warn("canvas cloud delete failed", error);
+        notifyStatusListeners();
         return false;
     }
 }
