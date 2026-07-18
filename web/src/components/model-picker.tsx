@@ -3,7 +3,7 @@ import { Cpu } from "lucide-react";
 
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { modelOptionLabel, modelOptionName, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { modelOptionLabel, modelOptionName, resolveModelScript, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 
 type ModelPickerProps = {
     config: AiConfig;
@@ -21,6 +21,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     const [open, setOpen] = useState(false);
     const options = useMemo(() => Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model)))), [capability, config, value]);
     const current = value || "";
+    const currentHasScript = Boolean(current && resolveModelScript(config, current));
 
     useEffect(() => {
         const closeOtherPicker = (event: Event) => {
@@ -50,10 +51,11 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                 )}
                 onMouseDown={(event) => event.stopPropagation()}
                 onPointerDown={(event) => event.stopPropagation()}
-                title={current ? modelOptionLabel(config, current) : placeholder}
+                title={current ? `${modelOptionLabel(config, current)}${currentHasScript ? "（自定义脚本）" : ""}` : placeholder}
             >
                 <ModelIcon model={current} />
                 <span className="canvas-model-picker-text min-w-0 flex-1 truncate text-left">{current ? modelOptionLabel(config, current) : placeholder}</span>
+                {currentHasScript ? <ScriptBadge /> : null}
             </SelectTrigger>
             <SelectContent
                 data-canvas-no-zoom
@@ -88,10 +90,20 @@ function emptyModelLabel(config: AiConfig, capability?: ModelCapability) {
 }
 
 function ModelLabel({ config, model }: { config: AiConfig; model: string }) {
+    const hasScript = Boolean(resolveModelScript(config, model));
     return (
         <span className="flex min-w-0 items-center gap-2">
             <ModelIcon model={model} />
-            <span className="truncate">{modelOptionLabel(config, model)}</span>
+            <span className="min-w-0 flex-1 truncate">{modelOptionLabel(config, model)}</span>
+            {hasScript ? <ScriptBadge /> : null}
+        </span>
+    );
+}
+
+function ScriptBadge() {
+    return (
+        <span className="shrink-0 rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium leading-none text-sky-700 dark:text-sky-300" title="该模型已配置自定义调用脚本">
+            脚本
         </span>
     );
 }
