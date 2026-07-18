@@ -293,6 +293,7 @@ async function handlePutProject(req, res, projectIdRaw, url) {
                     project: cloudDoc,
                 },
                 error.message || "云端版本更新",
+                { reason: CLOUD_ERROR_REASON.SYNC_CONFLICT },
             );
         }
         throw error;

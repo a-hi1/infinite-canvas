@@ -319,7 +319,7 @@ export function createDb(dataDir) {
                 if (cloudTs > clientTs) {
                     const err = new Error("云端版本更新，请先拉取合并");
                     err.status = 409;
-                    err.reason = CLOUD_ERROR_REASON.BAD_REQUEST;
+                    err.reason = CLOUD_ERROR_REASON.SYNC_CONFLICT;
                     err.cloudProject = existing;
                     throw err;
                 }

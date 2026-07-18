@@ -60,9 +60,13 @@ description: 当前版本已实现但仍需人工验证的变更项
 - 透明背景生图（BYOK）：图像设置增加「透明背景」开关；开启后文生图/图生图请求附带 `background=transparent`（仅 OpenAI 兼容路径；Gemini 不转发该字段）。依赖上游是否支持；不支持时可能忽略或报错。需验证：① 开关可开关并持久化；② 开启后 Network 请求体/form 含 background=transparent；③ 支持的中转可出透明 PNG；④ 关闭后行为与原先一致；⑤ 画布节点图像设置同样可开。
 - 双轨自动冒烟：`scripts/smoke-dual-track.ps1` / `.sh` 停 `api` 后页面仍 200、health 恢复。需验证：本机 dev-host `3011` 与服务器 `3001` 各跑一次硬失败为 0；人工仍须补「api 停时未登录生图/画布」。
 - 上游跟进矩阵文档：`docs/content/docs/progress/upstream-follow.mdx` 记录切片规则与优先级。需验证：新会话只读该文档不会误整仓 merge；移植切片后会更新矩阵状态列。
-- P2.0-A 画布项目 JSON 云同步：登录后编辑画布会防抖 `PUT /api/projects/:id`；画布库页「同步云端」与登录自动拉取按 `updatedAt` 合并（不删仅本地项目）。未登录/云故障时本地创建编辑删除均可用。需验证：① 未登录新建画布仍本机可用；② 登录后编辑约 2s 内上云，`data/api/projects/{userId}/` 有 json；③ 另一浏览器登录「同步云端」能看到项目；④ 停 api 后本地仍可编辑；⑤ 删除本地项目会尽量删云端。
+- P2.0-A 画布项目 JSON 云同步：登录后编辑/新建/导入会防抖 `PUT /api/projects/:id`；画布库页「同步云端」与登录自动拉取按 `updatedAt` 合并（不删仅本地项目）。未登录/云故障时本地创建编辑删除均可用。需验证：① 未登录新建画布仍本机可用；② 登录后编辑约 2s 内上云，`data/api/projects/{userId}/` 有 json；③ 另一浏览器登录「同步云端」能看到项目；④ 停 api 后本地仍可编辑；⑤ 删除本地项目会尽量删云端。
+  - 本机 API 自动化：未登录 401；put/list/get/409 冲突/跨用户隔离通过。
+- P2.0-A 补强（验收修复）：画布删除增加**本机 tombstone**，避免「本地已删但云删失败/离线」后下次同步把项目拉回。云端更新冲突 reason 统一 `sync_conflict`。需验证：① 登录后删画布再点同步，项目不复活；② 另一设备若仍持有并更新了同 id 且 `updatedAt` 更新，可按云端更新恢复（有意跨端编辑）。
 - P2.0-B 画布媒体 blob 同步：`POST /api/blobs`（multipart `client_key`+file，幂等）；`GET /api/blobs/by-key/:key` 读流。推送前上传项目内 `image:/video:/audio:` 等 storageKey；拉取后下载本机缺失 blob 写入 IndexedDB。需验证：① 画布生成/导入图片后登录推送，云端 `uploads/.../blobs` 有文件；② 另一设备同步后节点图可显示；③ 重复推送同一 key 不双占盘（deduped）；④ 云无该媒体时不打断 JSON 同步；⑤ 未登录行为不变。
+  - 本机 API 自动化：上传/deduped/下载/跨用户 404 通过。
 - P2.0-C 素材库云同步：`GET/PUT /api/assets` 用户级 manifest（assets + tombstones）；登录自动拉一次 + 素材页「同步云端」；增删改防抖推送；删除写墓碑防复活；媒体走 `/api/blobs`。需验证：① 未登录素材库仍本机可用；② 登录后新增文本/图片素材可同步；③ A 删除后 B 同步不会复活；④ 旧 updatedAt 推送 409 `sync_conflict`；⑤ 用户隔离；⑥ 云故障提示且本机不丢。
+  - 本机 API 自动化：put/get/409/tombstone/跨用户隔离通过。
 - 配置节点模式切换模型：切换图/文/视/音时，若当前模型不匹配能力，会自动切到对应默认模型并写回节点；生成路径 `buildGenerationConfig` 同步按能力选择模型。需验证：配置节点从生图切到视频后模型变为视频模型，再切回文本同理。
 - IME 组合态 Enter：画布提示词输入与 Agent 聊天输入在中文输入法组合过程中不会误提交；仅普通 Enter 触发发送。需验证：拼音未上屏时按 Enter 只是选词，上屏后再 Enter 才提交。
 - Gemini 生图比例：Gemini 生图请求会附带 `imageConfig`/`responseFormat.image`（aspectRatio、部分模型 imageSize）；匹配最近支持比例时不再被本地 3:1 校验误伤。需验证：Gemini 渠道下 16:9 / 9:16 / auto 可正常生图。

@@ -90,6 +90,8 @@ export const useCanvasStore = create<CanvasStore>()(
                     viewport: initialViewport,
                 };
                 set((state) => ({ projects: [project, ...state.projects] }));
+                // Empty project still needs cloud presence after login.
+                scheduleCloudPush(id);
                 return id;
             },
             importProject: (source) => {
@@ -108,6 +110,7 @@ export const useCanvasStore = create<CanvasStore>()(
                     viewport: source.viewport || initialViewport,
                 };
                 set((state) => ({ projects: [project, ...state.projects] }));
+                scheduleCloudPush(project.id);
                 return project.id;
             },
             openProject: (id) => {
@@ -124,9 +127,9 @@ export const useCanvasStore = create<CanvasStore>()(
                     const projects = state.projects.filter((project) => !ids.includes(project.id));
                     return { projects };
                 });
-                // Best-effort cloud delete; local already removed.
+                // Record local tombstones first so a later pull cannot resurrect offline deletes.
                 void import("@/services/canvas-cloud-sync")
-                    .then((mod) => Promise.all(ids.map((id) => mod.removeCloudCanvasProject(id))))
+                    .then((mod) => Promise.all(ids.map((id) => mod.recordCanvasProjectDeletion(id))))
                     .catch(() => undefined);
             },
             replaceProjects: (projects) => set({ projects }),
