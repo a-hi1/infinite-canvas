@@ -1,24 +1,37 @@
-import { javascript } from "@codemirror/lang-javascript";
-import CodeMirror from "@uiw/react-codemirror";
 import { Button, Modal } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { PLUGIN_RETURNS, PLUGIN_TEMPLATES, PLUGIN_VARIABLES } from "@/services/api/model-plugin";
 import type { ModelCapability } from "@/stores/use-config-store";
 
 const capabilityLabels: Record<ModelCapability, string> = { image: "生图", video: "视频", text: "文本", audio: "音频" };
 
-function isDarkMode() {
-    return typeof document !== "undefined" && document.documentElement.classList.contains("dark");
-}
-
 export function ModelScriptEditor({ open, capability, modelName, value, onSave, onClose }: { open: boolean; capability: ModelCapability; modelName: string; value: string; onSave: (script: string) => void; onClose: () => void }) {
     const [draft, setDraft] = useState(value);
+    const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
     useEffect(() => {
         if (open) setDraft(value);
     }, [open, value]);
 
     const variables = PLUGIN_VARIABLES.filter((variable) => !variable.capabilities || variable.capabilities.includes(capability));
+
+    const insertText = (snippet: string) => {
+        const textarea = textareaRef.current;
+        if (!textarea) {
+            setDraft((current) => (current ? `${current}\n${snippet}` : snippet));
+            return;
+        }
+        const start = textarea.selectionStart ?? draft.length;
+        const end = textarea.selectionEnd ?? draft.length;
+        const next = `${draft.slice(0, start)}${snippet}${draft.slice(end)}`;
+        setDraft(next);
+        requestAnimationFrame(() => {
+            textarea.focus();
+            const cursor = start + snippet.length;
+            textarea.setSelectionRange(cursor, cursor);
+        });
+    };
 
     return (
         <Modal
@@ -79,7 +92,7 @@ export function ModelScriptEditor({ open, capability, modelName, value, onSave, 
                                 <button
                                     key={variable.name}
                                     type="button"
-                                    onClick={() => setDraft((current) => (current ? `${current}\n${variable.name}` : variable.name))}
+                                    onClick={() => insertText(variable.name)}
                                     className="group block w-full rounded-lg border border-transparent px-2.5 py-2 text-left transition-colors hover:border-stone-200 hover:bg-white dark:hover:border-stone-700 dark:hover:bg-stone-800/60"
                                 >
                                     <div className="flex flex-wrap items-baseline gap-1.5">
@@ -95,15 +108,18 @@ export function ModelScriptEditor({ open, capability, modelName, value, onSave, 
                     </div>
                 </aside>
                 <div className="min-w-0 flex-1 overflow-hidden bg-white dark:bg-stone-950">
-                    <CodeMirror
+                    {/*
+                      Use a plain monospace textarea instead of CodeMirror.
+                      Mixing @uiw/react-codemirror with standalone @codemirror/lang-* under Vite
+                      often loads two @codemirror/state copies and crashes the route.
+                    */}
+                    <textarea
+                        ref={textareaRef}
                         value={draft}
-                        onChange={setDraft}
-                        height="100%"
-                        theme={isDarkMode() ? "dark" : "light"}
-                        extensions={[javascript()]}
-                        placeholder={"// 留空使用系统默认调用；点击右下角「插入模板」查看示例。"}
-                        style={{ height: "100%", fontSize: 13 }}
-                        className="h-full [&_.cm-editor]:h-full [&_.cm-gutters]:border-none [&_.cm-scroller]:overflow-auto"
+                        onChange={(event) => setDraft(event.target.value)}
+                        spellCheck={false}
+                        placeholder={"// 留空使用系统默认调用；点底部「插入模板」查看示例。\n// 脚本为 async 函数体：可用 prompt/images/http/request/poll 等变量，最后 return 结果。"}
+                        className="h-full w-full resize-none border-0 bg-transparent p-4 font-mono text-[13px] leading-6 text-stone-800 outline-none dark:text-stone-100"
                     />
                 </div>
             </div>
