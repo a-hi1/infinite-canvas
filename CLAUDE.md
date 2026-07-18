@@ -49,7 +49,7 @@
 
 **P0.5c：** 清单 `docs/content/docs/progress/p05c-acceptance.mdx`；自动 `scripts/check-cloud-stack.*` + `scripts/smoke-dual-track.*`；仍须人工 UI 上云与服务器 B2。本机上云占本机 `./data/api`，服务器占服务器 `./data/api`。
 
-**上游跟进：** 矩阵见 `docs/content/docs/progress/upstream-follow.mdx`（约对照 v0.9.0）。**禁止整仓 merge**；推送 `a-hi1`。已移植：透明背景（BYOK）、组节点（最小）、模型调用脚本（旁路 `modelScripts`）、**画布导出当前/选中节点**。完整 0.9 可调宽侧栏/资产卡未移植（依赖插件 registry，与本 fork 画布云同步冲突大）。下一优先：P0.5c 人工验收 → 插件独立工程。`docker-compose` / `nginx` / 端口 `3001`/`3011` 禁止被上游覆盖。 
+**上游跟进：** 矩阵见 `docs/content/docs/progress/upstream-follow.mdx`（约对照 v0.9.0）。**禁止整仓 merge**；推送 `a-hi1`。已移植：透明背景（BYOK）、组节点（最小）、模型调用脚本（旁路 `modelScripts`）、**画布导出当前/选中节点**。完整 0.9 可调宽侧栏/侧栏资产 Tab **现阶段明确不做**（素材用独立素材库；若缺找节点再做最小节点列表）。下一优先：P0.5c 人工验收收口 → 插件独立工程。`docker-compose` / `nginx` / 端口 `3001`/`3011` 禁止被上游覆盖。 
 
 P0.5 扫尾（运维与体验）：`GET /auth/me` 返回 `usage`（已用字节、任务数）与 `limits`（容量上限），供顶栏账号弹层展示；受保护接口 401 时前端统一清登录态（`infinite-canvas:cloud-unauthorized` 事件），避免连环报错；未登录生成成功轻提示「登录后可跨设备回看」；上云失败若为空间不足则明确提示。备份脚本：`scripts/backup-api-data.sh` / `scripts/backup-api-data.ps1`。更完整说明见 `docs/content/docs/overview/cloud-api.mdx`。公网 HTTPS 必须设 `API_COOKIE_SECURE=true` 并收紧 `API_ALLOWED_ORIGINS`（禁止 `*`）。云端错误 envelope 已开始增加稳定 `reason` 字段，后续前端判断应优先依赖 reason，而不是长期靠中文字符串。 
 

@@ -1659,9 +1659,13 @@ function InfiniteCanvasPage() {
         saveAs(node.metadata.content, `canvas-${node.type}-${node.id}.${node.type === CanvasNodeType.Video ? "mp4" : node.type === CanvasNodeType.Audio ? audioExtension(node.metadata.mimeType) : imageExtension(node.metadata.content)}`);
     }, []);
 
+    const exportBusyRef = useRef(false);
+
     const exportCurrentCanvas = useCallback(async () => {
+        if (exportBusyRef.current) return;
         const project = currentProject || useCanvasStore.getState().projects.find((item) => item.id === projectId);
         if (!project) return message.error("当前画布不存在");
+        exportBusyRef.current = true;
         const hide = message.loading("正在导出当前画布…", 0);
         try {
             const snapshot = {
@@ -1681,12 +1685,15 @@ function InfiniteCanvasPage() {
             message.error(error instanceof Error ? error.message : "导出画布失败");
         } finally {
             hide();
+            exportBusyRef.current = false;
         }
     }, [activeChatId, backgroundMode, chatSessions, connections, currentProject, message, nodes, projectId, showImageInfo]);
 
     const exportSelectedNodes = useCallback(async () => {
+        if (exportBusyRef.current) return;
         const selected = nodes.filter((node) => selectedNodeIds.has(node.id));
         if (!selected.length) return message.warning("请先选中要导出的节点");
+        exportBusyRef.current = true;
         const hide = message.loading(`正在导出 ${selected.length} 个节点…`, 0);
         try {
             await exportCanvasNodes(selected, `${currentProject?.title || "画布"}-选中元素`);
@@ -1695,6 +1702,7 @@ function InfiniteCanvasPage() {
             message.error(error instanceof Error ? error.message : "导出节点失败");
         } finally {
             hide();
+            exportBusyRef.current = false;
         }
     }, [currentProject?.title, message, nodes, selectedNodeIds]);
 
