@@ -471,9 +471,13 @@ export function AppConfigModal() {
                 value={scriptEditor ? resolveModelScript(config, scriptEditor.modelValue) : ""}
                 onSave={(script) => {
                     if (!scriptEditor) return;
-                    const next = setModelScript(config, scriptEditor.modelValue, script);
-                    updateConfig("modelScripts", next.modelScripts);
-                    message.success(script.trim() ? "模型调用脚本已保存" : "已恢复系统默认调用");
+                    try {
+                        const next = setModelScript(config, scriptEditor.modelValue, script);
+                        updateConfig("modelScripts", next.modelScripts);
+                        message.success(script.trim() ? "模型调用脚本已保存" : "已恢复系统默认调用");
+                    } catch (error) {
+                        message.error(error instanceof Error ? error.message : "保存脚本失败");
+                    }
                 }}
                 onClose={() => setScriptEditor(null)}
             />

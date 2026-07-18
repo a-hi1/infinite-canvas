@@ -1,7 +1,7 @@
 import { Button, Modal } from "antd";
 import { useEffect, useRef, useState } from "react";
 
-import { PLUGIN_RETURNS, PLUGIN_TEMPLATES, PLUGIN_VARIABLES } from "@/services/api/model-plugin";
+import { MODEL_SCRIPT_MAX_CHARS, PLUGIN_RETURNS, PLUGIN_TEMPLATES, PLUGIN_VARIABLES } from "@/services/api/model-plugin";
 import type { ModelCapability } from "@/stores/use-config-store";
 
 const capabilityLabels: Record<ModelCapability, string> = { image: "生图", video: "视频", text: "文本", audio: "音频" };
@@ -42,7 +42,9 @@ export function ModelScriptEditor({ open, capability, modelName, value, onSave, 
                         {capabilityLabels[capability]}
                         {modelName ? ` - ${modelName}` : ""}
                     </div>
-                    <div className="mt-1 text-xs font-normal text-stone-500">脚本是一段异步函数体，直接使用下方变量，最后 return 结果；留空则使用系统默认调用。</div>
+                    <div className="mt-1 text-xs font-normal text-stone-500">
+                        脚本是一段异步函数体，直接使用下方变量，最后 return 结果；留空则使用系统默认调用。脚本仅保存在本机，不会远程安装；长度上限 {MODEL_SCRIPT_MAX_CHARS.toLocaleString()} 字符。
+                    </div>
                 </div>
             }
             width={1080}
@@ -62,9 +64,13 @@ export function ModelScriptEditor({ open, capability, modelName, value, onSave, 
                         </Button>
                     </div>
                     <div className="flex items-center gap-2">
+                        <span className={`text-xs tabular-nums ${draft.length > MODEL_SCRIPT_MAX_CHARS ? "text-red-500" : "text-stone-400"}`}>
+                            {draft.length.toLocaleString()} / {MODEL_SCRIPT_MAX_CHARS.toLocaleString()}
+                        </span>
                         <Button onClick={onClose}>取消</Button>
                         <Button
                             type="primary"
+                            disabled={draft.length > MODEL_SCRIPT_MAX_CHARS}
                             onClick={() => {
                                 onSave(draft.trim());
                                 onClose();

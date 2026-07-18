@@ -252,6 +252,8 @@ export const useConfigStore = create<ConfigStore>()(
     ),
 );
 
+const MODEL_SCRIPT_STORE_MAX_CHARS = 80_000;
+
 function normalizeModelScripts(value: unknown): Record<string, string> {
     if (!value || typeof value !== "object" || Array.isArray(value)) return {};
     const next: Record<string, string> = {};
@@ -259,6 +261,8 @@ function normalizeModelScripts(value: unknown): Record<string, string> {
         const modelKey = key.trim();
         const text = typeof script === "string" ? script.trim() : "";
         if (!modelKey || !text) continue;
+        // Persist only bounded scripts; oversized values are dropped on load to protect local storage.
+        if (text.length > MODEL_SCRIPT_STORE_MAX_CHARS) continue;
         next[modelKey] = text;
     }
     return next;
@@ -282,8 +286,12 @@ export function setModelScript(config: AiConfig, modelValue: string, script: str
     if (!key) return config;
     const nextScripts = { ...(config.modelScripts || {}) };
     const text = script.trim();
-    if (text) nextScripts[key] = text;
-    else delete nextScripts[key];
+    if (text) {
+        if (text.length > MODEL_SCRIPT_STORE_MAX_CHARS) {
+            throw new Error(`模型调用脚本过长（最多 ${MODEL_SCRIPT_STORE_MAX_CHARS} 字符）`);
+        }
+        nextScripts[key] = text;
+    } else delete nextScripts[key];
     return { ...config, modelScripts: nextScripts };
 }
 

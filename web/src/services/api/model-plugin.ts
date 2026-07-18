@@ -4,6 +4,15 @@ import { buildApiUrl, type AiConfig, type ModelCapability } from "@/stores/use-c
 
 type RequestOptions = { signal?: AbortSignal };
 
+/** Soft limits for local-only user scripts — not a sandbox, just blast-radius control. */
+export const MODEL_SCRIPT_MAX_CHARS = 80_000;
+const MODEL_SCRIPT_RUN_TIMEOUT_MS = 10 * 60 * 1000;
+const MODEL_SCRIPT_MAX_SLEEP_MS = 30_000;
+const MODEL_SCRIPT_MIN_POLL_INTERVAL_MS = 500;
+const MODEL_SCRIPT_MAX_POLL_INTERVAL_MS = 30_000;
+const MODEL_SCRIPT_DEFAULT_POLL_TIMEOUT_MS = 5 * 60 * 1000;
+const MODEL_SCRIPT_MAX_POLL_TIMEOUT_MS = 10 * 60 * 1000;
+
 export type PluginHttpOptions = {
     headers?: Record<string, string>;
     params?: Record<string, unknown>;
@@ -49,7 +58,7 @@ function createPluginHttp(config: AiConfig, options?: RequestOptions): PluginHtt
             url: pluginUrl(config, path),
             data: method === "post" ? body : undefined,
             params: opts?.params,
-            headers: pluginHeaders({ Authorization: `Bearer ${config.apiKey}`, ...opts?.headers }, method === "post" && !isForm && body !== undefined),
+            headers: pluginHeaders({ ...(config.apiKey.trim() ? { Authorization: `Bearer ${config.apiKey}` } : {}), ...opts?.headers }, method === "post" && !isForm && body !== undefined),
             responseType: opts?.responseType || "json",
             signal: options?.signal,
         });
@@ -70,13 +79,19 @@ function createPluginRequest(config: AiConfig, options?: RequestOptions) {
     };
 }
 
+function clamp(value: number, min: number, max: number) {
+    if (!Number.isFinite(value)) return min;
+    return Math.min(max, Math.max(min, value));
+}
+
 function sleep(ms: number, signal?: AbortSignal) {
+    const waitMs = clamp(Number(ms) || 0, 0, MODEL_SCRIPT_MAX_SLEEP_MS);
     return new Promise<void>((resolve, reject) => {
         if (signal?.aborted) {
             reject(new DOMException("Aborted", "AbortError"));
             return;
         }
-        const timer = setTimeout(resolve, ms);
+        const timer = setTimeout(resolve, waitMs);
         signal?.addEventListener(
             "abort",
             () => {
@@ -90,17 +105,41 @@ function sleep(ms: number, signal?: AbortSignal) {
 
 function createPoll(signal?: AbortSignal) {
     return async function poll<T, R>(request: () => Promise<T>, extract: (value: T) => R | null | undefined | false, options?: PluginPollOptions): Promise<R> {
-        const intervalMs = options?.intervalMs ?? 2500;
-        const timeoutMs = options?.timeoutMs ?? 300000;
+        const intervalMs = clamp(options?.intervalMs ?? 2500, MODEL_SCRIPT_MIN_POLL_INTERVAL_MS, MODEL_SCRIPT_MAX_POLL_INTERVAL_MS);
+        const timeoutMs = clamp(options?.timeoutMs ?? MODEL_SCRIPT_DEFAULT_POLL_TIMEOUT_MS, intervalMs, MODEL_SCRIPT_MAX_POLL_TIMEOUT_MS);
         const deadline = performance.now() + timeoutMs;
         for (;;) {
             if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
             const result = extract(await request());
             if (result !== null && result !== undefined && result !== false) return result;
-            if (performance.now() >= deadline) throw new Error("插件轮询超时，请检查调用脚本或稍后重试");
+            if (performance.now() >= deadline) throw new Error("模型调用脚本轮询超时，请检查脚本或稍后重试");
             await sleep(intervalMs, signal);
         }
     };
+}
+
+function assertScriptSource(script: string) {
+    const text = script.trim();
+    if (!text) throw new Error("模型调用脚本为空");
+    if (text.length > MODEL_SCRIPT_MAX_CHARS) throw new Error(`模型调用脚本过长（最多 ${MODEL_SCRIPT_MAX_CHARS} 字符）`);
+    return text;
+}
+
+function mergeAbortSignals(signals: Array<AbortSignal | undefined>) {
+    const list = signals.filter((signal): signal is AbortSignal => Boolean(signal));
+    if (!list.length) return undefined;
+    if (list.length === 1) return list[0];
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") return AbortSignal.any(list);
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    for (const signal of list) {
+        if (signal.aborted) {
+            controller.abort();
+            break;
+        }
+        signal.addEventListener("abort", onAbort, { once: true });
+    }
+    return controller.signal;
 }
 
 /**
@@ -109,12 +148,18 @@ function createPoll(signal?: AbortSignal) {
  *   model / baseUrl / apiKey / systemPrompt     —— 当前渠道信息
  *   http / request / poll / sleep / signal / onDelta    —— 调用辅助
  * The script must `return` the result; each caller normalizes it to its capability's shape.
+ *
+ * Not a sandbox: scripts are local config only. Limits below only cap size / wait / overall runtime.
  */
 export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<T> {
+    const script = assertScriptSource(args.script);
     const { config } = args;
-    const http = createPluginHttp(config, { signal: args.signal });
-    const request = createPluginRequest(config, { signal: args.signal });
-    const poll = createPoll(args.signal);
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), MODEL_SCRIPT_RUN_TIMEOUT_MS);
+    const signal = mergeAbortSignals([args.signal, timeout.signal]);
+    const http = createPluginHttp(config, { signal });
+    const request = createPluginRequest(config, { signal });
+    const poll = createPoll(signal);
     const runner = new Function(
         "prompt",
         "images",
@@ -130,7 +175,7 @@ export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<
         "sleep",
         "signal",
         "onDelta",
-        `"use strict"; return (async () => {\n${args.script}\n})();`,
+        `"use strict"; return (async () => {\n${script}\n})();`,
     ) as (...fnArgs: unknown[]) => Promise<T>;
     try {
         return await runner(
@@ -145,15 +190,18 @@ export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<
             http,
             request,
             poll,
-            (ms: number) => sleep(ms, args.signal),
-            args.signal,
+            (ms: number) => sleep(ms, signal),
+            signal,
             args.onDelta,
         );
     } catch (error) {
+        if (timeout.signal.aborted && !args.signal?.aborted) throw new Error("模型调用脚本执行超时，请检查脚本中的轮询/等待逻辑");
         if (error instanceof DOMException && error.name === "AbortError") throw error;
         if (axios.isCancel(error)) throw error;
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(`模型调用脚本执行失败：${message}`);
+    } finally {
+        clearTimeout(timer);
     }
 }
 
