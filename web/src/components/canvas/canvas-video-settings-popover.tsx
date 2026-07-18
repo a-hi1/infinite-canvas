@@ -6,7 +6,7 @@ import { Button } from "antd";
 import { VideoSettingsPanel, videoSettingsSummary } from "@/components/video-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
-import type { AiConfig } from "@/stores/use-config-store";
+import { resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 
 type CanvasVideoSettingsPopoverProps = {
     config: AiConfig;
@@ -21,6 +21,8 @@ export function CanvasVideoSettingsPopover({ config, onConfigChange, buttonClass
     const panelRef = useRef<HTMLDivElement>(null);
     const [open, setOpen] = useState(false);
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
+    const usesCustomScript = Boolean(resolveModelScript(config, config.model || config.videoModel || ""));
+    const summary = `${videoSettingsSummary(config)}${usesCustomScript ? " · 脚本" : ""}`;
 
     useEffect(() => {
         if (!open) return;
@@ -48,10 +50,16 @@ export function CanvasVideoSettingsPopover({ config, onConfigChange, buttonClass
     return (
         <>
             <span ref={buttonRef} className="inline-flex min-w-0">
-                <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[170px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} onClick={() => setOpen((current) => !current)}>
-                    <span className="truncate">
-                        {videoSettingsSummary(config)}
-                    </span>
+                <Button
+                    size="small"
+                    type="text"
+                    className={buttonClassName || "!h-8 !max-w-[170px] !justify-start !rounded-full !px-2.5"}
+                    style={{ background: theme.node.fill, color: theme.node.text }}
+                    icon={<Settings2 className="size-3.5" />}
+                    title={usesCustomScript ? `${summary}（当前模型使用本地自定义调用脚本）` : summary}
+                    onClick={() => setOpen((current) => !current)}
+                >
+                    <span className="truncate">{summary}</span>
                 </Button>
             </span>
             {panel}
