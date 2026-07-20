@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { Copy, FolderPlus, ImageIcon, ImagePlus, Star, VideoIcon, WandSparkles, X } from "lucide-react";
 import { Button, Modal, Space, Tag } from "antd";
 
-import { getCategoryLabel, getPromptQualityLabel, getPromptSummary, type Prompt } from "@/services/api/prompts";
+import { getCategoryLabel, getPromptQualityLabel, getPromptSummary, isUsablePromptCoverUrl, type Prompt } from "@/services/api/prompts";
 
 export function PromptDetailDialog({
     prompt,
@@ -35,11 +35,15 @@ export function PromptDetailDialog({
     const summary = prompt ? getPromptSummary(prompt) : "";
     const quality = prompt ? getPromptQualityLabel(prompt.qualityScore || 0) : "";
     const sourceLabel = prompt ? getCategoryLabel(prompt.category) : "";
-    const coverUrl = (prompt?.coverUrl || "").trim();
+    const rawCoverUrl = (prompt?.coverUrl || "").trim();
+    const coverUrl = isUsablePromptCoverUrl(rawCoverUrl) ? rawCoverUrl : "";
+    const [coverBroken, setCoverBroken] = useState(false);
+    const showCover = Boolean(coverUrl) && !coverBroken;
 
     useEffect(() => {
         setPreviewOpen(false);
-    }, [prompt?.id]);
+        setCoverBroken(false);
+    }, [prompt?.id, coverUrl]);
 
     useEffect(() => {
         if (!previewOpen) return;
@@ -66,7 +70,7 @@ export function PromptDetailDialog({
                 {prompt ? (
                     <div className="grid gap-5 md:grid-cols-[300px_minmax(0,1fr)]">
                         <div className="space-y-3">
-                            {coverUrl ? (
+                            {showCover ? (
                                 <button
                                     type="button"
                                     onClick={openPreview}
@@ -74,7 +78,19 @@ export function PromptDetailDialog({
                                     style={{ cursor: "zoom-in" }}
                                     title="点击放大"
                                 >
-                                    <img src={coverUrl} alt={prompt.title} className="aspect-4/3 w-full object-cover" draggable={false} />
+                                    <img
+                                        src={coverUrl}
+                                        alt={prompt.title}
+                                        className="aspect-4/3 w-full object-cover"
+                                        draggable={false}
+                                        onError={() => setCoverBroken(true)}
+                                        onLoad={(event) => {
+                                            const img = event.currentTarget;
+                                            if (img.naturalWidth > 0 && img.naturalHeight > 0 && (img.naturalWidth < 48 || img.naturalHeight < 48)) {
+                                                setCoverBroken(true);
+                                            }
+                                        }}
+                                    />
                                 </button>
                             ) : (
                                 <div className="flex aspect-4/3 w-full flex-col items-center justify-center gap-2 rounded-lg bg-stone-100 text-stone-400 dark:bg-stone-900 dark:text-stone-500">
@@ -108,7 +124,7 @@ export function PromptDetailDialog({
                             </div>
                             <p className="mt-4 whitespace-pre-wrap text-sm leading-7 text-stone-800 dark:text-stone-300">{prompt.prompt}</p>
                             <div className="mt-4 text-xs text-stone-500 dark:text-stone-400">
-                                质量分 {prompt.qualityScore || 0} · {prompt.hasCover ? "有预览图" : "无预览图"} · 适合先{prompt.hasCover ? "看图理解再生成" : "用 AI 优化后生成"}
+                                质量分 {prompt.qualityScore || 0} · {showCover ? "有预览图" : "无预览图"} · 适合先{showCover ? "看图理解再生成" : "用 AI 优化后生成"}
                             </div>
                             <Space wrap className="mt-5">
                                 <Button type="primary" icon={<ImagePlus className="size-4" />} onClick={() => onUseImage?.(prompt)}>

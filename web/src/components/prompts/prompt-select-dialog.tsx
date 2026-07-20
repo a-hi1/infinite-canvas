@@ -8,6 +8,7 @@ import {
     getCategoryLabel,
     getPromptQualityLabel,
     getPromptSummary,
+    isUsablePromptCoverUrl,
     rememberRecentPrompt,
     toggleFavoritePrompt,
     type Prompt,
@@ -329,11 +330,24 @@ export function PromptSelectDialog({
                 {selectedPrompt ? (
                     <div className="grid gap-4 md:grid-cols-[240px_minmax(0,1fr)]" data-canvas-no-zoom onWheelCapture={(event) => event.stopPropagation()}>
                         <div className="space-y-3">
-                            {selectedPrompt.coverUrl ? (
-                                <img src={selectedPrompt.coverUrl} alt={selectedPrompt.title} className="aspect-[4/3] w-full rounded-lg object-cover" />
-                            ) : (
-                                <div className="flex aspect-[4/3] w-full items-center justify-center rounded-lg bg-stone-100 text-xs text-stone-400 dark:bg-stone-900 dark:text-stone-500">无预览图</div>
-                            )}
+                            {isUsablePromptCoverUrl(selectedPrompt.coverUrl) ? (
+                                <img
+                                    src={selectedPrompt.coverUrl}
+                                    alt={selectedPrompt.title}
+                                    className="aspect-4/3 w-full rounded-lg object-cover"
+                                    onError={(event) => {
+                                        event.currentTarget.style.display = "none";
+                                        const fallback = event.currentTarget.nextElementSibling;
+                                        if (fallback instanceof HTMLElement) fallback.hidden = false;
+                                    }}
+                                />
+                            ) : null}
+                            <div
+                                hidden={isUsablePromptCoverUrl(selectedPrompt.coverUrl)}
+                                className="flex aspect-4/3 w-full items-center justify-center rounded-lg bg-stone-100 text-xs text-stone-400 dark:bg-stone-900 dark:text-stone-500"
+                            >
+                                无预览图
+                            </div>
                             <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-xs leading-5 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">
                                 <div className="mb-1 font-medium text-stone-800 dark:text-stone-100">用途摘要</div>
                                 <div>{getPromptSummary(selectedPrompt)}</div>

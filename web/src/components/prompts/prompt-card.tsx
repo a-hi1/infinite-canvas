@@ -1,8 +1,8 @@
 import { Copy, ImageIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Button, Card, Tag } from "antd";
 
-import { getCategoryLabel, getPromptQualityLabel, getPromptSummary, type Prompt } from "@/services/api/prompts";
+import { getCategoryLabel, getPromptQualityLabel, getPromptSummary, isUsablePromptCoverUrl, type Prompt } from "@/services/api/prompts";
 
 export function PromptCard({
     item,
@@ -25,6 +25,13 @@ export function PromptCard({
     const summary = getPromptSummary(item);
     const quality = getPromptQualityLabel(item.qualityScore || 0);
     const sourceLabel = getCategoryLabel(item.category);
+    const initialCover = isUsablePromptCoverUrl(item.coverUrl) ? item.coverUrl.trim() : "";
+    const [coverBroken, setCoverBroken] = useState(false);
+    const showCover = Boolean(initialCover) && !coverBroken;
+
+    useEffect(() => {
+        setCoverBroken(false);
+    }, [item.id, item.coverUrl]);
 
     return (
         <Card
@@ -33,8 +40,21 @@ export function PromptCard({
             styles={{ body: { padding: 0 } }}
             cover={
                 <button type="button" className="block w-full text-left" onClick={onOpen}>
-                    {item.coverUrl ? (
-                        <img src={item.coverUrl} alt={item.title} className="aspect-[4/3] w-full object-cover" />
+                    {showCover ? (
+                        <img
+                            src={initialCover}
+                            alt={item.title}
+                            className="aspect-[4/3] w-full object-cover"
+                            loading="lazy"
+                            onError={() => setCoverBroken(true)}
+                            onLoad={(event) => {
+                                // 过小图（常见 1x1 占位）不当预览，回退到「无预览图」
+                                const img = event.currentTarget;
+                                if (img.naturalWidth > 0 && img.naturalHeight > 0 && (img.naturalWidth < 48 || img.naturalHeight < 48)) {
+                                    setCoverBroken(true);
+                                }
+                            }}
+                        />
                     ) : (
                         <div className="flex aspect-[4/3] w-full flex-col items-center justify-center gap-2 bg-stone-100 px-4 text-center text-stone-400 dark:bg-stone-900 dark:text-stone-500">
                             <ImageIcon className="size-8" />
@@ -78,10 +98,10 @@ export function PromptCard({
                         event.currentTarget.scrollLeft += event.deltaY;
                     }}
                 >
-                    <Button className="shrink-0" type={actionType} size="small" icon={actionIcon} onClick={onCopy}>
+                    {extraAction}
+                    <Button size="small" type={actionType} icon={actionIcon} onClick={onCopy} className="shrink-0">
                         {actionLabel}
                     </Button>
-                    {extraAction}
                 </div>
             </div>
         </Card>

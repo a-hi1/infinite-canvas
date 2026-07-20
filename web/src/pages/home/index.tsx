@@ -3,7 +3,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { App, Button, Image, Tag } from "antd";
 import { useNavigate } from "react-router-dom";
 
-import { fetchPrompts, type Prompt } from "@/services/api/prompts";
+import { fetchPrompts, isUsablePromptCoverUrl, type Prompt } from "@/services/api/prompts";
 import { navigationTools } from "@/constant/navigation-tools";
 import { cn } from "@/lib/utils";
 
@@ -29,8 +29,12 @@ export default function IndexPage() {
     const [previewOpen, setPreviewOpen] = useState(false);
 
     useEffect(() => {
-        void fetchPrompts({ pageSize: 12 })
-            .then((data) => setPromptShowcase(data.items))
+        void fetchPrompts({ pageSize: 24, qualityMode: "with-cover" })
+            .then((data) => {
+                // 首页展示只收真正可用封面，避免黑灰坏图占位
+                const withCover = data.items.filter((item) => isUsablePromptCoverUrl(item.coverUrl)).slice(0, 12);
+                setPromptShowcase(withCover.length ? withCover : data.items.slice(0, 8));
+            })
             .catch((error) => message.error(error instanceof Error ? error.message : "获取提示词失败"));
     }, [message]);
 
@@ -80,8 +84,8 @@ export default function IndexPage() {
                                 key={item.id}
                                 type="button"
                                 onClick={() => {
-                                    if (!item.coverUrl) return;
-                                    setPreviewIndex(promptShowcase.slice(0, index).filter((prompt) => Boolean(prompt.coverUrl)).length);
+                                    if (!isUsablePromptCoverUrl(item.coverUrl)) return;
+                                    setPreviewIndex(promptShowcase.slice(0, index).filter((prompt) => isUsablePromptCoverUrl(prompt.coverUrl)).length);
                                     setPreviewOpen(true);
                                 }}
                                 className={cn(
@@ -90,8 +94,15 @@ export default function IndexPage() {
                                     index === 3 && "md:col-span-2",
                                 )}
                             >
-                                {item.coverUrl ? (
-                                    <img src={item.coverUrl} alt={item.title} className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]" />
+                                {isUsablePromptCoverUrl(item.coverUrl) ? (
+                                    <img
+                                        src={item.coverUrl}
+                                        alt={item.title}
+                                        className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]"
+                                        onError={(event) => {
+                                            event.currentTarget.style.display = "none";
+                                        }}
+                                    />
                                 ) : (
                                     <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-stone-400 dark:text-stone-500">
                                         <ImageIcon className="size-8" />
@@ -124,7 +135,7 @@ export default function IndexPage() {
             >
                 <div className="hidden">
                     {promptShowcase
-                        .filter((item) => Boolean(item.coverUrl))
+                        .filter((item) => isUsablePromptCoverUrl(item.coverUrl))
                         .map((item) => (
                             <Image key={item.id} src={item.coverUrl} alt={item.title} />
                         ))}

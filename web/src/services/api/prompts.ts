@@ -354,14 +354,15 @@ function filterPrompts(items: Prompt[], options: { keyword: string; category: st
 
 function matchesQualityMode(item: Prompt, mode: PromptQualityMode) {
     if (mode === "all") return true;
-    if (mode === "with-cover") return Boolean(item.hasCover ?? item.coverUrl);
-    // featured: 有封面，或正文质量达到可用线
-    return Boolean(item.hasCover ?? item.coverUrl) || (item.qualityScore || 0) >= 65;
+    if (mode === "with-cover") return promptHasUsableCover(item);
+    // featured: 真正可用封面优先；无可用封面时仅保留正文质量够高的条目
+    return promptHasUsableCover(item) || (item.qualityScore || 0) >= 70;
 }
 
 function sortPrompts(items: Prompt[]) {
     return [...items].sort((a, b) => {
-        const coverDelta = Number(Boolean(b.hasCover ?? b.coverUrl)) - Number(Boolean(a.hasCover ?? a.coverUrl));
+        // 真正有可用预览图的排前面；坏链/空串/占位不算有图
+        const coverDelta = Number(promptHasUsableCover(b)) - Number(promptHasUsableCover(a));
         if (coverDelta) return coverDelta;
         const scoreDelta = (b.qualityScore || 0) - (a.qualityScore || 0);
         if (scoreDelta) return scoreDelta;
@@ -369,8 +370,31 @@ function sortPrompts(items: Prompt[]) {
     });
 }
 
+/** 仅当 coverUrl 像真实图片地址时才算「有预览图」；1x1/占位/非图片链接不算。 */
+export function isUsablePromptCoverUrl(coverUrl: string | undefined | null) {
+    const url = (coverUrl || "").trim();
+    if (!url) return false;
+    if (url.startsWith("data:image/")) {
+        // 极短 data URI 多半是 1x1 占位
+        if (url.length < 80) return false;
+        return true;
+    }
+    if (!/^https?:\/\//i.test(url) && !url.startsWith("blob:")) return false;
+    const lower = url.toLowerCase();
+    // 常见占位 / 追踪像素 / 空图
+    if (/(placeholder|no[-_]?image|no[-_]?cover|default[-_]?cover|blank|spacer|pixel\.|1x1|transparent\.gif|spacer\.gif)/i.test(lower)) return false;
+    if (/\/(avatar|favicon)s?\//i.test(lower) && !/\.(png|jpe?g|webp|gif|avif)(?:[?#]|$)/i.test(lower)) return false;
+    return true;
+}
+
+export function promptHasUsableCover(item: Pick<Prompt, "coverUrl" | "hasCover">) {
+    if (item.hasCover === false) return false;
+    return isUsablePromptCoverUrl(item.coverUrl);
+}
+
 function enrichPrompt(item: Prompt): Prompt {
-    const coverUrl = (item.coverUrl || "").trim();
+    const rawCover = (item.coverUrl || "").trim();
+    const coverUrl = isUsablePromptCoverUrl(rawCover) ? rawCover : "";
     const tags = normalizePromptTags(item.tags);
     const summary = buildPromptSummary(item.prompt, item.title);
     const topic = inferPromptTopic(item.title, item.prompt, tags);
@@ -399,7 +423,8 @@ function scorePromptQuality(item: Pick<Prompt, "title" | "prompt" | "coverUrl" |
     const title = (item.title || "").trim();
     let score = 0;
 
-    if (item.coverUrl) score += 35;
+    // 只给「看起来可用」的封面加分，避免坏链把精选池刷满
+    if (isUsablePromptCoverUrl(item.coverUrl)) score += 35;
     if (prompt.length >= 40) score += 15;
     if (prompt.length >= 80) score += 10;
     if (prompt.length >= 140) score += 5;
@@ -520,11 +545,12 @@ function defaultPrompt(id: string, title: string, prompt: string, coverUrl: stri
     const normalizedTags = normalizePromptTags(tags);
     const summary = buildPromptSummary(prompt, title);
     const topic = inferPromptTopic(title, prompt, normalizedTags);
-    const qualityScore = scorePromptQuality({ title, prompt, coverUrl, tags: normalizedTags, summary, topic });
+    const usableCover = isUsablePromptCoverUrl(coverUrl) ? coverUrl.trim() : "";
+    const qualityScore = scorePromptQuality({ title, prompt, coverUrl: usableCover, tags: normalizedTags, summary, topic });
     return {
         id,
         title,
-        coverUrl,
+        coverUrl: usableCover,
         prompt,
         tags: normalizedTags,
         preview,
@@ -533,7 +559,7 @@ function defaultPrompt(id: string, title: string, prompt: string, coverUrl: stri
         summary,
         topic,
         qualityScore,
-        hasCover: Boolean(coverUrl),
+        hasCover: Boolean(usableCover),
     };
 }
 
