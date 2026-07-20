@@ -28,10 +28,28 @@ type PromptCategory = {
 
 export const ALL_PROMPTS_OPTION = "全部";
 export const PROMPT_QUALITY_MODES = [
-    { value: "featured", label: "精选（有图优先）" },
+    { value: "featured", label: "精选（有效预览）" },
     { value: "with-cover", label: "仅有预览图" },
     { value: "all", label: "全部" },
 ] as const;
+
+/** Runtime: covers that failed to load in the browser (bad CDN / 404 / tiny placeholder). */
+const brokenPromptCoverUrls = new Set<string>();
+
+/** Local BYOK-generated covers for third-party prompts (never written back to GitHub). */
+const localCoverKey = "prompt-local-covers";
+let localCoverMemory: Record<string, string> = {};
+let localCoverReady: Promise<Record<string, string>> | null = null;
+
+export function markPromptCoverBroken(coverUrl: string | undefined | null) {
+    const url = (coverUrl || "").trim();
+    if (url) brokenPromptCoverUrls.add(url);
+}
+
+export function clearBrokenPromptCovers() {
+    brokenPromptCoverUrls.clear();
+}
+
 export type PromptQualityMode = (typeof PROMPT_QUALITY_MODES)[number]["value"];
 
 export type PromptSourceStatus = {
@@ -68,6 +86,7 @@ const myPromptKey = "my-prompts";
 const recentPromptLimit = 20;
 const favoritePromptLimit = 200;
 const myPromptLimit = 300;
+const localCoverLimit = 200;
 const promptCacheStore = localforage.createInstance({ name: "infinite-canvas", storeName: "prompt_cache" });
 export const MY_PROMPTS_CATEGORY = "my-prompts";
 export const FAVORITES_CATEGORY = "favorites";
@@ -102,6 +121,7 @@ export async function fetchPrompts({
     pageSize?: number;
     forceRefresh?: boolean;
 } = {}) {
+    await ensureLocalCoverMemory();
     const bundle = await getPromptBundle(forceRefresh);
     const normalizedKeyword = keyword.trim().toLowerCase();
     const normalizedPage = Math.max(1, page);
@@ -144,12 +164,14 @@ export function getPromptQualityLabel(score = 0) {
 }
 
 export async function refreshPromptLibrary() {
+    clearBrokenPromptCovers();
     memoryBundle = null;
     loadingPrompts = null;
     return fetchPrompts({ page: 1, pageSize: 1, forceRefresh: true });
 }
 
 export async function getRecentPrompts() {
+    await ensureLocalCoverMemory();
     const items = (await promptCacheStore.getItem<Prompt[]>(recentPromptKey)) || [];
     return items.filter((item) => item?.id && item?.prompt).map(enrichPrompt);
 }
@@ -162,6 +184,7 @@ export async function rememberRecentPrompt(prompt: Prompt) {
 }
 
 export async function getFavoritePrompts() {
+    await ensureLocalCoverMemory();
     const items = (await promptCacheStore.getItem<Prompt[]>(favoritePromptKey)) || [];
     return items.filter((item) => item?.id && item?.prompt).map(enrichPrompt);
 }
@@ -182,6 +205,7 @@ export async function toggleFavoritePrompt(prompt: Prompt) {
 }
 
 export async function getMyPrompts() {
+    await ensureLocalCoverMemory();
     const items = (await promptCacheStore.getItem<Prompt[]>(myPromptKey)) || [];
     return items.filter((item) => item?.id && item?.prompt).map(enrichPrompt);
 }
@@ -202,7 +226,7 @@ export async function saveMyPrompt(input: { id?: string; title: string; prompt: 
             title,
             prompt: content,
             tags: normalizePromptTags(input.tags || current[index].tags || []),
-            coverUrl: input.coverUrl || current[index].coverUrl || "",
+            coverUrl: input.coverUrl !== undefined ? input.coverUrl : current[index].coverUrl || "",
             updatedAt: now,
         });
         const next = [...current];
@@ -227,6 +251,63 @@ export async function saveMyPrompt(input: { id?: string; title: string; prompt: 
     const next = [created, ...current].slice(0, myPromptLimit);
     await promptCacheStore.setItem(myPromptKey, next);
     return created;
+}
+
+/** Persist a locally generated/overridden cover for one prompt (public library or mine). */
+export async function setPromptCoverOverride(prompt: Prompt, coverUrl: string) {
+    const nextCover = (coverUrl || "").trim();
+    if (!prompt?.id) throw new Error("提示词无效");
+    if (!isUsablePromptCoverUrl(nextCover)) throw new Error("预览图地址无效");
+
+    // Drop any previous failure mark for this new cover.
+    brokenPromptCoverUrls.delete(nextCover);
+
+    if (prompt.category === MY_PROMPTS_CATEGORY || prompt.id.startsWith("my-")) {
+        const saved = await saveMyPrompt({
+            id: prompt.id,
+            title: prompt.title,
+            prompt: prompt.prompt,
+            tags: prompt.tags,
+            coverUrl: nextCover,
+        });
+        await patchLocalPromptLists(saved);
+        return saved;
+    }
+
+    await ensureLocalCoverMemory();
+    const nextMap: Record<string, string> = { [prompt.id]: nextCover };
+    for (const [id, url] of Object.entries(localCoverMemory)) {
+        if (id === prompt.id || !url) continue;
+        nextMap[id] = url;
+        if (Object.keys(nextMap).length >= localCoverLimit) break;
+    }
+    localCoverMemory = nextMap;
+    await promptCacheStore.setItem(localCoverKey, localCoverMemory);
+
+    const updated = enrichPrompt({ ...prompt, coverUrl: nextCover });
+    await patchLocalPromptLists(updated);
+    return updated;
+}
+
+async function ensureLocalCoverMemory() {
+    if (!localCoverReady) {
+        localCoverReady = (async () => {
+            const stored = (await promptCacheStore.getItem<Record<string, string>>(localCoverKey)) || {};
+            localCoverMemory = stored && typeof stored === "object" ? stored : {};
+            return localCoverMemory;
+        })();
+    }
+    return localCoverReady;
+}
+
+async function patchLocalPromptLists(updated: Prompt) {
+    const patch = async (key: string) => {
+        const items = (await promptCacheStore.getItem<Prompt[]>(key)) || [];
+        if (!items.some((item) => item?.id === updated.id)) return;
+        const next = items.map((item) => (item.id === updated.id ? { ...item, coverUrl: updated.coverUrl, hasCover: updated.hasCover, qualityScore: updated.qualityScore } : item));
+        await promptCacheStore.setItem(key, next);
+    };
+    await Promise.all([patch(recentPromptKey), patch(favoritePromptKey)]);
 }
 
 export async function deleteMyPrompt(id: string) {
@@ -354,14 +435,14 @@ function filterPrompts(items: Prompt[], options: { keyword: string; category: st
 
 function matchesQualityMode(item: Prompt, mode: PromptQualityMode) {
     if (mode === "all") return true;
-    if (mode === "with-cover") return promptHasUsableCover(item);
-    // featured: 真正可用封面优先；无可用封面时仅保留正文质量够高的条目
-    return promptHasUsableCover(item) || (item.qualityScore || 0) >= 70;
+    // featured / with-cover：只收「当前可用」预览，高分无图不再进精选前排
+    if (mode === "with-cover" || mode === "featured") return promptHasUsableCover(item);
+    return true;
 }
 
 function sortPrompts(items: Prompt[]) {
     return [...items].sort((a, b) => {
-        // 真正有可用预览图的排前面；坏链/空串/占位不算有图
+        // 真正有可用预览图的排前面；坏链/空串/占位/加载失败不算有图
         const coverDelta = Number(promptHasUsableCover(b)) - Number(promptHasUsableCover(a));
         if (coverDelta) return coverDelta;
         const scoreDelta = (b.qualityScore || 0) - (a.qualityScore || 0);
@@ -370,10 +451,11 @@ function sortPrompts(items: Prompt[]) {
     });
 }
 
-/** 仅当 coverUrl 像真实图片地址时才算「有预览图」；1x1/占位/非图片链接不算。 */
+/** 仅当 coverUrl 像真实图片地址时才算「有预览图」；1x1/占位/非图片链接/已加载失败不算。 */
 export function isUsablePromptCoverUrl(coverUrl: string | undefined | null) {
     const url = (coverUrl || "").trim();
     if (!url) return false;
+    if (brokenPromptCoverUrls.has(url)) return false;
     if (url.startsWith("data:image/")) {
         // 极短 data URI 多半是 1x1 占位
         if (url.length < 80) return false;
@@ -392,8 +474,15 @@ export function promptHasUsableCover(item: Pick<Prompt, "coverUrl" | "hasCover">
     return isUsablePromptCoverUrl(item.coverUrl);
 }
 
+/** 列表在封面加载失败后本地重排/重筛（不回写 GitHub）。 */
+export function arrangePrompts(items: Prompt[], qualityMode: PromptQualityMode = "all") {
+    const next = items.map((item) => enrichPrompt(item));
+    return sortPrompts(next.filter((item) => matchesQualityMode(item, qualityMode)));
+}
+
 function enrichPrompt(item: Prompt): Prompt {
-    const rawCover = (item.coverUrl || "").trim();
+    const localCover = item.id ? (localCoverMemory[item.id] || "").trim() : "";
+    const rawCover = localCover || (item.coverUrl || "").trim();
     const coverUrl = isUsablePromptCoverUrl(rawCover) ? rawCover : "";
     const tags = normalizePromptTags(item.tags);
     const summary = buildPromptSummary(item.prompt, item.title);

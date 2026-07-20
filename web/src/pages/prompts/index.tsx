@@ -1,4 +1,4 @@
-import { FolderPlus, ImagePlus, Plus, RefreshCw, Search, Star, Trash2, VideoIcon, WandSparkles } from "lucide-react";
+import { FolderPlus, ImagePlus, Plus, RefreshCw, Search, Sparkles, Star, Trash2, VideoIcon, WandSparkles } from "lucide-react";
 import { type UIEvent, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { App, Button, Empty, Form, Input, Modal, Segmented, Space, Spin, Tag } from "antd";
@@ -7,6 +7,7 @@ import { PromptCard } from "@/components/prompts/prompt-card";
 import { usePromptList, type PromptLibraryScope } from "@/components/prompts/use-prompt-list";
 import { PromptDetailDialog } from "./components/prompt-detail-dialog";
 import { useCopyText } from "@/hooks/use-copy-text";
+import { generatePromptCover } from "@/lib/prompt-cover-generate";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
 import { cn } from "@/lib/utils";
 import { useAssetStore } from "@/stores/use-asset-store";
@@ -43,12 +44,14 @@ export default function PromptsPage() {
     const [editingMine, setEditingMine] = useState<Prompt | null>(null);
     const [mineModalOpen, setMineModalOpen] = useState(false);
     const [optimizingMine, setOptimizingMine] = useState(false);
+    const [generatingCoverId, setGeneratingCoverId] = useState<string | null>(null);
     const addAsset = useAssetStore((state) => state.addAsset);
     const copyText = useCopyText();
     const effectiveConfig = useEffectiveConfig();
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const textModel = effectiveConfig.textModel || effectiveConfig.model;
+    const imageModel = effectiveConfig.imageModel || effectiveConfig.model;
 
     const {
         query,
@@ -66,6 +69,7 @@ export default function PromptsPage() {
         refreshRecent,
         refreshLocal,
         refresh,
+        noteCoverBroken,
     } = usePromptList({
         keyword: titleKeyword,
         tags: selectedTags,
@@ -244,6 +248,30 @@ export default function PromptsPage() {
         message.success("已删除我的提示词");
     };
 
+    const handleGenerateCover = async (item: Prompt) => {
+        if (!isAiConfigReady(effectiveConfig, imageModel)) {
+            message.warning("请先配置可用的图片模型，用于生成预览图");
+            openConfigDialog(true);
+            return;
+        }
+        if (generatingCoverId) {
+            message.info("已有预览图在生成中，请稍候");
+            return;
+        }
+        setGeneratingCoverId(item.id);
+        try {
+            const updated = await generatePromptCover(effectiveConfig, item);
+            await refreshLocal();
+            if (scope === "browse") await query.refetch();
+            setSelectedPrompt((current) => (current?.id === updated.id ? updated : current));
+            message.success("预览图已生成并仅保存在本机");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "生成预览图失败");
+        } finally {
+            setGeneratingCoverId(null);
+        }
+    };
+
     const handleListScroll = (event: UIEvent<HTMLDivElement>) => {
         if (scope !== "browse") return;
         const target = event.currentTarget;
@@ -401,10 +429,21 @@ export default function PromptsPage() {
                                     actionLabel="用于生图"
                                     actionIcon={<ImagePlus className="size-3.5" />}
                                     actionType="primary"
+                                    onCoverBroken={noteCoverBroken}
                                     extraAction={
                                         <>
                                             <Button className="shrink-0" size="small" icon={<VideoIcon className="size-3.5" />} onClick={() => void openWorkbench(item, "video")}>
                                                 视频
+                                            </Button>
+                                            <Button
+                                                className="shrink-0"
+                                                size="small"
+                                                icon={<Sparkles className="size-3.5" />}
+                                                loading={generatingCoverId === item.id}
+                                                disabled={Boolean(generatingCoverId) && generatingCoverId !== item.id}
+                                                onClick={() => void handleGenerateCover(item)}
+                                            >
+                                                {item.coverUrl ? "重生预览" : "生成预览"}
                                             </Button>
                                             {scope === "mine" ? (
                                                 <>
@@ -455,6 +494,8 @@ export default function PromptsPage() {
                 onToggleFavorite={(item) => void handleToggleFavorite(item)}
                 onSaveToMine={scope === "mine" ? undefined : (item) => void handleSaveToMine(item)}
                 onOptimizeMine={scope === "mine" ? (item) => void optimizeMineAndUse(item) : undefined}
+                onGenerateCover={(item) => void handleGenerateCover(item)}
+                generatingCover={Boolean(selectedPrompt && generatingCoverId === selectedPrompt.id)}
             />
 
             <Modal

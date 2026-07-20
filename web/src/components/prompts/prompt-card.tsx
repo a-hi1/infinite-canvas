@@ -2,7 +2,7 @@ import { Copy, ImageIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { Button, Card, Tag } from "antd";
 
-import { getCategoryLabel, getPromptQualityLabel, getPromptSummary, isUsablePromptCoverUrl, type Prompt } from "@/services/api/prompts";
+import { getCategoryLabel, getPromptQualityLabel, getPromptSummary, isUsablePromptCoverUrl, markPromptCoverBroken, type Prompt } from "@/services/api/prompts";
 
 export function PromptCard({
     item,
@@ -12,6 +12,7 @@ export function PromptCard({
     actionIcon = <Copy className="size-3.5" />,
     actionType = "text",
     extraAction,
+    onCoverBroken,
 }: {
     item: Prompt;
     onOpen: () => void;
@@ -20,6 +21,8 @@ export function PromptCard({
     actionIcon?: ReactNode;
     actionType?: "text" | "primary";
     extraAction?: ReactNode;
+    /** 封面加载失败/过小时回调，便于列表重排 */
+    onCoverBroken?: (promptId: string, coverUrl: string) => void;
 }) {
     const tags = Array.from(new Set(item.tags.filter(Boolean))).slice(0, 4);
     const summary = getPromptSummary(item);
@@ -33,6 +36,15 @@ export function PromptCard({
         setCoverBroken(false);
     }, [item.id, item.coverUrl]);
 
+    const failCover = () => {
+        if (coverBroken) return;
+        setCoverBroken(true);
+        if (initialCover) {
+            markPromptCoverBroken(initialCover);
+            onCoverBroken?.(item.id, initialCover);
+        }
+    };
+
     return (
         <Card
             hoverable
@@ -44,19 +56,18 @@ export function PromptCard({
                         <img
                             src={initialCover}
                             alt={item.title}
-                            className="aspect-[4/3] w-full object-cover"
+                            className="aspect-4/3 w-full object-cover"
                             loading="lazy"
-                            onError={() => setCoverBroken(true)}
+                            onError={failCover}
                             onLoad={(event) => {
-                                // 过小图（常见 1x1 占位）不当预览，回退到「无预览图」
                                 const img = event.currentTarget;
                                 if (img.naturalWidth > 0 && img.naturalHeight > 0 && (img.naturalWidth < 48 || img.naturalHeight < 48)) {
-                                    setCoverBroken(true);
+                                    failCover();
                                 }
                             }}
                         />
                     ) : (
-                        <div className="flex aspect-[4/3] w-full flex-col items-center justify-center gap-2 bg-stone-100 px-4 text-center text-stone-400 dark:bg-stone-900 dark:text-stone-500">
+                        <div className="flex aspect-4/3 w-full flex-col items-center justify-center gap-2 bg-stone-100 px-4 text-center text-stone-400 dark:bg-stone-900 dark:text-stone-500">
                             <ImageIcon className="size-8" />
                             <span className="text-xs">无预览图 · 建议先看摘要</span>
                         </div>
@@ -92,7 +103,6 @@ export function PromptCard({
                 <div
                     className="prompt-action-scroll flex gap-2 overflow-x-auto overscroll-x-contain"
                     onWheel={(event) => {
-                        // 鼠标滚轮横向滑动按钮区
                         if (event.currentTarget.scrollWidth <= event.currentTarget.clientWidth) return;
                         event.preventDefault();
                         event.currentTarget.scrollLeft += event.deltaY;

@@ -63,6 +63,7 @@ export function PromptSelectDialog({
         refreshRecent,
         refreshLocal,
         refresh,
+        noteCoverBroken,
     } = usePromptList({
         keyword,
         tags: selectedTags,
@@ -290,6 +291,7 @@ export function PromptSelectDialog({
                                         actionLabel="使用"
                                         actionIcon={<Check className="size-3.5" />}
                                         actionType="primary"
+                                        onCoverBroken={noteCoverBroken}
                                         extraAction={
                                             <>
                                                 <Button className="shrink-0" size="small" icon={<Eye className="size-3.5" />} onClick={() => setSelectedPrompt(item)}>

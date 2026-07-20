@@ -1,10 +1,11 @@
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
     ALL_PROMPTS_OPTION,
     FAVORITES_CATEGORY,
     MY_PROMPTS_CATEGORY,
+    arrangePrompts,
     fetchPrompts,
     getCategoryLabel,
     getFavoritePrompts,
@@ -35,6 +36,8 @@ export function usePromptList({
 }) {
     const queryClient = useQueryClient();
     const browseMode = scope === "browse";
+    // 封面 onError 后 bump，触发本地 re-arrange（精选/仅有图会剔除坏图）
+    const [coverEpoch, setCoverEpoch] = useState(0);
 
     const query = useInfiniteQuery({
         queryKey: ["prompts", keyword, tags, category, qualityMode],
@@ -65,13 +68,21 @@ export function usePromptList({
     const myItems = myPromptQuery.data || [];
 
     const scopedItems = useMemo(() => {
-        if (scope === "favorites") return filterLocalPrompts(favoriteItems, keyword, tags);
-        if (scope === "mine") return filterLocalPrompts(myItems, keyword, tags);
-        return query.data?.pages.flatMap((page) => page.items) || [];
-    }, [favoriteItems, keyword, myItems, query.data?.pages, scope, tags]);
+        void coverEpoch;
+        if (scope === "favorites") return arrangePrompts(filterLocalPrompts(favoriteItems, keyword, tags), "all");
+        if (scope === "mine") return arrangePrompts(filterLocalPrompts(myItems, keyword, tags), "all");
+        const loaded = query.data?.pages.flatMap((page) => page.items) || [];
+        // 浏览模式：按当前 qualityMode 再滤一遍（封面加载失败后从精选/仅有图中移除）
+        return arrangePrompts(loaded, qualityMode);
+    }, [coverEpoch, favoriteItems, keyword, myItems, qualityMode, query.data?.pages, scope, tags]);
+
+    const noteCoverBroken = useCallback((_promptId: string, _coverUrl: string) => {
+        setCoverEpoch((n) => n + 1);
+    }, []);
 
     const refresh = async () => {
         await refreshPromptLibrary();
+        setCoverEpoch(0);
         await queryClient.invalidateQueries({ queryKey: ["prompts"] });
         if (browseMode) await query.refetch();
     };
@@ -103,6 +114,7 @@ export function usePromptList({
         refreshFavorites: () => favoriteQuery.refetch(),
         refreshMyPrompts: () => myPromptQuery.refetch(),
         refreshLocal,
+        noteCoverBroken,
         getLabel: (categoryValue: string) => {
             if (categoryValue === FAVORITES_CATEGORY) return "收藏夹";
             if (categoryValue === MY_PROMPTS_CATEGORY) return "我的提示词";

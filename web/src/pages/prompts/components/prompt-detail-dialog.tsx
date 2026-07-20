@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { Copy, FolderPlus, ImageIcon, ImagePlus, Star, VideoIcon, WandSparkles, X } from "lucide-react";
+import { Copy, FolderPlus, ImageIcon, ImagePlus, Sparkles, Star, VideoIcon, WandSparkles, X } from "lucide-react";
 import { Button, Modal, Space, Tag } from "antd";
 
-import { getCategoryLabel, getPromptQualityLabel, getPromptSummary, isUsablePromptCoverUrl, type Prompt } from "@/services/api/prompts";
+import { getCategoryLabel, getPromptQualityLabel, getPromptSummary, isUsablePromptCoverUrl, markPromptCoverBroken, type Prompt } from "@/services/api/prompts";
 
 export function PromptDetailDialog({
     prompt,
@@ -17,6 +17,8 @@ export function PromptDetailDialog({
     favorited = false,
     onSaveToMine,
     onOptimizeMine,
+    onGenerateCover,
+    generatingCover = false,
 }: {
     prompt: Prompt | null;
     onClose: () => void;
@@ -29,6 +31,9 @@ export function PromptDetailDialog({
     favorited?: boolean;
     onSaveToMine?: (prompt: Prompt) => void;
     onOptimizeMine?: (prompt: Prompt) => void;
+    /** 单条按需生成预览图（与「用于生图」分离） */
+    onGenerateCover?: (prompt: Prompt) => void;
+    generatingCover?: boolean;
 }) {
     const [previewOpen, setPreviewOpen] = useState(false);
     const tags = prompt ? Array.from(new Set(prompt.tags.filter(Boolean))).slice(0, 8) : [];
@@ -83,11 +88,15 @@ export function PromptDetailDialog({
                                         alt={prompt.title}
                                         className="aspect-4/3 w-full object-cover"
                                         draggable={false}
-                                        onError={() => setCoverBroken(true)}
+                                        onError={() => {
+                                            setCoverBroken(true);
+                                            if (coverUrl) markPromptCoverBroken(coverUrl);
+                                        }}
                                         onLoad={(event) => {
                                             const img = event.currentTarget;
                                             if (img.naturalWidth > 0 && img.naturalHeight > 0 && (img.naturalWidth < 48 || img.naturalHeight < 48)) {
                                                 setCoverBroken(true);
+                                                if (coverUrl) markPromptCoverBroken(coverUrl);
                                             }
                                         }}
                                     />
@@ -98,9 +107,15 @@ export function PromptDetailDialog({
                                     <span className="text-xs">暂无预览图</span>
                                 </div>
                             )}
+                            {onGenerateCover ? (
+                                <Button block icon={<Sparkles className="size-4" />} loading={generatingCover} onClick={() => onGenerateCover(prompt)}>
+                                    {showCover ? "重新生成预览图" : "生成预览图"}
+                                </Button>
+                            ) : null}
                             <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-xs leading-5 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">
                                 <div className="mb-1 font-medium text-stone-800 dark:text-stone-100">用途摘要</div>
                                 <div>{summary}</div>
+                                {onGenerateCover ? <div className="mt-2 text-[11px] text-stone-400 dark:text-stone-500">预览图仅本地保存，不会回写第三方仓库；与「用于生图」分开，只生 1 张封面。</div> : null}
                             </div>
                         </div>
                         <div className="min-w-0">
