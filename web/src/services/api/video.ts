@@ -341,32 +341,46 @@ async function pollGrokTask(config: AiConfig, task: VideoGenerationTask, options
     try {
         // 官方：POST /videos/generations + GET /videos/{request_id}
         // 见 https://docs.x.ai/docs/guides/video-generation
-        const state = unwrapGrokVideoResponse(await fetchGrokTaskState(config, task, options));
-        const status = String(state.status || "").toLowerCase();
-        const url = readGrokVideoUrl(state);
-        const completed = status === "done" || status === "completed" || status === "succeeded" || status === "success" || status === "complete";
-        if (completed && url) {
+        const raw = await fetchGrokTaskState(config, task, options);
+        const state = unwrapGrokVideoResponse(raw);
+        const status = String(state.status || (state as Record<string, unknown>).state || "").toLowerCase();
+        const progress = Number((state as Record<string, unknown>).progress ?? (state as Record<string, unknown>).percent ?? NaN);
+        const url = readGrokVideoUrl(state) || readGrokVideoUrl(raw as GrokVideoResponse);
+        const completed =
+            status === "done" ||
+            status === "completed" ||
+            status === "succeeded" ||
+            status === "success" ||
+            status === "complete" ||
+            status === "finished" ||
+            (Number.isFinite(progress) && progress >= 100 && !["pending", "queued", "running", "processing", "in_progress", "generating"].includes(status));
+
+        if (url && (completed || !["pending", "queued", "running", "processing", "in_progress", "generating"].includes(status))) {
             grokPollMissCount.delete(pollMissKey(config, task.id));
             grokDoneWithoutUrlCount.delete(pollMissKey(config, task.id));
             return { status: "completed", result: await videoResultFromUrl(url, options, config) };
         }
+
+        // 完成但无 URL：先试 content 下载，再短暂等待（中转常晚写 video 字段）
         if (completed && !url) {
+            const content = await tryFetchGrokVideoContent(config, task, options);
+            if (content) {
+                grokPollMissCount.delete(pollMissKey(config, task.id));
+                grokDoneWithoutUrlCount.delete(pollMissKey(config, task.id));
+                return { status: "completed", result: content };
+            }
             const key = pollMissKey(config, task.id);
             const n = (grokDoneWithoutUrlCount.get(key) || 0) + 1;
             grokDoneWithoutUrlCount.set(key, n);
             if (n < GROK_DONE_WITHOUT_URL_GRACE) return { status: "pending" };
             grokDoneWithoutUrlCount.delete(key);
+            const keys = summarizeGrokPayloadKeys(raw);
             return {
                 status: "failed",
-                error: "Grok 任务显示已完成，但响应里没有可播放的视频地址。请在 Network 查看 GET /v1/videos/{id} 的 JSON（是否含 video.url / video_url / output），或确认 codex2api 是否返回了视频链接字段",
+                error: `Grok 任务显示已完成，但响应里没有可播放的视频地址。查询响应顶层字段：${keys || "（空）"}。请打开 Network 里 GET …/videos/…（不是 POST generations）的「响应」JSON 发我`,
             };
         }
-        // 部分中转不给 status，但已经带了可播放 URL
-        if (url && !["pending", "queued", "running", "processing", "in_progress", "generating"].includes(status)) {
-            grokPollMissCount.delete(pollMissKey(config, task.id));
-            grokDoneWithoutUrlCount.delete(pollMissKey(config, task.id));
-            return { status: "completed", result: await videoResultFromUrl(url, options, config) };
-        }
+
         if (["failed", "fail", "error", "expired", "cancelled", "canceled"].includes(status)) return { status: "failed", error: readGrokError(state) || "Grok 视频生成失败" };
         return { status: "pending" };
     } catch (error) {
@@ -389,8 +403,16 @@ async function fetchGrokTaskState(config: AiConfig, task: VideoGenerationTask, o
         throw new Error(formatGrokPollUnsupportedError(config));
     }
 
-    // 官方路径优先；兼容部分中转的 generations 前缀
-    const paths = [`/videos/${task.id}`, `/videos/generations/${task.id}`];
+    // 官方路径优先；codex2api 等中转可能用 generations 前缀或 query
+    const id = encodeURIComponent(task.id);
+    const paths = [
+        `/videos/${id}`,
+        `/videos/generations/${id}`,
+        `/video/generations/${id}`,
+        `/videos/generations?request_id=${id}`,
+        `/videos?request_id=${id}`,
+        `/videos/generations?id=${id}`,
+    ];
     let sawNotFound = false;
     let lastError: unknown;
 
@@ -449,6 +471,50 @@ async function fetchGrokTaskState(config: AiConfig, task: VideoGenerationTask, o
     }
 
     throw lastError instanceof Error ? lastError : new Error("Grok 视频任务查询失败");
+}
+
+async function tryFetchGrokVideoContent(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationResult | null> {
+    const id = encodeURIComponent(task.id);
+    const paths = [`/videos/${id}/content`, `/videos/generations/${id}/content`, `/videos/${id}/download`];
+    for (const path of paths) {
+        try {
+            const response = await axios.get<Blob>(aiApiUrl(config, path), {
+                headers: aiHeaders(config),
+                responseType: "blob",
+                timeout: 120000,
+                signal: options?.signal,
+            });
+            const blob = response.data;
+            if (!blob?.size) continue;
+            // 有的中转把 JSON 错误当 blob 返回
+            if (blob.type.includes("json") || blob.type.includes("text")) {
+                try {
+                    const text = await blob.text();
+                    const json = JSON.parse(text) as GrokVideoResponse;
+                    const url = readGrokVideoUrl(json);
+                    if (url) return await videoResultFromUrl(url, options, config);
+                } catch {
+                    continue;
+                }
+                continue;
+            }
+            await assertVideoBlob(blob);
+            return { blob: ensureVideoBlob(blob), mimeType: blob.type.startsWith("video/") ? blob.type : "video/mp4" };
+        } catch (error) {
+            if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+            // try next path
+        }
+    }
+    return null;
+}
+
+function summarizeGrokPayloadKeys(payload: unknown) {
+    if (!payload || typeof payload !== "object") return "";
+    const root = payload as Record<string, unknown>;
+    const top = Object.keys(root).slice(0, 12).join(",");
+    const nested = root.data && typeof root.data === "object" ? Object.keys(root.data as object).slice(0, 12).join(",") : "";
+    const video = root.video && typeof root.video === "object" ? Object.keys(root.video as object).slice(0, 8).join(",") : "";
+    return [top && `root{${top}}`, nested && `data{${nested}}`, video && `video{${video}}`].filter(Boolean).join(" ");
 }
 
 function formatGrokPollUnsupportedError(config: AiConfig) {
