@@ -175,7 +175,7 @@ function GrokVideoSettingsPanel({ config, onConfigChange, theme, showTitle, clas
                                 {value}s
                             </OptionPill>
                         ))}
-                        <NumberInput value={String(duration)} min={1} max={10} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} />
+                        <NumberInput value={String(duration)} min={1} max={15} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} />
                     </div>
                 </SettingGroup>
             </div>

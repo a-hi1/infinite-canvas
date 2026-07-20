@@ -5,7 +5,7 @@ import { compressImageDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { AGNES_VIDEO_HEIGHT, AGNES_VIDEO_WIDTH, agnesFrameCount, agnesVideoRequestError, isAgnesBaseUrl, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
-import { isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
+import { isCodex2apiBaseUrl, isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
 import { boolConfig, buildSeedancePromptText, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import { runModelPlugin } from "@/services/api/model-plugin";
 import { AI_PROXY_BASE_URL, buildApiUrl, isAiProxyBaseUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
@@ -582,8 +582,11 @@ async function buildGrokPayloadCandidates(config: AiConfig, model: string, promp
     const duration = normalizeGrokDuration(config.videoSeconds);
     const aspectRatio = normalizeGrokAspectRatio(config.size);
     const resolution = normalizeGrokResolution(config.vquality);
-    const imageInputs = await Promise.all(references.slice(0, 7).map(resolveGrokImageInput));
-    const models = grokModelCandidates(modelName, imageInputs.length);
+    // codex2api 等中转对 1080p / 过大 data URI 更敏感：候选里主动降到 720p 再试
+    const resolutions = Array.from(new Set([resolution, "720p", "480p"].filter(Boolean)));
+    const imageInputs = await Promise.all(references.slice(0, 7).map((image) => resolveGrokImageInput(image, config)));
+    const models = grokModelCandidates(modelName, imageInputs.length, config.baseUrl);
+    const relay = isCodex2apiBaseUrl(config.baseUrl);
 
     const candidates: Array<Record<string, unknown>> = [];
     const pushUnique = (payload: Record<string, unknown>) => {
@@ -594,52 +597,74 @@ async function buildGrokPayloadCandidates(config: AiConfig, model: string, promp
 
     if (!imageInputs.length) {
         for (const nextModel of models) {
-            // 文生视频：官方字段 + 兼容 seconds
-            pushUnique({ model: nextModel, prompt, duration, aspect_ratio: aspectRatio, resolution });
+            // 文生视频：中转优先「官方最小字段」，再补全 aspect/resolution，最后 seconds 兼容
+            // 文档：https://docs.x.ai/docs/guides/video-generation
             pushUnique({ model: nextModel, prompt, duration });
-            pushUnique({ model: nextModel, prompt, seconds: String(duration), aspect_ratio: aspectRatio, resolution });
+            for (const nextResolution of resolutions) {
+                pushUnique({ model: nextModel, prompt, duration, aspect_ratio: aspectRatio, resolution: nextResolution });
+            }
+            pushUnique({ model: nextModel, prompt, duration, aspect_ratio: aspectRatio });
+            if (relay) {
+                pushUnique({ model: nextModel, prompt, seconds: duration, aspect_ratio: aspectRatio, resolution: "720p" });
+            } else {
+                pushUnique({ model: nextModel, prompt, seconds: String(duration), aspect_ratio: aspectRatio, resolution });
+            }
         }
-        return candidates.slice(0, 4);
+        return candidates.slice(0, relay ? 8 : 6);
     }
 
     // 图生视频 / 参考生视频
     // 官方：单图 image:{url}；多图 reference_images。中转站常还需兼容 images / image_url。
-    // https://docs.x.ai/developers/model-capabilities/video/image-to-video
+    // 勿混用 image + reference_images。
     if (imageInputs.length === 1) {
         const image = imageInputs[0];
         for (const nextModel of models) {
-            // 优先 1.5 模型字段形态
-            pushUnique({ model: nextModel, prompt, image, duration, aspect_ratio: aspectRatio, resolution });
+            // 最小成功面：image 对象 + duration（codex2api 最稳）
             pushUnique({ model: nextModel, prompt, image, duration });
+            for (const nextResolution of resolutions) {
+                pushUnique({ model: nextModel, prompt, image, duration, aspect_ratio: aspectRatio, resolution: nextResolution });
+            }
+            pushUnique({ model: nextModel, prompt, image, duration, aspect_ratio: aspectRatio });
+            // 部分中转只认扁平字段
             pushUnique({ model: nextModel, prompt, image: image.url, duration });
             pushUnique({ model: nextModel, prompt, image_url: image.url, duration });
-            pushUnique({ model: nextModel, prompt, images: [image.url], duration });
+            if (!relay) pushUnique({ model: nextModel, prompt, images: [image.url], duration });
         }
     } else {
         const labeledPrompt = buildGrokReferencePrompt(prompt, imageInputs.length);
         const urls = imageInputs.map((item) => item.url);
+        const multiDuration = Math.min(duration, 10);
         for (const nextModel of models) {
-            pushUnique({ model: nextModel, prompt: labeledPrompt, reference_images: imageInputs, duration: Math.min(duration, 10), aspect_ratio: aspectRatio });
-            pushUnique({ model: nextModel, prompt: labeledPrompt, reference_images: imageInputs, duration: Math.min(duration, 10) });
-            pushUnique({ model: nextModel, prompt: labeledPrompt, reference_images: urls, duration: Math.min(duration, 10) });
-            pushUnique({ model: nextModel, prompt: labeledPrompt, images: urls, duration: Math.min(duration, 10) });
+            // 多图：官方 reference_images 对象数组优先
+            pushUnique({ model: nextModel, prompt: labeledPrompt, reference_images: imageInputs, duration: multiDuration });
+            pushUnique({ model: nextModel, prompt: labeledPrompt, reference_images: imageInputs, duration: multiDuration, aspect_ratio: aspectRatio });
+            pushUnique({ model: nextModel, prompt: labeledPrompt, reference_images: urls, duration: multiDuration });
+            // 中转退化：只取首图走 I2V，比整组 reference 更容易过
+            pushUnique({ model: nextModel, prompt, image: imageInputs[0], duration: multiDuration });
+            if (!relay) pushUnique({ model: nextModel, prompt: labeledPrompt, images: urls, duration: multiDuration });
         }
     }
 
-    return candidates.slice(0, 5);
+    return candidates.slice(0, relay ? 10 : 6);
 }
 
-function grokModelCandidates(modelName: string, imageCount: number) {
+function grokModelCandidates(modelName: string, imageCount: number, baseUrl = "") {
     const models: string[] = [];
     const lower = modelName.toLowerCase();
-    // 参考图生视频优先 1.5（中转兼容更好），再回退用户选择
+    const relay = isCodex2apiBaseUrl(baseUrl);
+    // 参考图生视频优先 1.5；文生在中转上优先用户选择的基础模型
     if (imageCount > 0) {
         if (!lower.includes("1.5")) models.push("grok-imagine-video-1.5");
         models.push(modelName);
         if (lower.includes("1.5")) models.push("grok-imagine-video");
     } else {
         models.push(modelName);
-        if (lower.includes("grok-imagine-video") && !lower.includes("1.5")) models.push("grok-imagine-video-1.5");
+        if (lower.includes("grok-imagine-video") && !lower.includes("1.5")) {
+            // codex2api 文生优先保持基础模型，1.5 作回退
+            if (relay) models.push("grok-imagine-video-1.5");
+            else models.push("grok-imagine-video-1.5");
+        }
+        if (!lower.includes("grok-imagine-video")) models.push("grok-imagine-video");
     }
     return Array.from(new Set(models.filter(Boolean)));
 }
@@ -651,25 +676,27 @@ function buildGrokReferencePrompt(prompt: string, imageCount: number) {
     return `${prompt.trim()}\n\n请结合参考图 ${labels} 保持主体与风格一致。`;
 }
 
-async function resolveGrokImageInput(image: ReferenceImage): Promise<{ url: string }> {
-    const url = await resolveGrokReferenceImageUrl(image);
+async function resolveGrokImageInput(image: ReferenceImage, config?: AiConfig): Promise<{ url: string }> {
+    const url = await resolveGrokReferenceImageUrl(image, config);
     return { url };
 }
 
-async function resolveGrokReferenceImageUrl(image: ReferenceImage) {
-    // 1) 本地/blob 优先转压缩后的 data URI，避免超大 base64 触发上游 400
+async function resolveGrokReferenceImageUrl(image: ReferenceImage, config?: AiConfig) {
+    // codex2api → xAI：过大 data URI 极易 400，本地图压到更小
+    const maxEdge = config && isCodex2apiBaseUrl(config.baseUrl) ? 1024 : 1280;
+    // 1) 本地/blob 优先转压缩后的 data URI
     const binary = await resolveReferenceBinaryDataUrl(image);
-    if (binary) return compressImageDataUrl(binary);
+    if (binary) return compressImageDataUrl(binary, maxEdge, 0.78);
 
     // 2) 已是 data URI
     const directUrl = (image.url || image.dataUrl || "").trim();
-    if (directUrl.startsWith("data:")) return compressImageDataUrl(directUrl);
+    if (directUrl.startsWith("data:")) return compressImageDataUrl(directUrl, maxEdge, 0.78);
 
     // 3) 公网 URL 直接透传（浏览器 CORS 读不了时，交给上游服务端拉取）
     if (isPublicMediaUrl(directUrl)) return directUrl;
 
     const fallback = await imageToDataUrl(image);
-    if (fallback?.startsWith("data:")) return compressImageDataUrl(fallback);
+    if (fallback?.startsWith("data:")) return compressImageDataUrl(fallback, maxEdge, 0.78);
     if (fallback && isPublicMediaUrl(fallback)) return fallback;
     throw new Error("参考图读取失败，请改用本地上传的图片（远程 imgen.x.ai 图常因 CORS 无法在浏览器读取）");
 }
@@ -696,14 +723,16 @@ function formatGrokCreateError(error: unknown, references: ReferenceImage[], att
         return isPublicMediaUrl(url) && !image.storageKey && !url.startsWith("data:") && !url.startsWith("blob:");
     });
     const hasLocalReference = references.some((image) => Boolean(image.storageKey) || (image.dataUrl || "").startsWith("blob:") || (image.dataUrl || "").startsWith("data:"));
-    const vagueUpstream = /upstream returned status 400|status 400/i.test(detail);
+    const vagueUpstream = /upstream returned status 400|status 400|invalid_request_error/i.test(detail);
     const tips = [
         detail,
-        attemptCount > 1 ? `已尝试 ${attemptCount} 种请求格式` : "",
-        hasRemoteOnlyReference ? "当前参考图是远程地址（如 imgen.x.ai）。中转站/xAI 若无法访问该临时图，请改用本地上传的参考图" : "",
-        hasLocalReference && vagueUpstream ? "若使用本地大图，已自动压缩后重试仍失败，可换更小的 jpg/png，或把视频模型改为 grok-imagine-video-1.5（图生视频更完整）" : "",
-        vagueUpstream && !hasLocalReference && !hasRemoteOnlyReference ? "若是纯文生视频，请检查模型名是否为 grok-imagine-video / grok-imagine-video-1.5，以及时长是否在 1-15 秒" : "",
-        "请在 Network 打开失败的 /v1/videos/generations，把 Request Payload 的 model/image 字段形态和 Response JSON（可打码）发我",
+        attemptCount > 1 ? `已按多种字段组合重试 ${attemptCount} 次（含降分辨率）` : "",
+        hasRemoteOnlyReference ? "当前参考图是远程地址（如 imgen.x.ai）。codex2api/xAI 常无法拉该临时图 → 请改用本地上传的小图" : "",
+        hasLocalReference && vagueUpstream ? "本地参考图仍 400：请换更小 jpg/png，分辨率先选 720p，模型试 grok-imagine-video-1.5" : "",
+        vagueUpstream && !hasLocalReference && !hasRemoteOnlyReference
+            ? "纯文生 400（xAI upstream）：请确认模型为 grok-imagine-video，时长 5–10 秒，分辨率 720p；codex2api 套餐需开通该视频模型"
+            : "",
+        vagueUpstream ? "中转只返回笼统 400 时，可在其控制台用同一 Key 测最小 body：{model,prompt,duration:8}" : "",
     ].filter(Boolean);
     return tips.join("。");
 }

@@ -14,17 +14,26 @@ export function isXaiBaseUrl(baseUrl: string) {
     return baseUrl.toLowerCase().includes("api.x.ai");
 }
 
+/** Official xAI range is 1–15s; relays often work best at 5–10. */
 export function normalizeGrokDuration(value: string) {
-    const seconds = Math.floor(Number(value) || 6);
-    return Math.max(1, Math.min(10, seconds));
+    const seconds = Math.floor(Number(value) || 8);
+    return Math.max(1, Math.min(15, seconds));
 }
 
 export function normalizeGrokResolution(value: string) {
     if (value === "low") return "480p";
     if (value === "high") return "1080p";
     if (value === "auto" || value === "medium") return "720p";
-    const resolution = String(value || "720").replace(/p$/i, "") || "720";
-    return `${resolution}p`;
+    const raw = String(value || "720").replace(/p$/i, "") || "720";
+    if (raw === "480" || raw === "720" || raw === "1080") return `${raw}p`;
+    // Unknown UI values (e.g. leftover Seedance "high") → safe default for relays
+    return "720p";
+}
+
+/** codex2api and similar OpenAI-compatible relays that proxy xAI video. */
+export function isCodex2apiBaseUrl(baseUrl: string) {
+    const value = baseUrl.toLowerCase();
+    return value.includes("codex2api.com") || value.includes("codex2api");
 }
 
 export function normalizeGrokAspectRatio(value: string) {
@@ -46,4 +55,5 @@ export function normalizeGrokAspectRatio(value: string) {
     return options.reduce((best, item) => (Math.abs(item[1] - ratio) < Math.abs(best[1] - ratio) ? item : best), options[0])[0];
 }
 
-export const grokVideoModeHint = "Grok 参考图生视频：请上传本地小图（优先 jpg/png）。单图走 image，多图走 reference_images；会优先尝试 grok-imagine-video-1.5。中转站若只支持创建不支持查询，需 POST 响应直接返回 video.url，或补齐 GET /v1/videos/{request_id}。";
+export const grokVideoModeHint =
+    "Grok 视频（含 codex2api）：文生用 grok-imagine-video；图生优先本地小图 jpg/png + grok-imagine-video-1.5。分辨率建议 720p（1080p 中转易 400）。中转若只支持创建不支持查询，需 POST 直接返回 video.url，或补齐 GET /v1/videos/{request_id}。";
