@@ -333,6 +333,10 @@ function extractGrokReadyResult(payload: GrokVideoResponse) {
     return url;
 }
 
+// 中转有时 status=done 但 video URL 晚几拍才写入；先宽容等待再失败
+const grokDoneWithoutUrlCount = new Map<string, number>();
+const GROK_DONE_WITHOUT_URL_GRACE = 12; // ~12*5s
+
 async function pollGrokTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
         // 官方：POST /videos/generations + GET /videos/{request_id}
@@ -340,15 +344,27 @@ async function pollGrokTask(config: AiConfig, task: VideoGenerationTask, options
         const state = unwrapGrokVideoResponse(await fetchGrokTaskState(config, task, options));
         const status = String(state.status || "").toLowerCase();
         const url = readGrokVideoUrl(state);
-        const completed = status === "done" || status === "completed" || status === "succeeded" || status === "success";
+        const completed = status === "done" || status === "completed" || status === "succeeded" || status === "success" || status === "complete";
         if (completed && url) {
             grokPollMissCount.delete(pollMissKey(config, task.id));
+            grokDoneWithoutUrlCount.delete(pollMissKey(config, task.id));
             return { status: "completed", result: await videoResultFromUrl(url, options, config) };
         }
-        if (completed) return { status: "failed", error: "Grok 任务完成但没有返回视频 URL" };
+        if (completed && !url) {
+            const key = pollMissKey(config, task.id);
+            const n = (grokDoneWithoutUrlCount.get(key) || 0) + 1;
+            grokDoneWithoutUrlCount.set(key, n);
+            if (n < GROK_DONE_WITHOUT_URL_GRACE) return { status: "pending" };
+            grokDoneWithoutUrlCount.delete(key);
+            return {
+                status: "failed",
+                error: "Grok 任务显示已完成，但响应里没有可播放的视频地址。请在 Network 查看 GET /v1/videos/{id} 的 JSON（是否含 video.url / video_url / output），或确认 codex2api 是否返回了视频链接字段",
+            };
+        }
         // 部分中转不给 status，但已经带了可播放 URL
         if (url && !["pending", "queued", "running", "processing", "in_progress", "generating"].includes(status)) {
             grokPollMissCount.delete(pollMissKey(config, task.id));
+            grokDoneWithoutUrlCount.delete(pollMissKey(config, task.id));
             return { status: "completed", result: await videoResultFromUrl(url, options, config) };
         }
         if (["failed", "fail", "error", "expired", "cancelled", "canceled"].includes(status)) return { status: "failed", error: readGrokError(state) || "Grok 视频生成失败" };
@@ -1009,12 +1025,18 @@ function readAgnesError(payload: AgnesTaskResponse) {
 }
 
 function readGrokVideoUrl(payload: GrokVideoResponse) {
+    const record = payload as Record<string, unknown>;
     return (
-        payload.video_url ||
-        payload.url ||
-        payload.output_url ||
-        payload.download_url ||
-        payload.result_url ||
+        asHttpUrl(payload.video_url) ||
+        asHttpUrl(payload.url) ||
+        asHttpUrl(payload.output_url) ||
+        asHttpUrl(payload.download_url) ||
+        asHttpUrl(payload.result_url) ||
+        asHttpUrl(record.videoUrl) ||
+        asHttpUrl(record.video_uri) ||
+        asHttpUrl(record.uri) ||
+        asHttpUrl(record.signed_url) ||
+        asHttpUrl(record.file_url) ||
         readGrokUnknownUrl(payload.video) ||
         readGrokUnknownUrl(payload.data) ||
         readGrokUnknownUrl(payload.content) ||
@@ -1024,14 +1046,26 @@ function readGrokVideoUrl(payload: GrokVideoResponse) {
         readGrokUnknownUrl(payload.response?.videos?.[0]) ||
         readGrokUnknownUrl(payload.result?.videos?.[0]) ||
         readGrokUnknownUrl(payload.output) ||
+        readGrokUnknownUrl(record.outputs) ||
+        readGrokUnknownUrl(record.choices) ||
         findFirstVideoUrl(payload) ||
         ""
     );
 }
 
+function asHttpUrl(value: unknown): string {
+    if (typeof value !== "string") return "";
+    const text = value.trim();
+    if (!text) return "";
+    if (/^https?:\/\//i.test(text)) return text;
+    // 少数中转返回协议相对地址
+    if (text.startsWith("//") && text.includes(".")) return `https:${text}`;
+    return "";
+}
+
 function readGrokUnknownUrl(value: unknown): string {
     if (!value) return "";
-    if (typeof value === "string") return isLikelyVideoUrl(value) ? value : "";
+    if (typeof value === "string") return isLikelyVideoUrl(value) ? value : asHttpUrl(value) && isLooseMediaUrl(value) ? value.trim() : "";
     if (Array.isArray(value)) {
         for (const item of value) {
             const url = readGrokUnknownUrl(item);
@@ -1041,37 +1075,59 @@ function readGrokUnknownUrl(value: unknown): string {
     }
     if (typeof value !== "object") return "";
     const record = value as Record<string, unknown>;
-    for (const key of ["video_url", "url", "output_url", "download_url", "result_url", "signed_url", "file_url", "media_url", "href", "src"]) {
-        const url = readGrokUnknownUrl(record[key]);
+    for (const key of ["video_url", "videoUrl", "url", "output_url", "download_url", "result_url", "signed_url", "file_url", "media_url", "uri", "video_uri", "href", "src", "mp4", "play_url", "playUrl"]) {
+        const raw = record[key];
+        if (typeof raw === "string") {
+            const direct = asHttpUrl(raw);
+            if (direct && (isLikelyVideoUrl(direct) || isLooseMediaUrl(direct))) return direct;
+        }
+        const url = readGrokUnknownUrl(raw);
         if (url) return url;
     }
-    for (const key of ["video", "videos", "data", "result", "response", "output", "content", "file", "asset", "media"]) {
+    for (const key of ["video", "videos", "data", "result", "response", "output", "outputs", "content", "file", "asset", "media", "message", "choices"]) {
         const url = readGrokUnknownUrl(record[key]);
         if (url) return url;
     }
     return "";
 }
 
-function findFirstVideoUrl(value: unknown): string {
-    if (!value) return "";
-    if (typeof value === "string") return isLikelyVideoUrl(value) ? value : "";
+function findFirstVideoUrl(value: unknown, depth = 0): string {
+    if (!value || depth > 8) return "";
+    if (typeof value === "string") {
+        const direct = asHttpUrl(value);
+        if (!direct) return "";
+        return isLikelyVideoUrl(direct) || isLooseMediaUrl(direct) ? direct : "";
+    }
     if (Array.isArray(value)) {
         for (const item of value) {
-            const url = findFirstVideoUrl(item);
+            const url = findFirstVideoUrl(item, depth + 1);
             if (url) return url;
         }
         return "";
     }
     if (typeof value !== "object") return "";
     for (const item of Object.values(value as Record<string, unknown>)) {
-        const url = findFirstVideoUrl(item);
+        const url = findFirstVideoUrl(item, depth + 1);
         if (url) return url;
     }
     return "";
 }
 
 function isLikelyVideoUrl(value: string) {
-    return /^https?:\/\//i.test(value) && (/\.(mp4|webm|mov|m4v)(?:[?#]|$)/i.test(value) || value.includes("vidgen") || value.includes("video"));
+    const text = value.trim();
+    if (!/^https?:\/\//i.test(text)) return false;
+    if (/\.(mp4|webm|mov|m4v)(?:[?#]|$)/i.test(text)) return true;
+    if (/vidgen|video|x\.ai|cdn\.x\.ai|imgen\.x\.ai|cloudfront|blob\.core|amazonaws|oss-|cos\./i.test(text)) return true;
+    return false;
+}
+
+/** 完成态嵌套对象里的 https 链接，放宽识别（中转 CDN 路径常无 video 关键字） */
+function isLooseMediaUrl(value: string) {
+    const text = value.trim();
+    if (!/^https?:\/\//i.test(text)) return false;
+    if (/\.(json|js|css|html?)(?:[?#]|$)/i.test(text)) return false;
+    if (/\/(auth|login|docs|pricing)(?:\/|$)/i.test(text)) return false;
+    return true;
 }
 
 function readGrokError(payload: GrokVideoResponse) {
