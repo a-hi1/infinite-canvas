@@ -1074,9 +1074,18 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         }
     }
 
-    // 渠道兼容：fragile 预设（或 auto 推断为 codex2api）无蒙版时 edits 旁路；其它渠道标准 edits。
+    // 渠道兼容：Grok JSON edits；fragile 旁路；其它标准 OpenAI multipart edits。
     const editChannel = resolveModelChannel(config, config.model || config.imageModel);
     const editStrategy = getImageCompatStrategy(requestConfig.baseUrl, editChannel.compatProfile);
+    const modelName = (requestConfig.model || "").toLowerCase();
+    const looksLikeGrokImage = modelName.includes("grok") && (modelName.includes("imagine") || modelName.includes("image"));
+
+    // xAI / Grok2API：POST /images/edits 仅 application/json（不支持 OpenAI multipart）
+    // 见 https://docs.x.ai/developers/model-capabilities/images/editing
+    if (!mask && (editStrategy.profile === "grok-image" || looksLikeGrokImage)) {
+        return requestGrokJsonImageEdit(requestConfig, config, requestPrompt, references, n, options);
+    }
+
     if (editStrategy.editFallbackFragile && !mask) {
         return requestEditOnFragileRelay(requestConfig, config, requestPrompt, references, n, options);
     }
@@ -1084,6 +1093,116 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     return requestOpenAiCompatibleEdit(requestConfig, config, requestPrompt, references, mask, n, options, {
         slim: editStrategy.profile === "openai-slim" || editStrategy.profile === "relay-fragile",
     });
+}
+
+/**
+ * Grok / xAI / Grok2API 图生图：JSON body + data URL，不是 multipart。
+ * image: { type, url } 或 images: [...]；可选 aspect_ratio / resolution / response_format。
+ */
+async function requestGrokJsonImageEdit(
+    requestConfig: AiConfig,
+    config: AiConfig,
+    requestPrompt: string,
+    references: ReferenceImage[],
+    n: number,
+    options?: RequestOptions,
+): Promise<GeneratedImageResult[]> {
+    if (!references.length) throw new Error("图生图需要至少一张参考图");
+
+    let dataUrls: string[];
+    try {
+        dataUrls = await Promise.all(
+            references.slice(0, 3).map(async (image) => {
+                const dataUrl = await ensureLocalImageDataUrl(image);
+                if (!dataUrl?.startsWith("data:image/")) {
+                    throw new Error("参考图无法读取为本地图片，请重新上传本地图后再试");
+                }
+                // 控制 JSON body 体积，降低中转掐断概率
+                return compressImageDataUrl(dataUrl, IMAGE_EDIT_MAX_EDGE, IMAGE_EDIT_JPEG_QUALITY);
+            }),
+        );
+    } catch (error) {
+        throw new Error(error instanceof Error ? error.message : "参考图无法读取，请重新上传本地图片后再试图生图");
+    }
+
+    const grokOpts = resolveLanGrokImageOptions(config.quality, config.size);
+    const fullPrompt = withSystemPrompt(requestConfig, requestPrompt);
+    // 提示词尽量用用户原文；编号说明对 Grok 非必须，过长可能干扰
+    const userPrompt = (config.systemPrompt || "").trim()
+        ? fullPrompt
+        : (requestPrompt.includes("参考图片编号") ? requestPrompt.replace(/^参考图片编号：.*?\n\n/s, "").trim() || requestPrompt : requestPrompt);
+
+    const imageObjects = dataUrls.map((url) => ({ type: "image_url" as const, url }));
+    const count = Math.max(1, Math.min(4, n));
+
+    const primaryBody: Record<string, unknown> = {
+        model: requestConfig.model,
+        prompt: userPrompt,
+        n: count,
+        response_format: "b64_json",
+        ...(grokOpts.aspect_ratio ? { aspect_ratio: grokOpts.aspect_ratio } : {}),
+        ...(grokOpts.resolution ? { resolution: grokOpts.resolution } : {}),
+    };
+    if (imageObjects.length === 1) {
+        primaryBody.image = imageObjects[0];
+    } else {
+        primaryBody.images = imageObjects;
+    }
+
+    // 兼容字段变体（部分网关只要 url 字符串）
+    const candidates: Record<string, unknown>[] = [
+        primaryBody,
+        {
+            model: requestConfig.model,
+            prompt: userPrompt,
+            n: 1,
+            response_format: "b64_json",
+            image: imageObjects[0],
+            ...(grokOpts.aspect_ratio ? { aspect_ratio: grokOpts.aspect_ratio } : {}),
+        },
+        {
+            model: requestConfig.model,
+            prompt: userPrompt,
+            n: 1,
+            response_format: "b64_json",
+            image: { url: dataUrls[0] },
+        },
+        {
+            model: requestConfig.model,
+            prompt: userPrompt,
+            n: 1,
+            image: imageObjects[0],
+        },
+    ];
+
+    let lastError: unknown;
+    for (let i = 0; i < candidates.length; i += 1) {
+        if (options?.signal?.aborted) throw new DOMException("请求已取消", "AbortError");
+        try {
+            if (i > 0) await sleep(600, options?.signal);
+            const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), candidates[i], {
+                headers: aiHeaders(requestConfig, "application/json"),
+                signal: options?.signal,
+                timeout: IMAGE_EDIT_TIMEOUT_MS,
+            });
+            return parseImagePayload(response.data);
+        } catch (error) {
+            lastError = error;
+            if (axios.isAxiosError(error) && (error.response?.status === 401 || error.response?.status === 403)) {
+                break;
+            }
+            // 415/400 继续试下一字段形态；连接关闭则稍后重试下一候选
+            if (isConnectionClosedError(error)) {
+                try {
+                    await sleep(1200, options?.signal);
+                } catch {
+                    throw error;
+                }
+            }
+        }
+    }
+
+    throw new Error(readAxiosError(lastError, "图生图失败", "edit"));
 }
 
 async function requestOpenAiCompatibleEdit(
