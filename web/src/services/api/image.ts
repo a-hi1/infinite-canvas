@@ -47,6 +47,24 @@ function isConnectionClosedError(error: unknown) {
     return /ERR_CONNECTION_CLOSED|ECONNRESET|socket hang up|Network Error|Failed to fetch/i.test(blob);
 }
 
+function sleep(ms: number, signal?: AbortSignal) {
+    return new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(new DOMException("请求已取消", "AbortError"));
+            return;
+        }
+        const timer = window.setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
+        const onAbort = () => {
+            window.clearTimeout(timer);
+            reject(new DOMException("请求已取消", "AbortError"));
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+    });
+}
+
 /** 脆弱中转上 edits 常直接掐连接或 404/400；仅对这些错误尝试 generations 图生图旁路。 */
 function shouldFallbackEditOnFragileRelay(error: unknown) {
     if (isConnectionClosedError(error)) return true;
@@ -385,7 +403,7 @@ function readNetworkError(code: string | undefined, fallback: string, context?: 
     }
     if (code === "ECONNABORTED" || code === "ETIMEDOUT") return `${fallback}：图片接口连接超时，请检查 Base URL、网络代理或服务商状态`;
     if (closed) {
-        return `${fallback}：文生图连接被对端关闭（ERR_CONNECTION_CLOSED，无 HTTP 状态码）。这通常是中转站/网络/系统代理问题，而不是「参考图适配」：① 浏览器能否直连该 Base URL ② Key/套餐是否开通 gpt-image ③ 系统代理是否干扰 ④ 中转是否瞬时故障。可在同一网络用控制台或其它客户端对 /v1/images/generations 做对比测试`;
+        return `${fallback}：文生图连接被对端关闭（ERR_CONNECTION_CLOSED）。常见于中转限流/瞬时故障/代理干扰。建议：① 张数先设 1 ② 等几秒再试 ③ 渠道兼容预设用「脆弱中转」或「OpenAI 精简」④ 换网络或关系统代理试一次 ⑤ 确认套餐含 gpt-image。本站已对脆弱中转改为单张串行+间隔重试`;
     }
     return `${fallback}：无法连接到图片接口，请确认 Base URL 可从浏览器直连、服务商支持 /v1/images/generations，且没有被代理、防火墙或 CORS 策略拦截`;
 }
@@ -845,11 +863,13 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     const strategy = getImageCompatStrategy(requestConfig.baseUrl, channel.compatProfile);
     const fullPrompt = withSystemPrompt(requestConfig, prompt);
     const grokOpts = strategy.sizeMode === "grok-aspect" ? resolveLanGrokImageOptions(config.quality, config.size) : null;
+    // 脆弱中转（codex2api）：一次只生成 1 张，避免 n>1 或连打重试把连接掐断
+    const requestCount = strategy.profile === "relay-fragile" ? 1 : n;
 
     const primaryBody: Record<string, unknown> = {
         model: requestConfig.model,
         prompt: fullPrompt,
-        n,
+        n: requestCount,
         response_format: "b64_json",
     };
     if (strategy.sizeMode === "grok-aspect" && grokOpts) {
@@ -887,10 +907,24 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
             if (options?.signal?.aborted) throw error;
             if (!strategy.retrySlimOnError) throw error;
             const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-            const retrySlim = isConnectionClosedError(error) || status === 400 || status === 422;
+            const closed = isConnectionClosedError(error);
+            const retrySlim = closed || status === 400 || status === 422;
             if (!retrySlim) throw error;
-            // Grok：先去掉 resolution 只留 aspect_ratio，再极简
-            if (strategy.sizeMode === "grok-aspect" && grokOpts?.aspect_ratio) {
+
+            // 连接被掐：先等一会再原样重试 1 次（n=1），避免立刻连打多轮把中转打崩
+            let lastError: unknown = error;
+            if (closed) {
+                try {
+                    await sleep(1500, options?.signal);
+                    return parseImagePayload((await postGeneration({ ...primaryBody, n: 1 })).data);
+                } catch (retryError) {
+                    if (options?.signal?.aborted) throw retryError;
+                    lastError = retryError;
+                }
+            }
+
+            // 参数类 400：再试更瘦 body（Grok 比例 / 极简字段）
+            if (strategy.sizeMode === "grok-aspect" && grokOpts?.aspect_ratio && !isConnectionClosedError(lastError)) {
                 try {
                     return parseImagePayload(
                         (
@@ -903,16 +937,29 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
                             })
                         ).data,
                     );
-                } catch {
-                    // fall through
+                } catch (e) {
+                    lastError = e;
                 }
             }
+
+            // 脆弱中转在 connection closed 后不要再疯狂换 body 连打；等更久再极简试一次
+            if (strategy.profile === "relay-fragile" && isConnectionClosedError(lastError)) {
+                try {
+                    await sleep(2500, options?.signal);
+                    return parseImagePayload((await postGeneration(minimalBody)).data);
+                } catch (e) {
+                    throw new Error(readAxiosError(e, "请求失败", "generation"));
+                }
+            }
+
             try {
+                if (isConnectionClosedError(lastError)) await sleep(1000, options?.signal);
                 return parseImagePayload((await postGeneration(minimalBody)).data);
             } catch (error2) {
                 if (options?.signal?.aborted) throw error2;
                 const status2 = axios.isAxiosError(error2) ? error2.response?.status : undefined;
                 if (status2 === 400 || status2 === 422 || isConnectionClosedError(error2)) {
+                    if (isConnectionClosedError(error2)) await sleep(1200, options?.signal);
                     return parseImagePayload((await postGeneration(bareBody)).data);
                 }
                 throw error2;

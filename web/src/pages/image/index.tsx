@@ -12,7 +12,7 @@ import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/a
 import { canvasThemes } from "@/lib/canvas-theme";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
-import { modelOptionLabel, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { getImageCompatStrategy, modelOptionLabel, resolveModelChannel, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
@@ -511,6 +511,13 @@ export default function ImagePage() {
             // 平台网关按张串行：每张独立 client_local_id，成功才扣费，避免并发双扣。
             return runGenerationSlotsSerial(snapshot, 0, count);
         }
+        // codex2api 等脆弱中转：强制串行按张生成，避免 bulk n 或失败后连环重试触发 CONNECTION_CLOSED
+        const channel = resolveModelChannel(snapshot.config, snapshot.config.model || snapshot.config.imageModel);
+        const fragileRelay = getImageCompatStrategy(channel.baseUrl, channel.compatProfile).profile === "relay-fragile";
+        if (fragileRelay || count > 1) {
+            // 脆弱中转始终串行；多张也串行（与原先 bulk 失败回退一致，但 fragile 不先 bulk）
+            if (fragileRelay) return runGenerationSlotsSerial(snapshot, 0, count, 900);
+        }
         // 优先一次请求拿齐 count；失败或数量不足时再串行补齐，避免并发触发 429。
         try {
             const generated = snapshot.references.length ? await requestEdit({ ...snapshot.config, count: String(count) }, snapshot.text, snapshot.references) : await requestGeneration({ ...snapshot.config, count: String(count) }, snapshot.text);
@@ -558,10 +565,18 @@ export default function ImagePage() {
         }
     };
 
-    const runGenerationSlotsSerial = async (snapshot: { text: string; config: AiConfig; references: ReferenceImage[]; platform?: boolean }, startIndex: number, count: number) => {
+    const runGenerationSlotsSerial = async (
+        snapshot: { text: string; config: AiConfig; references: ReferenceImage[]; platform?: boolean },
+        startIndex: number,
+        count: number,
+        gapMs = 0,
+    ) => {
         const images: GeneratedImage[] = [];
         let firstError = "";
         for (let index = startIndex; index < count; index += 1) {
+            if (gapMs > 0 && index > startIndex) {
+                await new Promise((resolve) => window.setTimeout(resolve, gapMs));
+            }
             try {
                 images.push(await runGenerationSlot(index, snapshot));
             } catch (error) {
