@@ -832,18 +832,22 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     const requestSize = resolveRequestSize(quality, config.size);
     const background = normalizeBackground(config.background);
     const fragileRelay = isFragileImageRelay(requestConfig.baseUrl);
-    // 内网 Grok2API /lan-ai：多数不认 OpenAI 的 quality/size/output_format，带上易 400
+    // 内网 Grok2API /lan-ai：不用 OpenAI 的 size/quality，改映射 aspect_ratio + resolution
     const lanRelay = isLanAiBaseUrl(requestConfig.baseUrl);
     const fullPrompt = withSystemPrompt(requestConfig, prompt);
+    const lanImageOpts = lanRelay ? resolveLanGrokImageOptions(config.quality, config.size) : null;
 
-    // 标准 OpenAI 兼容；lan/fragile 先发瘦 body，避免上游不支持比例/质量字段
     const primaryBody: Record<string, unknown> = {
         model: requestConfig.model,
         prompt: fullPrompt,
         n,
         response_format: "b64_json",
     };
-    if (!lanRelay) {
+    if (lanRelay && lanImageOpts) {
+        // xAI / Grok2API 风格：比例 + 分辨率档位（不是 1024x1024 / quality=hd）
+        if (lanImageOpts.aspect_ratio) primaryBody.aspect_ratio = lanImageOpts.aspect_ratio;
+        if (lanImageOpts.resolution) primaryBody.resolution = lanImageOpts.resolution;
+    } else if (!lanRelay) {
         if (requestSize) primaryBody.size = requestSize;
         if (quality) primaryBody.quality = quality;
         if (background) primaryBody.background = background;
@@ -857,17 +861,15 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
             timeout: IMAGE_GEN_TIMEOUT_MS,
         });
 
-    const minimalBody: Record<string, unknown> = {
-        model: requestConfig.model,
-        prompt: fullPrompt,
-        n: 1,
-        response_format: "b64_json",
-    };
-    // 部分网关只要 url 不要 b64
+    // 兜底：仅 model+prompt（部分网关极简）
     const bareBody: Record<string, unknown> = {
         model: requestConfig.model,
         prompt: fullPrompt,
         n: 1,
+    };
+    const minimalBody: Record<string, unknown> = {
+        ...bareBody,
+        response_format: "b64_json",
     };
 
     try {
@@ -876,9 +878,26 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
         } catch (error) {
             if (options?.signal?.aborted) throw error;
             const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-            // 连接被关 / 400：去掉 size·quality 等再试（Grok2API、部分中转）
             const retrySlim = isConnectionClosedError(error) || status === 400 || status === 422;
             if (!retrySlim) throw error;
+            // lan：先去掉 resolution 只留 aspect_ratio，再极简
+            if (lanRelay && lanImageOpts?.aspect_ratio) {
+                try {
+                    return parseImagePayload(
+                        (
+                            await postGeneration({
+                                model: requestConfig.model,
+                                prompt: fullPrompt,
+                                n: 1,
+                                response_format: "b64_json",
+                                aspect_ratio: lanImageOpts.aspect_ratio,
+                            })
+                        ).data,
+                    );
+                } catch {
+                    // fall through
+                }
+            }
             try {
                 return parseImagePayload((await postGeneration(minimalBody)).data);
             } catch (error2) {
@@ -893,6 +912,67 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     } catch (error) {
         throw new Error(readAxiosError(error, "请求失败", "generation"));
     }
+}
+
+/** UI 质量/尺寸 → Grok/xAI 系 aspect_ratio + resolution（1k/2k） */
+function resolveLanGrokImageOptions(qualityRaw: string, sizeRaw: string) {
+    const size = (sizeRaw || "").trim().toLowerCase();
+    const quality = (qualityRaw || "").trim().toLowerCase();
+
+    let aspect_ratio = "1:1";
+    if (!size || size === "auto") {
+        aspect_ratio = "1:1";
+    } else if (size.includes(":")) {
+        // "16:9" / "9:16" …
+        aspect_ratio = size.split("-")[0] || size;
+    } else {
+        const m = size.match(/^(\d+)x(\d+)$/);
+        if (m) {
+            const w = Number(m[1]);
+            const h = Number(m[2]);
+            if (w > 0 && h > 0) aspect_ratio = nearestAspectRatio(w / h);
+        }
+    }
+
+    // 质量 → 分辨率档；2k/4k 尺寸选项强制 2k
+    let resolution: "1k" | "2k" = "1k";
+    if (size.includes("2k") || size.includes("4k") || /^(2048|2160|3840)/.test(size)) resolution = "2k";
+    else if (quality === "high" || quality === "hd") resolution = "2k";
+    else if (quality === "medium" || quality === "low" || quality === "auto" || quality === "standard" || !quality) resolution = "1k";
+
+    // 仅允许常见比例，避免上游 400
+    const allowed = new Set(["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"]);
+    if (!allowed.has(aspect_ratio)) aspect_ratio = nearestAspectRatioLabel(aspect_ratio);
+
+    return { aspect_ratio, resolution };
+}
+
+function nearestAspectRatio(ratio: number) {
+    const options: Array<[string, number]> = [
+        ["1:1", 1],
+        ["16:9", 16 / 9],
+        ["9:16", 9 / 16],
+        ["4:3", 4 / 3],
+        ["3:4", 3 / 4],
+        ["3:2", 3 / 2],
+        ["2:3", 2 / 3],
+    ];
+    let best = options[0][0];
+    let bestDiff = Infinity;
+    for (const [label, value] of options) {
+        const diff = Math.abs(Math.log(ratio) - Math.log(value));
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            best = label;
+        }
+    }
+    return best;
+}
+
+function nearestAspectRatioLabel(label: string) {
+    const m = label.match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/);
+    if (!m) return "1:1";
+    return nearestAspectRatio(Number(m[1]) / Number(m[2]));
 }
 
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions): Promise<GeneratedImageResult[]> {
