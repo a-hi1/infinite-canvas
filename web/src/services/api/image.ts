@@ -2,6 +2,7 @@ import axios from "axios";
 
 import {
     buildApiUrl,
+    encodeChannelModel,
     getImageCompatStrategy,
     isAiProxyBaseUrl,
     modelMatchesCapability,
@@ -1031,12 +1032,68 @@ function nearestAspectRatioLabel(label: string) {
     return nearestAspectRatio(Number(m[1]) / Number(m[2]));
 }
 
+/**
+ * 有参考图时，在同渠道内自动选用更适合 JSON 图生图的 Grok 模型（无需用户手动切换）。
+ * 返回 channelId::model 或原值。
+ */
+export function resolveImageModelForReferences(config: AiConfig, selectedModelValue: string): { modelValue: string; switched: boolean; from: string; to: string } {
+    const selected = (selectedModelValue || config.imageModel || config.model || "").trim();
+    const channel = resolveModelChannel(config, selected);
+    const fromName = modelOptionName(selected);
+    const fromLower = fromName.toLowerCase();
+
+    const isGrokFamily =
+        getImageCompatStrategy(channel.baseUrl, channel.compatProfile).profile === "grok-image" ||
+        (fromLower.includes("grok") && (fromLower.includes("imagine") || fromLower.includes("image"))) ||
+        (channel.models || []).some((m) => {
+            const n = modelOptionName(m).toLowerCase();
+            return n.includes("grok") && (n.includes("imagine-image") || n.includes("image-quality"));
+        });
+
+    if (!isGrokFamily) {
+        return { modelValue: selected, switched: false, from: fromName, to: fromName };
+    }
+
+    // 已是典型 edit 模型则不换
+    if (fromLower.includes("imagine-image") || fromLower.includes("image-quality") || (fromLower.includes("grok") && fromLower.includes("image") && !fromLower.includes("video") && fromLower.includes("edit"))) {
+        return { modelValue: selected, switched: false, from: fromName, to: fromName };
+    }
+
+    const rawModels = (channel.models || []).map((m) => modelOptionName(m));
+    const preferred = ["grok-imagine-image-quality", "grok-imagine-image", "grok-2-image-1212", "grok-2-image"];
+    let picked = "";
+    for (const p of preferred) {
+        const hit = rawModels.find((m) => m.toLowerCase() === p || m.toLowerCase().includes(p));
+        if (hit) {
+            picked = hit;
+            break;
+        }
+    }
+    if (!picked) {
+        picked =
+            rawModels.find((m) => {
+                const n = m.toLowerCase();
+                return n.includes("grok") && n.includes("image") && !n.includes("video");
+            }) || "";
+    }
+    if (!picked || picked.toLowerCase() === fromLower) {
+        return { modelValue: selected, switched: false, from: fromName, to: fromName };
+    }
+
+    const modelValue = encodeChannelModel(channel.id, picked);
+    return { modelValue, switched: true, from: fromName, to: picked };
+}
+
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions): Promise<GeneratedImageResult[]> {
-    const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
+    const selectedModel = config.model || config.imageModel;
+    const auto = references.length && !mask ? resolveImageModelForReferences(config, selectedModel) : { modelValue: selectedModel, switched: false, from: "", to: "" };
+    const effectiveConfig = auto.switched ? { ...config, model: auto.modelValue, imageModel: auto.modelValue } : config;
+
+    const requestConfig = resolveModelRequestConfig(effectiveConfig, effectiveConfig.model || effectiveConfig.imageModel);
     assertImageModel(requestConfig.model);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
-    const script = resolveModelScript(config, config.model || config.imageModel);
+    const script = resolveModelScript(effectiveConfig, effectiveConfig.model || effectiveConfig.imageModel);
     if (script) {
         if (mask) throw new Error("自定义模型调用脚本暂不支持蒙版编辑，请清空脚本或改用系统默认调用");
         try {
@@ -1075,7 +1132,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     }
 
     // 渠道兼容：Grok JSON edits；fragile 旁路；其它标准 OpenAI multipart edits。
-    const editChannel = resolveModelChannel(config, config.model || config.imageModel);
+    const editChannel = resolveModelChannel(effectiveConfig, effectiveConfig.model || effectiveConfig.imageModel);
     const editStrategy = getImageCompatStrategy(requestConfig.baseUrl, editChannel.compatProfile);
     const modelName = (requestConfig.model || "").toLowerCase();
     const looksLikeGrokImage = modelName.includes("grok") && (modelName.includes("imagine") || modelName.includes("image"));
@@ -1083,14 +1140,14 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     // xAI / Grok2API：POST /images/edits 仅 application/json（不支持 OpenAI multipart）
     // 见 https://docs.x.ai/developers/model-capabilities/images/editing
     if (!mask && (editStrategy.profile === "grok-image" || looksLikeGrokImage)) {
-        return requestGrokJsonImageEdit(requestConfig, config, requestPrompt, references, n, options);
+        return requestGrokJsonImageEdit(requestConfig, effectiveConfig, requestPrompt, references, n, options);
     }
 
     if (editStrategy.editFallbackFragile && !mask) {
-        return requestEditOnFragileRelay(requestConfig, config, requestPrompt, references, n, options);
+        return requestEditOnFragileRelay(requestConfig, effectiveConfig, requestPrompt, references, n, options);
     }
 
-    return requestOpenAiCompatibleEdit(requestConfig, config, requestPrompt, references, mask, n, options, {
+    return requestOpenAiCompatibleEdit(requestConfig, effectiveConfig, requestPrompt, references, mask, n, options, {
         slim: editStrategy.profile === "openai-slim" || editStrategy.profile === "relay-fragile",
     });
 }

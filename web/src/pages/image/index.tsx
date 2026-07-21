@@ -16,7 +16,7 @@ import { getImageCompatStrategy, modelOptionLabel, resolveModelChannel, resolveM
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
-import { requestEdit, requestGeneration } from "@/services/api/image";
+import { requestEdit, requestGeneration, resolveImageModelForReferences } from "@/services/api/image";
 import { CloudHistoryPanel } from "@/components/cloud-history-panel";
 import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyncStatus } from "@/lib/cloud-sync";
 import { formatYuanFromCents, hasEnoughCredits, isPlatformImageReady, platformImagePriceCents } from "@/lib/platform-credits";
@@ -138,7 +138,10 @@ export default function ImagePage() {
     const usePlatformImage = preferPlatformImage && platformBillingReady;
     const imagePriceCents = platformImagePriceCents(credits);
     const platformModelLabel = credits?.image_model || "平台模型";
-    const imageUsesCustomScript = !usePlatformImage && Boolean(resolveModelScript(effectiveConfig, model));
+    // 有参考图时预览将实际使用的 Grok 图生图模型（与 requestEdit 内逻辑一致）
+    const editModelPreview = !usePlatformImage && references.length ? resolveImageModelForReferences(effectiveConfig, model) : null;
+    const effectiveRequestModel = editModelPreview?.switched ? editModelPreview.modelValue : model;
+    const imageUsesCustomScript = !usePlatformImage && Boolean(resolveModelScript(effectiveConfig, effectiveRequestModel));
 
     useEffect(() => {
         if (!running || !startedAt) return;
@@ -502,11 +505,31 @@ export default function ImagePage() {
             openConfigDialog(true);
             return null;
         }
-        return { text, config: { ...effectiveConfig, model, count: "1" }, references: [...references], platform: usePlatformImage };
+        const autoEdit = references.length ? resolveImageModelForReferences(effectiveConfig, model) : null;
+        const requestModel = autoEdit?.switched ? autoEdit.modelValue : model;
+        return {
+            text,
+            config: { ...effectiveConfig, model: requestModel, imageModel: requestModel, count: "1" },
+            references: [...references],
+            platform: usePlatformImage,
+            autoSwitchedModel: autoEdit?.switched ? autoEdit : null,
+        };
     };
 
-    const runGenerationBatch = async (snapshot: { text: string; config: AiConfig; references: ReferenceImage[]; platform?: boolean }, count: number) => {
+    const runGenerationBatch = async (
+        snapshot: {
+            text: string;
+            config: AiConfig;
+            references: ReferenceImage[];
+            platform?: boolean;
+            autoSwitchedModel?: { switched: boolean; from: string; to: string } | null;
+        },
+        count: number,
+    ) => {
         const batchStartedAt = performance.now();
+        if (snapshot.autoSwitchedModel?.switched) {
+            message.info(`图生图已自动使用 ${snapshot.autoSwitchedModel.to}（原选 ${snapshot.autoSwitchedModel.from}）`, 2.5);
+        }
         if (snapshot.platform) {
             // 平台网关按张串行：每张独立 client_local_id，成功才扣费，避免并发双扣。
             return runGenerationSlotsSerial(snapshot, 0, count);
@@ -837,7 +860,7 @@ export default function ImagePage() {
                             <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">
                                 {usePlatformImage
                                     ? `请求模式：平台代生成 /api/generate/image · ${platformModelLabel} · ${references.length ? `图生图（参考 ${Math.min(references.length, 4)} 张）` : "文生图"} · 生成 ${generationCount} 张（成功后扣积分）`
-                                    : `请求模式：${modelOptionLabel(effectiveConfig, model)} · ${imageUsesCustomScript ? "自定义调用脚本" : references.length ? "图生图 /v1/images/edits" : "文生图 /v1/images/generations"} · 参考图 ${references.length} 张 · 生成 ${generationCount} 张`}
+                                    : `请求模式：${modelOptionLabel(effectiveConfig, effectiveRequestModel)}${editModelPreview?.switched ? `（自动 ${editModelPreview.to}）` : ""} · ${imageUsesCustomScript ? "自定义调用脚本" : references.length ? "图生图 /v1/images/edits" : "文生图 /v1/images/generations"} · 参考图 ${references.length} 张 · 生成 ${generationCount} 张`}
                                 <div className="mt-1 opacity-75">
                                     {usePlatformImage
                                         ? "默认仍是你自己的 API Key；开启平台积分后走服务端 Key。参考图会以 data URL 上传服务端再调上游 edits（最多 4 张）。"
