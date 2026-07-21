@@ -1,0 +1,63 @@
+---
+title: 日常运维自检
+description: 本机/服务器更新、云栈健康、FRP 隧道与 /lan-ai 最短命令
+---
+
+# 日常运维自检
+
+## 本机（Windows，常 `3011`）
+
+```powershell
+cd <仓库根>
+powershell -ExecutionPolicy Bypass -File .\scripts\check-cloud-stack.ps1 -BaseUrl http://127.0.0.1:3011
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke-dual-track.ps1 -BaseUrl http://127.0.0.1:3011
+```
+
+硬失败须 0。更新前端镜像：
+
+```powershell
+git pull
+docker compose -f docker-compose.local.yml -f docker-compose.dev-host.yml up -d --build app
+```
+
+## 服务器（常 `3001`）
+
+```bash
+cd ~/apps/infinite-canvas
+git pull
+sudo docker compose -f docker-compose.local.yml up -d --build
+./scripts/check-cloud-stack.sh
+# BASE_URL=http://127.0.0.1:3001 ./scripts/check-cloud-stack.sh
+```
+
+备份：
+
+```bash
+./scripts/backup-api-data.sh
+```
+
+## 公网用家里 Grok2API（方案 B）
+
+详见 [deploy/lan-tunnel/README.md](https://github.com/a-hi1/infinite-canvas/blob/main/deploy/lan-tunnel/README.md)。
+
+| 侧 | 动作 |
+| --- | --- |
+| 家里 Windows | `cd C:\frp-lan-tunnel` → `docker compose up -d`；Grok2API 8000 开着 |
+| 服务器 | frps up；`.env`：`LAN_AI_UPSTREAM=http://infinite-canvas-frps:18000`；app recreate |
+| 验收 | `tunnel`/`lan-ai` 为 **401/200**（不是 502/503/504） |
+| 浏览器 | Base URL **`/lan-ai`** + 客户端 API Key |
+
+```bash
+curl -sS -o /dev/null -w "tunnel %{http_code}\n" --connect-timeout 8 http://127.0.0.1:18000/v1/models
+curl -sS -o /dev/null -w "lan-ai %{http_code}\n" --connect-timeout 8 http://127.0.0.1:3001/lan-ai/v1/models
+# 或
+./scripts/check-lan-tunnel.sh
+```
+
+**安全：** 安全组/ufw 放行 3001、7000；**不要**放行 18000；Grok2API 必须 Key。
+
+## 不要做
+
+- 服务器 `.env` 照搬本机 `789x` 代理（除非故意）
+- 提交 `deploy/lan-tunnel/frps.toml` / `frpc.toml`（含 token）
+- 跳过 P0.5c 人工清单直接开支付

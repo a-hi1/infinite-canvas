@@ -124,15 +124,18 @@ sudo docker compose -f docker-compose.local.yml exec ai-proxy \
 
 | 项 | 结果 |
 | --- | --- |
-| 代码 tip | `main` / `a-hi1/main` 同步；含模型脚本、导出菜单等近期提交 |
+| 代码 tip | `main` / `a-hi1/main` 同步；近期含 `/lan-ai`、FRP 隧道文档、Grok 生图 aspect_ratio 映射、画布多选浮条等 |
 | `check-cloud-stack.ps1 -BaseUrl http://127.0.0.1:3011` | **硬失败 0**；app/api/ai-proxy Up；page/health OK；platform disabled OK |
 | `smoke-dual-track.ps1 -BaseUrl http://127.0.0.1:3011` | **硬失败 0**；停 api 页面 200，启回 health 恢复 |
+| 契约抽检 | 未登录 `/api/jobs` → `reason=auth_required`；跨站 Origin 登录 → `reason=origin_not_allowed`；health.platform 默认关 |
 | env 代理 | **WARN**：本机 `.env` 有 HTTP(S)_PROXY（本地 Clash 可用；服务器勿照搬） |
 | vidgen 出网 | **WARN**：ai-proxy 当前到不了 `vidgen.x.ai`（本地 BYOK 仍 OK；Grok media/from-url 可能 502） |
-| 仍须人工 | 登录上云 UI、幂等重试、跨用户、401 只清一次、未登录停 api 时生图/画布、服务器 B2 |
+| 仍须人工 | 完整清单见 [S0 人工验收清单](/docs/progress/s0-human-checklist) |
 | 实现核验 | 见 [清单实现核验](/docs/progress/checklist-implementation-status)（代码是否落地 vs 仍须人点） |
 
 ### 最短人工清单（验收时勾选）
+
+更完整步骤与期望见 [S0 人工验收清单](/docs/progress/s0-human-checklist)。摘要：
 
 - [ ] 未登录：生图 / 画布 / 素材 / 提示词
 - [ ] 停 api：本地创作仍可用
@@ -142,6 +145,7 @@ sudo docker compose -f docker-compose.local.yml exec ai-proxy \
 - [ ] 模型脚本：无脚本=默认路径；有脚本时工作台/画布有「脚本」标识；清脚本回退
 - [ ] 导出：菜单「导出当前画布」/「导出选中节点」可出 zip
 - [ ] 登录账号弹层：可见云端积分余额（可为 ¥0.00）与云端容量
+- [ ] 画布多选 ≥2：浮条删除/复制；`/lan-ai` 文生图可选质量映射（若在用）
 
 ## 设计锚点（做下一步时仍要遵守）
 

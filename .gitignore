@@ -21,3 +21,6 @@ PROJECT_ANALYSIS.typ
 PROJECT_ANALYSIS_PRETTY.pdf
 infinite-canvas-项目分析文档.pdf
 infinite-canvas项目分析文档.pdf
+# FRP real configs (tokens); keep only *.example in git
+deploy/lan-tunnel/frps.toml
+deploy/lan-tunnel/frpc.toml
