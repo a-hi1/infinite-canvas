@@ -12,8 +12,10 @@ services:
     restart: unless-stopped
     ports:
       - "7000:7000"
-      # 关键：仅本机可访问，供 app 容器 host.docker.internal:18000 使用
-      - "127.0.0.1:18000:18000"
+      # 注意：不要绑死 127.0.0.1:18000。
+      # Linux 上 app 容器经 host.docker.internal 访问的是 docker 网桥 IP，访问不到仅 loopback 的端口 → /lan-ai 502。
+      # 对外安全：云安全组 / ufw 不要放行 18000；只放行 3001 与 frp 控制口 7000。
+      - "18000:18000"
     volumes:
       - ./frps.toml:/etc/frp/frps.toml:ro
     command: ["-c", "/etc/frp/frps.toml"]
