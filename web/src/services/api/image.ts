@@ -1,6 +1,6 @@
 import axios from "axios";
 
-import { buildApiUrl, isAiProxyBaseUrl, modelMatchesCapability, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { buildApiUrl, isAiProxyBaseUrl, isLanAiBaseUrl, modelMatchesCapability, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { nanoid } from "nanoid";
 import { compressImageDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
@@ -384,7 +384,7 @@ function readStatusError(status: number | undefined, fallback: string, context?:
     if (status === 400) {
         return context === "edit"
             ? `${fallback}（400），当前渠道可能不接受该模型的参考图编辑，请检查模型是否支持图生图、参考图格式/张数，或去掉参考图改文生图`
-            : `${fallback}（400），请检查图片模型、尺寸、数量是否被当前渠道支持`;
+            : `${fallback}（400），上游拒绝参数。内网 Grok2API 等常不支持 size/quality/比例字段——请换渠道支持的生图模型名，或清空参考图后重试；UI 上的比例/质量可能不会被该上游使用`;
     }
     if (status === 401 || status === 403) return "鉴权失败，请检查 API Key、套餐权限或模型权限";
     if (status === 404) {
@@ -832,17 +832,23 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     const requestSize = resolveRequestSize(quality, config.size);
     const background = normalizeBackground(config.background);
     const fragileRelay = isFragileImageRelay(requestConfig.baseUrl);
-    // 标准 OpenAI 兼容最小集；output_format 是较新字段，部分中转会因此异常/掐连接
+    // 内网 Grok2API /lan-ai：多数不认 OpenAI 的 quality/size/output_format，带上易 400
+    const lanRelay = isLanAiBaseUrl(requestConfig.baseUrl);
+    const fullPrompt = withSystemPrompt(requestConfig, prompt);
+
+    // 标准 OpenAI 兼容；lan/fragile 先发瘦 body，避免上游不支持比例/质量字段
     const primaryBody: Record<string, unknown> = {
         model: requestConfig.model,
-        prompt: withSystemPrompt(requestConfig, prompt),
+        prompt: fullPrompt,
         n,
-        ...(requestSize ? { size: requestSize } : {}),
         response_format: "b64_json",
     };
-    if (quality) primaryBody.quality = quality;
-    if (background) primaryBody.background = background;
-    if (!fragileRelay) primaryBody.output_format = IMAGE_OUTPUT_FORMAT;
+    if (!lanRelay) {
+        if (requestSize) primaryBody.size = requestSize;
+        if (quality) primaryBody.quality = quality;
+        if (background) primaryBody.background = background;
+        if (!fragileRelay) primaryBody.output_format = IMAGE_OUTPUT_FORMAT;
+    }
 
     const postGeneration = (body: Record<string, unknown>) =>
         axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/generations"), body, {
@@ -851,19 +857,38 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
             timeout: IMAGE_GEN_TIMEOUT_MS,
         });
 
+    const minimalBody: Record<string, unknown> = {
+        model: requestConfig.model,
+        prompt: fullPrompt,
+        n: 1,
+        response_format: "b64_json",
+    };
+    // 部分网关只要 url 不要 b64
+    const bareBody: Record<string, unknown> = {
+        model: requestConfig.model,
+        prompt: fullPrompt,
+        n: 1,
+    };
+
     try {
         try {
             return parseImagePayload((await postGeneration(primaryBody)).data);
         } catch (error) {
-            // 连接被关：再试一次「更瘦」的 body（只保留模型/提示词/张数/b64），排除 size/quality 扩展字段踩雷
-            if (!isConnectionClosedError(error) || options?.signal?.aborted) throw error;
-            const minimalBody: Record<string, unknown> = {
-                model: requestConfig.model,
-                prompt: withSystemPrompt(requestConfig, prompt),
-                n: 1,
-                response_format: "b64_json",
-            };
-            return parseImagePayload((await postGeneration(minimalBody)).data);
+            if (options?.signal?.aborted) throw error;
+            const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+            // 连接被关 / 400：去掉 size·quality 等再试（Grok2API、部分中转）
+            const retrySlim = isConnectionClosedError(error) || status === 400 || status === 422;
+            if (!retrySlim) throw error;
+            try {
+                return parseImagePayload((await postGeneration(minimalBody)).data);
+            } catch (error2) {
+                if (options?.signal?.aborted) throw error2;
+                const status2 = axios.isAxiosError(error2) ? error2.response?.status : undefined;
+                if (status2 === 400 || status2 === 422 || isConnectionClosedError(error2)) {
+                    return parseImagePayload((await postGeneration(bareBody)).data);
+                }
+                throw error2;
+            }
         }
     } catch (error) {
         throw new Error(readAxiosError(error, "请求失败", "generation"));
