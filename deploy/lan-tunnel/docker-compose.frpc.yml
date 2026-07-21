@@ -1,0 +1,16 @@
+# 家里机器：可选 FRP 客户端（与 infinite-canvas 主项目分离）。
+# Linux 推荐；Windows 也可用 Docker，或改用官方 frpc.exe + frpc.toml。
+#
+# 要求：这台机器能访问 localIP:localPort（如 192.168.6.78:8000），
+# 且能访问公网 serverAddr:7000。
+
+services:
+  frpc:
+    image: snowdreamtech/frpc:0.61.1
+    container_name: infinite-canvas-frpc
+    restart: unless-stopped
+    # Linux 下 host 网络便于直连局域网；Windows Docker 请删掉 network_mode 并保证能路由到 192.168.x
+    network_mode: host
+    volumes:
+      - ./frpc.toml:/etc/frp/frpc.toml:ro
+    command: ["-c", "/etc/frp/frpc.toml"]

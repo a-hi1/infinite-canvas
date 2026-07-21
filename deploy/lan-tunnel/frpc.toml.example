@@ -1,0 +1,17 @@
+# frpc（跑在家里能访问 Grok2API 的机器）示例配置。
+# 复制为 frpc.toml 后修改 serverAddr / token / localIP，勿提交真实 frpc.toml。
+
+serverAddr = "38.246.112.19"
+serverPort = 7000
+
+auth.method = "token"
+auth.token = "CHANGE_ME_TO_A_LONG_RANDOM_TOKEN"
+
+[[proxies]]
+name = "grok2api-home"
+type = "tcp"
+# 家里局域网里的 Grok2API 地址（你本机浏览器能打开的那台）
+localIP = "192.168.6.78"
+localPort = 8000
+# 映射到公网服务器本机的 18000（仅 127.0.0.1 暴露，见 compose）
+remotePort = 18000

@@ -1,0 +1,19 @@
+# 公网服务器：可选 FRP 服务端（与 infinite-canvas 主 compose 分离，默认不随主栈启动）。
+# 用法见 README.md。
+#
+# 不影响：app:3001 / api / ai-proxy。只多开：
+#   - 公网 7000：frp 控制通道（需防火墙放行）
+#   - 宿主机 127.0.0.1:18000：家里 Grok2API 隧道出口（不对公网开放）
+
+services:
+  frps:
+    image: snowdreamtech/frps:0.61.1
+    container_name: infinite-canvas-frps
+    restart: unless-stopped
+    ports:
+      - "7000:7000"
+      # 关键：仅本机可访问，供 app 容器 host.docker.internal:18000 使用
+      - "127.0.0.1:18000:18000"
+    volumes:
+      - ./frps.toml:/etc/frp/frps.toml:ro
+    command: ["-c", "/etc/frp/frps.toml"]
