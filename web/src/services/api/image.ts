@@ -5,6 +5,7 @@ import {
     encodeChannelModel,
     getImageCompatStrategy,
     isAiProxyBaseUrl,
+    isLanAiBaseUrl,
     modelMatchesCapability,
     modelOptionName,
     resolveModelChannel,
@@ -1032,9 +1033,81 @@ function nearestAspectRatioLabel(label: string) {
     return nearestAspectRatio(Number(m[1]) / Number(m[2]));
 }
 
+/** 图生图优先：Grok2API 实际可用的是 *edit*，不是 *quality*（quality 多为文生）。 */
+const GROK_IMAGE_EDIT_PREFERRED = [
+    "grok-imagine-image-edit",
+    "grok-imagine-image-edit-quality",
+    "grok-2-image-edit",
+    "grok-imagine-image-quality",
+    "grok-imagine-image",
+    "grok-2-image-1212",
+    "grok-2-image",
+];
+
+function isGrokImageEditModelName(name: string) {
+    const n = name.toLowerCase();
+    if (n.includes("video")) return false;
+    // 明确 edit 名最优先识别
+    if (n.includes("edit") && n.includes("image")) return true;
+    if (n.includes("imagine-image-edit")) return true;
+    return n.includes("imagine-image") || n.includes("image-quality") || (n.includes("grok") && n.includes("image") && !n.includes("video"));
+}
+
+function isPreferredGrokEditModelName(name: string) {
+    const n = name.toLowerCase();
+    return n.includes("edit") && n.includes("image") && !n.includes("video");
+}
+
+function channelLooksLikeGrokImage(config: AiConfig, channel: ModelChannel, selectedName: string) {
+    const lower = selectedName.toLowerCase();
+    if (getImageCompatStrategy(channel.baseUrl, channel.compatProfile).profile === "grok-image") return true;
+    if (isLanAiBaseUrl(channel.baseUrl)) return true;
+    if (lower.includes("grok") && (lower.includes("imagine") || lower.includes("image"))) return true;
+    return (channel.models || []).some((m) => {
+        const n = modelOptionName(m).toLowerCase();
+        return n.includes("grok") && (n.includes("edit") || n.includes("imagine-image") || n.includes("image-quality") || (n.includes("image") && !n.includes("video")));
+    });
+}
+
+/** 同渠道内图生图模型候选：*edit* 永远排最前。 */
+export function listGrokImageEditModelCandidates(config: AiConfig, selectedModelValue: string): string[] {
+    const selected = (selectedModelValue || config.imageModel || config.model || "").trim();
+    const channel = resolveModelChannel(config, selected);
+    const fromName = modelOptionName(selected);
+    const rawModels = (channel.models || []).map((m) => modelOptionName(m).trim()).filter(Boolean);
+    const knownLower = new Map(rawModels.map((m) => [m.toLowerCase(), m] as const));
+    const out: string[] = [];
+    const push = (name: string) => {
+        const n = (name || "").trim();
+        if (!n) return;
+        if (!out.some((x) => x.toLowerCase() === n.toLowerCase())) out.push(n);
+    };
+
+    // 1) 列表里所有带 edit 的图模（最重要）
+    for (const m of rawModels) {
+        if (isPreferredGrokEditModelName(m)) push(m);
+    }
+    // 2) 首选名表（含 edit 硬编码，列表未拉取时也试）
+    for (const p of GROK_IMAGE_EDIT_PREFERRED) {
+        const hit = knownLower.get(p) || rawModels.find((m) => m.toLowerCase().includes(p));
+        if (hit) push(hit);
+        else if (p.includes("edit") || isLanAiBaseUrl(channel.baseUrl) || getImageCompatStrategy(channel.baseUrl, channel.compatProfile).profile === "grok-image") {
+            // 列表可能没写全：edit 名仍尝试；quality 仅作后备
+            push(p);
+        }
+    }
+    // 3) 其它 grok 图模
+    for (const m of rawModels) {
+        if (isGrokImageEditModelName(m)) push(m);
+    }
+    if (isGrokImageEditModelName(fromName)) push(fromName);
+    push(fromName);
+    return out;
+}
+
 /**
  * 有参考图时，在同渠道内自动选用更适合 JSON 图生图的 Grok 模型（无需用户手动切换）。
- * 返回 channelId::model 或原值。
+ * 任意选中 grok / /lan-ai 渠道模型时，只要有参考图就尽量切到 imagine-image*。
  */
 export function resolveImageModelForReferences(config: AiConfig, selectedModelValue: string): { modelValue: string; switched: boolean; from: string; to: string } {
     const selected = (selectedModelValue || config.imageModel || config.model || "").trim();
@@ -1042,41 +1115,17 @@ export function resolveImageModelForReferences(config: AiConfig, selectedModelVa
     const fromName = modelOptionName(selected);
     const fromLower = fromName.toLowerCase();
 
-    const isGrokFamily =
-        getImageCompatStrategy(channel.baseUrl, channel.compatProfile).profile === "grok-image" ||
-        (fromLower.includes("grok") && (fromLower.includes("imagine") || fromLower.includes("image"))) ||
-        (channel.models || []).some((m) => {
-            const n = modelOptionName(m).toLowerCase();
-            return n.includes("grok") && (n.includes("imagine-image") || n.includes("image-quality"));
-        });
-
-    if (!isGrokFamily) {
+    if (!channelLooksLikeGrokImage(config, channel, fromName)) {
         return { modelValue: selected, switched: false, from: fromName, to: fromName };
     }
 
-    // 已是典型 edit 模型则不换
-    if (fromLower.includes("imagine-image") || fromLower.includes("image-quality") || (fromLower.includes("grok") && fromLower.includes("image") && !fromLower.includes("video") && fromLower.includes("edit"))) {
+    const candidates = listGrokImageEditModelCandidates(config, selected);
+    const picked = candidates[0] || fromName;
+    // 已是 *edit* 模型则不换；若当前是 quality/文生名则必须切到 edit
+    if (picked.toLowerCase() === fromLower && isPreferredGrokEditModelName(fromName)) {
         return { modelValue: selected, switched: false, from: fromName, to: fromName };
     }
-
-    const rawModels = (channel.models || []).map((m) => modelOptionName(m));
-    const preferred = ["grok-imagine-image-quality", "grok-imagine-image", "grok-2-image-1212", "grok-2-image"];
-    let picked = "";
-    for (const p of preferred) {
-        const hit = rawModels.find((m) => m.toLowerCase() === p || m.toLowerCase().includes(p));
-        if (hit) {
-            picked = hit;
-            break;
-        }
-    }
-    if (!picked) {
-        picked =
-            rawModels.find((m) => {
-                const n = m.toLowerCase();
-                return n.includes("grok") && n.includes("image") && !n.includes("video");
-            }) || "";
-    }
-    if (!picked || picked.toLowerCase() === fromLower) {
+    if (picked.toLowerCase() === fromLower) {
         return { modelValue: selected, switched: false, from: fromName, to: fromName };
     }
 
@@ -1191,52 +1240,49 @@ async function requestGrokJsonImageEdit(
 
     const imageObjects = dataUrls.map((url) => ({ type: "image_url" as const, url }));
     const count = Math.max(1, Math.min(4, n));
+    // 多模型候选：优先 edit，再 quality 等（同渠道列表 + 硬编码后备）
+    const modelCandidates = listGrokImageEditModelCandidates(config, encodeChannelModel(resolveModelChannel(config, requestConfig.model).id, requestConfig.model));
+    const models = modelCandidates.length ? modelCandidates : [requestConfig.model];
 
-    const primaryBody: Record<string, unknown> = {
-        model: requestConfig.model,
-        prompt: userPrompt,
-        n: count,
-        response_format: "b64_json",
-        ...(grokOpts.aspect_ratio ? { aspect_ratio: grokOpts.aspect_ratio } : {}),
-        ...(grokOpts.resolution ? { resolution: grokOpts.resolution } : {}),
+    const candidates: Record<string, unknown>[] = [];
+    const push = (body: Record<string, unknown>) => {
+        const key = JSON.stringify(body);
+        if (candidates.some((c) => JSON.stringify(c) === key)) return;
+        candidates.push(body);
     };
-    if (imageObjects.length === 1) {
-        primaryBody.image = imageObjects[0];
-    } else {
-        primaryBody.images = imageObjects;
-    }
 
-    // 兼容字段变体（部分网关只要 url 字符串）
-    const candidates: Record<string, unknown>[] = [
-        primaryBody,
-        {
-            model: requestConfig.model,
+    for (const model of models) {
+        // xAI 文档形态
+        push({
+            model,
+            prompt: userPrompt,
+            n: count,
+            response_format: "b64_json",
+            image: imageObjects[0],
+            ...(imageObjects.length > 1 ? { images: imageObjects } : {}),
+            ...(grokOpts.aspect_ratio ? { aspect_ratio: grokOpts.aspect_ratio } : {}),
+            ...(grokOpts.resolution ? { resolution: grokOpts.resolution } : {}),
+        });
+        push({
+            model,
             prompt: userPrompt,
             n: 1,
             response_format: "b64_json",
             image: imageObjects[0],
             ...(grokOpts.aspect_ratio ? { aspect_ratio: grokOpts.aspect_ratio } : {}),
-        },
-        {
-            model: requestConfig.model,
-            prompt: userPrompt,
-            n: 1,
-            response_format: "b64_json",
-            image: { url: dataUrls[0] },
-        },
-        {
-            model: requestConfig.model,
-            prompt: userPrompt,
-            n: 1,
-            image: imageObjects[0],
-        },
-    ];
+        });
+        push({ model, prompt: userPrompt, n: 1, response_format: "b64_json", image: { url: dataUrls[0] } });
+        push({ model, prompt: userPrompt, n: 1, image: imageObjects[0] });
+        // 部分网关 image 为纯 data URI 字符串
+        push({ model, prompt: userPrompt, n: 1, response_format: "b64_json", image: dataUrls[0] });
+        push({ model, prompt: userPrompt, n: 1, images: dataUrls });
+    }
 
     let lastError: unknown;
     for (let i = 0; i < candidates.length; i += 1) {
         if (options?.signal?.aborted) throw new DOMException("请求已取消", "AbortError");
         try {
-            if (i > 0) await sleep(600, options?.signal);
+            if (i > 0) await sleep(500, options?.signal);
             const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), candidates[i], {
                 headers: aiHeaders(requestConfig, "application/json"),
                 signal: options?.signal,
@@ -1248,7 +1294,6 @@ async function requestGrokJsonImageEdit(
             if (axios.isAxiosError(error) && (error.response?.status === 401 || error.response?.status === 403)) {
                 break;
             }
-            // 415/400 继续试下一字段形态；连接关闭则稍后重试下一候选
             if (isConnectionClosedError(error)) {
                 try {
                     await sleep(1200, options?.signal);
