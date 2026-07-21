@@ -1,6 +1,17 @@
 import axios from "axios";
 
-import { buildApiUrl, isAiProxyBaseUrl, isLanAiBaseUrl, modelMatchesCapability, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import {
+    buildApiUrl,
+    getImageCompatStrategy,
+    isAiProxyBaseUrl,
+    modelMatchesCapability,
+    modelOptionName,
+    resolveModelChannel,
+    resolveModelRequestConfig,
+    resolveModelScript,
+    type AiConfig,
+    type ModelChannel,
+} from "@/stores/use-config-store";
 import { nanoid } from "nanoid";
 import { compressImageDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
@@ -25,10 +36,9 @@ export type GeneratedImageResult = {
     degradeReason?: string;
 };
 
+/** @deprecated 优先用 getImageCompatStrategy；保留给旧调用点 */
 function isFragileImageRelay(baseUrl: string) {
-    const value = (baseUrl || "").toLowerCase();
-    // codex2api 等对扩展字段/大 body 更敏感；连接常被对端直接掐断（无 HTTP status）
-    return value.includes("codex2api") || value.includes("chatgpt2api");
+    return getImageCompatStrategy(baseUrl, "auto").profile === "relay-fragile";
 }
 
 function isConnectionClosedError(error: unknown) {
@@ -831,11 +841,10 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     const quality = normalizeQuality(config.quality);
     const requestSize = resolveRequestSize(quality, config.size);
     const background = normalizeBackground(config.background);
-    const fragileRelay = isFragileImageRelay(requestConfig.baseUrl);
-    // 内网 Grok2API /lan-ai：不用 OpenAI 的 size/quality，改映射 aspect_ratio + resolution
-    const lanRelay = isLanAiBaseUrl(requestConfig.baseUrl);
+    const channel = resolveModelChannel(config, config.model || config.imageModel);
+    const strategy = getImageCompatStrategy(requestConfig.baseUrl, channel.compatProfile);
     const fullPrompt = withSystemPrompt(requestConfig, prompt);
-    const lanImageOpts = lanRelay ? resolveLanGrokImageOptions(config.quality, config.size) : null;
+    const grokOpts = strategy.sizeMode === "grok-aspect" ? resolveLanGrokImageOptions(config.quality, config.size) : null;
 
     const primaryBody: Record<string, unknown> = {
         model: requestConfig.model,
@@ -843,15 +852,14 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
         n,
         response_format: "b64_json",
     };
-    if (lanRelay && lanImageOpts) {
-        // xAI / Grok2API 风格：比例 + 分辨率档位（不是 1024x1024 / quality=hd）
-        if (lanImageOpts.aspect_ratio) primaryBody.aspect_ratio = lanImageOpts.aspect_ratio;
-        if (lanImageOpts.resolution) primaryBody.resolution = lanImageOpts.resolution;
-    } else if (!lanRelay) {
+    if (strategy.sizeMode === "grok-aspect" && grokOpts) {
+        if (grokOpts.aspect_ratio) primaryBody.aspect_ratio = grokOpts.aspect_ratio;
+        if (grokOpts.resolution) primaryBody.resolution = grokOpts.resolution;
+    } else if (strategy.sizeMode === "openai-size") {
         if (requestSize) primaryBody.size = requestSize;
-        if (quality) primaryBody.quality = quality;
-        if (background) primaryBody.background = background;
-        if (!fragileRelay) primaryBody.output_format = IMAGE_OUTPUT_FORMAT;
+        if (strategy.includeQuality && quality) primaryBody.quality = quality;
+        if (strategy.includeBackground && background) primaryBody.background = background;
+        if (strategy.includeOutputFormat) primaryBody.output_format = IMAGE_OUTPUT_FORMAT;
     }
 
     const postGeneration = (body: Record<string, unknown>) =>
@@ -877,11 +885,12 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
             return parseImagePayload((await postGeneration(primaryBody)).data);
         } catch (error) {
             if (options?.signal?.aborted) throw error;
+            if (!strategy.retrySlimOnError) throw error;
             const status = axios.isAxiosError(error) ? error.response?.status : undefined;
             const retrySlim = isConnectionClosedError(error) || status === 400 || status === 422;
             if (!retrySlim) throw error;
-            // lan：先去掉 resolution 只留 aspect_ratio，再极简
-            if (lanRelay && lanImageOpts?.aspect_ratio) {
+            // Grok：先去掉 resolution 只留 aspect_ratio，再极简
+            if (strategy.sizeMode === "grok-aspect" && grokOpts?.aspect_ratio) {
                 try {
                     return parseImagePayload(
                         (
@@ -890,7 +899,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
                                 prompt: fullPrompt,
                                 n: 1,
                                 response_format: "b64_json",
-                                aspect_ratio: lanImageOpts.aspect_ratio,
+                                aspect_ratio: grokOpts.aspect_ratio,
                             })
                         ).data,
                     );
@@ -1018,12 +1027,16 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         }
     }
 
-    // codex2api 等：edits 常不可用，无蒙版时走「瘦 edits → generations 带参考图」旁路；其它渠道仍只走标准 edits。
-    if (isFragileImageRelay(requestConfig.baseUrl) && !mask) {
+    // 渠道兼容：fragile 预设（或 auto 推断为 codex2api）无蒙版时 edits 旁路；其它渠道标准 edits。
+    const editChannel = resolveModelChannel(config, config.model || config.imageModel);
+    const editStrategy = getImageCompatStrategy(requestConfig.baseUrl, editChannel.compatProfile);
+    if (editStrategy.editFallbackFragile && !mask) {
         return requestEditOnFragileRelay(requestConfig, config, requestPrompt, references, n, options);
     }
 
-    return requestOpenAiCompatibleEdit(requestConfig, config, requestPrompt, references, mask, n, options, { slim: false });
+    return requestOpenAiCompatibleEdit(requestConfig, config, requestPrompt, references, mask, n, options, {
+        slim: editStrategy.profile === "openai-slim" || editStrategy.profile === "relay-fragile",
+    });
 }
 
 async function requestOpenAiCompatibleEdit(

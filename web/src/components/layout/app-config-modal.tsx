@@ -8,7 +8,7 @@ import { fetchChannelModels } from "@/services/api/image";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
-import { AI_PROXY_BASE_URL, createModelChannel, defaultBaseUrlForApiFormat, encodeChannelModel, filterModelsByCapability, isAiProxyBaseUrl, isLanAiBaseUrl, isSameOriginRelayBaseUrl, LAN_AI_BASE_URL, listConfiguredModelScripts, modelOptionLabel, modelOptionName, modelOptionsFromChannels, normalizeModelOptionValue, pruneModelScripts, resolveModelScript, setModelScript, useConfigStore, type AiConfig, type ApiCallFormat, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { AI_PROXY_BASE_URL, CHANNEL_COMPAT_OPTIONS, createModelChannel, defaultBaseUrlForApiFormat, encodeChannelModel, filterModelsByCapability, isAiProxyBaseUrl, isLanAiBaseUrl, isSameOriginRelayBaseUrl, LAN_AI_BASE_URL, listConfiguredModelScripts, modelOptionLabel, modelOptionName, modelOptionsFromChannels, normalizeCompatProfile, normalizeModelOptionValue, pruneModelScripts, resolveChannelCompatProfile, resolveModelScript, setModelScript, useConfigStore, type AiConfig, type ApiCallFormat, type ChannelCompatProfile, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -162,11 +162,12 @@ export function AppConfigModal() {
             name,
             baseUrl: LAN_AI_BASE_URL,
             apiFormat: "openai",
-            // 常见局域网 OpenAI 兼容默认；可点「拉取模型」覆盖
+            // 明确 Grok 生图兼容，避免 auto 误判；可点「拉取模型」覆盖模型列表
+            compatProfile: "grok-image",
             models: ["grok-3", "grok-2-image", "gpt-4o", "gpt-4o-mini"],
         });
         updateChannels([...config.channels, lanChannel]);
-        message.success("已添加内网渠道。Base URL 为 /lan-ai（勿填局域网 IP）。需在部署侧配置 LAN_AI_UPSTREAM，例如 192.168.6.78:8000");
+        message.success("已添加内网渠道。Base URL 为 /lan-ai；生图兼容已设为「Grok / Grok2API」。部署侧配置 LAN_AI_UPSTREAM 后可用");
     };
 
     const deleteChannel = (id: string) => {
@@ -327,7 +328,12 @@ export function AppConfigModal() {
                                                 <div className="min-w-0">
                                                     <div className="truncate text-sm font-semibold">{channel.name || "未命名渠道"}</div>
                                                     <div className="mt-1 text-xs text-stone-500">
-                                                        {apiFormatLabel(channel.apiFormat)} · 已保存 {channel.models.length} 个模型
+                                                        {apiFormatLabel(channel.apiFormat)} · 兼容{" "}
+                                                        {CHANNEL_COMPAT_OPTIONS.find((item) => item.value === normalizeCompatProfile(channel.compatProfile))?.label || "自动"}
+                                                        {normalizeCompatProfile(channel.compatProfile) === "auto"
+                                                            ? `（${CHANNEL_COMPAT_OPTIONS.find((item) => item.value === resolveChannelCompatProfile(channel.baseUrl, "auto"))?.label || "标准 OpenAI"}）`
+                                                            : ""}{" "}
+                                                        · 已保存 {channel.models.length} 个模型
                                                     </div>
                                                 </div>
                                                 <div className="flex shrink-0 gap-2">
@@ -343,6 +349,17 @@ export function AppConfigModal() {
                                                 </Form.Item>
                                                 <Form.Item label="调用格式" className="mb-0">
                                                     <Select value={channel.apiFormat} options={apiFormatOptions} onChange={(value: ApiCallFormat) => updateChannelApiFormat(channel, value)} />
+                                                </Form.Item>
+                                                <Form.Item
+                                                    label="生图兼容预设"
+                                                    className="mb-0 md:col-span-2"
+                                                    extra={CHANNEL_COMPAT_OPTIONS.find((item) => item.value === normalizeCompatProfile(channel.compatProfile))?.hint}
+                                                >
+                                                    <Select
+                                                        value={normalizeCompatProfile(channel.compatProfile)}
+                                                        options={CHANNEL_COMPAT_OPTIONS.map((item) => ({ label: item.label, value: item.value }))}
+                                                        onChange={(value: ChannelCompatProfile) => updateChannel(channel.id, { compatProfile: value })}
+                                                    />
                                                 </Form.Item>
                                                 <Form.Item label="Base URL" className="mb-0">
                                                     <Input value={channel.baseUrl} onChange={(event) => updateChannel(channel.id, { baseUrl: event.target.value })} />

@@ -5,12 +5,28 @@ import { nanoid } from "nanoid";
 
 export type ApiCallFormat = "openai" | "gemini";
 
+/**
+ * 渠道生图/请求兼容预设。auto = 按 Base URL 推断（与历史硬编码行为一致）。
+ * 换中转时优先改此项，避免再改代码。
+ */
+export type ChannelCompatProfile = "auto" | "openai" | "openai-slim" | "grok-image" | "relay-fragile";
+
+export const CHANNEL_COMPAT_OPTIONS: Array<{ value: ChannelCompatProfile; label: string; hint: string }> = [
+    { value: "auto", label: "自动（推荐）", hint: "按 Base URL 推断：/lan-ai→Grok 比例；codex2api→精简中转；其它→标准 OpenAI" },
+    { value: "openai", label: "标准 OpenAI", hint: "size / quality / background / output_format 完整字段" },
+    { value: "openai-slim", label: "OpenAI 精简", hint: "少带 output_format 等扩展字段，适合挑剔中转" },
+    { value: "grok-image", label: "Grok / Grok2API 生图", hint: "aspect_ratio + resolution(1k/2k)，不带 OpenAI size/quality" },
+    { value: "relay-fragile", label: "脆弱中转（如 codex2api）", hint: "精简字段；图生图 edits 失败可旁路/降级" },
+];
+
 export type ModelChannel = {
     id: string;
     name: string;
     baseUrl: string;
     apiKey: string;
     apiFormat: ApiCallFormat;
+    /** 缺省 / auto：与改预设前行为一致 */
+    compatProfile?: ChannelCompatProfile;
     models: string[];
 };
 
@@ -400,8 +416,90 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
         baseUrl: channel?.baseUrl?.trim() || (isDefaultChannel ? DEFAULT_RELAY_BASE_URL : defaultBaseUrlForApiFormat(apiFormat)),
         apiKey: channel?.apiKey || "",
         apiFormat,
+        compatProfile: normalizeCompatProfile(channel?.compatProfile),
         models: uniqueRawModels(channel?.models || (isDefaultChannel ? [...DEFAULT_RELAY_MODELS] : [])),
     };
+}
+
+export function normalizeCompatProfile(value: unknown): ChannelCompatProfile {
+    if (value === "openai" || value === "openai-slim" || value === "grok-image" || value === "relay-fragile" || value === "auto") return value;
+    return "auto";
+}
+
+/** 解析生效中的兼容预设（auto → 按 Base URL 推断，行为与历史硬编码一致）。 */
+export function resolveChannelCompatProfile(baseUrl: string, profile?: ChannelCompatProfile | null): Exclude<ChannelCompatProfile, "auto"> {
+    const explicit = normalizeCompatProfile(profile);
+    if (explicit !== "auto") return explicit;
+    const value = (baseUrl || "").trim().toLowerCase();
+    if (value === LAN_AI_BASE_URL || value.startsWith(`${LAN_AI_BASE_URL}/`) || value.includes("/lan-ai")) return "grok-image";
+    try {
+        const path = new URL(value.startsWith("http") ? value : `http://local.invalid${value.startsWith("/") ? value : `/${value}`}`).pathname.replace(/\/+$/, "");
+        if (path === LAN_AI_BASE_URL || path.startsWith(`${LAN_AI_BASE_URL}/`)) return "grok-image";
+    } catch {
+        /* ignore */
+    }
+    if (value.includes("codex2api") || value.includes("chatgpt2api")) return "relay-fragile";
+    return "openai";
+}
+
+export type ImageCompatStrategy = {
+    profile: Exclude<ChannelCompatProfile, "auto">;
+    /** 文生图尺寸字段策略 */
+    sizeMode: "openai-size" | "grok-aspect" | "omit";
+    includeQuality: boolean;
+    includeOutputFormat: boolean;
+    includeBackground: boolean;
+    /** 400/连接失败时是否瘦身重试 */
+    retrySlimOnError: boolean;
+    /** 图生图 edits 失败后是否走 fragile 旁路 */
+    editFallbackFragile: boolean;
+};
+
+export function getImageCompatStrategy(baseUrl: string, profile?: ChannelCompatProfile | null): ImageCompatStrategy {
+    const resolved = resolveChannelCompatProfile(baseUrl, profile);
+    switch (resolved) {
+        case "grok-image":
+            return {
+                profile: resolved,
+                sizeMode: "grok-aspect",
+                includeQuality: false,
+                includeOutputFormat: false,
+                includeBackground: false,
+                retrySlimOnError: true,
+                editFallbackFragile: false,
+            };
+        case "relay-fragile":
+            return {
+                profile: resolved,
+                sizeMode: "openai-size",
+                includeQuality: true,
+                includeOutputFormat: false,
+                includeBackground: true,
+                retrySlimOnError: true,
+                editFallbackFragile: true,
+            };
+        case "openai-slim":
+            return {
+                profile: resolved,
+                sizeMode: "openai-size",
+                includeQuality: true,
+                includeOutputFormat: false,
+                includeBackground: true,
+                retrySlimOnError: true,
+                editFallbackFragile: false,
+            };
+        case "openai":
+        default:
+            return {
+                profile: "openai",
+                sizeMode: "openai-size",
+                includeQuality: true,
+                includeOutputFormat: true,
+                includeBackground: true,
+                retrySlimOnError: false,
+                editFallbackFragile: false,
+            };
+    }
 }
 
 export function encodeChannelModel(channelId: string, model: string) {
