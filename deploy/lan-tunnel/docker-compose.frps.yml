@@ -1,9 +1,13 @@
-# 公网服务器：可选 FRP 服务端（与 infinite-canvas 主 compose 分离，默认不随主栈启动）。
+# 公网服务器：可选 FRP 服务端（与主 compose 文件分离，默认不随主栈启动）。
 # 用法见 README.md。
 #
-# 不影响：app:3001 / api / ai-proxy。只多开：
-#   - 公网 7000：frp 控制通道（需防火墙放行）
-#   - 宿主机 127.0.0.1:18000：家里 Grok2API 隧道出口（不对公网开放）
+# 与主栈 app 共用网络 infinite-canvas_default，便于 /lan-ai 用
+#   LAN_AI_UPSTREAM=http://infinite-canvas-frps:18000
+# 避免 host.docker.internal → 宿主机端口在部分环境 502。
+#
+# 不影响 api/ai-proxy 业务。端口：
+#   - 公网 7000：frp 控制（安全组放行）
+#   - 18000：隧道出口（安全组/ufw 不要放行）
 
 services:
   frps:
@@ -12,10 +16,16 @@ services:
     restart: unless-stopped
     ports:
       - "7000:7000"
-      # 注意：不要绑死 127.0.0.1:18000。
-      # Linux 上 app 容器经 host.docker.internal 访问的是 docker 网桥 IP，访问不到仅 loopback 的端口 → /lan-ai 502。
-      # 对外安全：云安全组 / ufw 不要放行 18000；只放行 3001 与 frp 控制口 7000。
+      # 宿主机也可 curl 本机 18000 做验收；勿在防火墙放行公网 18000
       - "18000:18000"
     volumes:
       - ./frps.toml:/etc/frp/frps.toml:ro
     command: ["-c", "/etc/frp/frps.toml"]
+    networks:
+      - infinite_canvas
+
+networks:
+  infinite_canvas:
+    # 与 docker compose -f docker-compose.local.yml 默认项目名 infinite-canvas 一致
+    name: infinite-canvas_default
+    external: true

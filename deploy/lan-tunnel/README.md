@@ -58,22 +58,28 @@ sudo ufw allow 7000/tcp comment 'frp control'
 sudo ufw status
 ```
 
-### 5. 主项目 `.env` 指向隧道出口
+### 5. 主项目 `.env` 指向隧道出口（Docker 网络内服务名）
+
+frps 已加入主栈网络 `infinite-canvas_default`，**推荐**（避免 host.docker.internal 502）：
 
 ```bash
 cd ~/apps/infinite-canvas
-# 编辑仓库根目录 .env，增加或修改：
-# LAN_AI_UPSTREAM=host.docker.internal:18000
-grep -n LAN_AI .env || true
+sed -i '/^LAN_AI_UPSTREAM=/d' .env
+echo 'LAN_AI_UPSTREAM=http://infinite-canvas-frps:18000' >> .env
+grep LAN_AI_UPSTREAM .env
 ```
 
-若没有该行：
+备选（仅当容器访问宿主机端口正常时）：`LAN_AI_UPSTREAM=host.docker.internal:18000`  
+**不要**写 `192.168.6.78:8000`（公网服务器到不了家）。
+
+若 `docker compose -f docker-compose.frps.yml up` 报 network 不存在：
 
 ```bash
-echo 'LAN_AI_UPSTREAM=host.docker.internal:18000' >> .env
+# 先启动一次主栈以创建 infinite-canvas_default
+cd ~/apps/infinite-canvas
+sudo docker compose -f docker-compose.local.yml up -d
+docker network ls | grep infinite
 ```
-
-**不要**再写 `192.168.6.78:8000`（服务器到不了家）。
 
 ### 6. 重建 app 使 `/lan-ai` 生效
 
