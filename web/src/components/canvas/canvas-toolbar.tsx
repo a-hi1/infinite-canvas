@@ -122,7 +122,20 @@ export function CanvasToolbar({
                 {selectedCount ? (
                     <>
                         <Divider theme={theme} />
-                        <ToolbarButton id="tool-delete" label="删除选中" hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onDelete} danger>
+                        <span className="px-1 text-[11px] font-medium tabular-nums opacity-70" title="当前选中节点数">
+                            {selectedCount}
+                        </span>
+                        <ToolbarButton
+                            id="tool-delete"
+                            label={selectedCount > 1 ? `删除选中（${selectedCount}）` : "删除选中"}
+                            hovered={hovered}
+                            hoverStyle={hoverStyle}
+                            wrapRef={wrapRef}
+                            onTipX={setTipX}
+                            onHover={setHovered}
+                            onClick={onDelete}
+                            danger
+                        >
                             <Trash2 className="size-4.5" />
                         </ToolbarButton>
                     </>

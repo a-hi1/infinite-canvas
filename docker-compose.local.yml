@@ -6,10 +6,16 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3001:3000"
+    environment:
+      # 可选：内网 OpenAI 兼容（如局域网 Grok）同源中继目标，host:port 或 http://host:port
+      # 例：LAN_AI_UPSTREAM=192.168.6.78:8000 后，前端渠道 Base URL 填 /lan-ai（勿填局域网 IP，否则浏览器 CORS）
+      LAN_AI_UPSTREAM: ${LAN_AI_UPSTREAM:-}
     depends_on:
       - api
       - ai-proxy
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   api:
     image: infinite-canvas-api:local

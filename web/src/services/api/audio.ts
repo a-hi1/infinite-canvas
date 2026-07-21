@@ -3,7 +3,7 @@ import axios from "axios";
 import { audioMimeType, normalizeAudioFormatValue, normalizeAudioSpeedValue, normalizeMiniMaxAudioFormatValue, normalizeMiniMaxAudioVoiceValue, normalizeOpenAiAudioVoiceValue } from "@/lib/audio-generation";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { runModelPlugin } from "@/services/api/model-plugin";
-import { buildApiUrl, isAiProxyBaseUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
+import { buildApiUrl, isSameOriginRelayBaseUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 
 type RequestOptions = { signal?: AbortSignal };
 type MiniMaxT2AResponse = {
@@ -32,7 +32,7 @@ export async function requestAudioGeneration(config: AiConfig, prompt: string, o
     if (script) {
         if (!model) throw new Error("请先配置音频模型");
         if (!requestConfig.baseUrl.trim()) throw new Error("请先配置 Base URL");
-        if (!requestConfig.apiKey.trim() && !isAiProxyBaseUrl(requestConfig.baseUrl)) throw new Error("请先配置 API Key");
+        if (!requestConfig.apiKey.trim() && !isSameOriginRelayBaseUrl(requestConfig.baseUrl)) throw new Error("请先配置 API Key");
         try {
             const result = await runModelPlugin({
                 capability: "audio",
@@ -138,7 +138,7 @@ export async function storeGeneratedAudio(blob: Blob, format = "mp3"): Promise<U
 function assertAudioConfig(config: AiConfig, model: string) {
     if (!model) throw new Error("请先配置音频模型");
     if (!config.baseUrl.trim()) throw new Error("请先配置 Base URL");
-    if (!config.apiKey.trim() && !isAiProxyBaseUrl(config.baseUrl)) throw new Error("请先配置 API Key");
+    if (!config.apiKey.trim() && !isSameOriginRelayBaseUrl(config.baseUrl)) throw new Error("请先配置 API Key");
     if (config.apiFormat === "gemini") throw new Error("Gemini 调用格式暂不支持音频生成，请使用 OpenAI 格式渠道");
 }
 

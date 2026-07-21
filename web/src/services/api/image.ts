@@ -2,11 +2,58 @@ import axios from "axios";
 
 import { buildApiUrl, isAiProxyBaseUrl, modelMatchesCapability, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { nanoid } from "nanoid";
-import { dataUrlToFile } from "@/lib/image-utils";
+import { compressImageDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { ensureLocalImageDataUrl, imageToDataUrl } from "@/services/image-storage";
 import { normalizePluginImages, runModelPlugin } from "@/services/api/model-plugin";
 import type { ReferenceImage } from "@/types/image";
+
+/** 图生图 multipart 容易被中转掐断；参考图过大时更明显。 */
+const IMAGE_EDIT_TIMEOUT_MS = 180_000;
+const IMAGE_GEN_TIMEOUT_MS = 120_000;
+const IMAGE_EDIT_MAX_EDGE = 1280;
+const IMAGE_EDIT_JPEG_QUALITY = 0.84;
+/** codex2api 带参考图 body 更易被掐；旁路用更小图 */
+const FRAGILE_REF_MAX_EDGE = 768;
+const FRAGILE_REF_JPEG_QUALITY = 0.72;
+
+export type GeneratedImageResult = {
+    id: string;
+    dataUrl: string;
+    /** 脆弱中转无法传参考图时降级为纯文生图 */
+    degradedFromEdit?: boolean;
+    degradeReason?: string;
+};
+
+function isFragileImageRelay(baseUrl: string) {
+    const value = (baseUrl || "").toLowerCase();
+    // codex2api 等对扩展字段/大 body 更敏感；连接常被对端直接掐断（无 HTTP status）
+    return value.includes("codex2api") || value.includes("chatgpt2api");
+}
+
+function isConnectionClosedError(error: unknown) {
+    if (!axios.isAxiosError(error) || error.response) return false;
+    const blob = `${error.code || ""} ${error.message || ""}`;
+    return /ERR_CONNECTION_CLOSED|ECONNRESET|socket hang up|Network Error|Failed to fetch/i.test(blob);
+}
+
+/** 脆弱中转上 edits 常直接掐连接或 404/400；仅对这些错误尝试 generations 图生图旁路。 */
+function shouldFallbackEditOnFragileRelay(error: unknown) {
+    if (isConnectionClosedError(error)) return true;
+    if (!axios.isAxiosError(error)) return false;
+    const status = error.response?.status;
+    return status === 404 || status === 405 || status === 400 || status === 415 || status === 501;
+}
+
+function dataUrlToRawBase64(dataUrl: string) {
+    const trimmed = dataUrl.trim();
+    if (!trimmed.startsWith("data:")) return trimmed.replace(/\s+/g, "");
+    return trimmed.split(",", 2)[1] || "";
+}
+
+function markDegraded(images: Array<{ id: string; dataUrl: string }>, reason: string): GeneratedImageResult[] {
+    return images.map((image) => ({ ...image, degradedFromEdit: true, degradeReason: reason }));
+}
 
 export type AiTextMessage = {
     role: "system" | "user" | "assistant";
@@ -303,29 +350,60 @@ function parseImagePayload(payload: ImageApiResponse) {
     return images;
 }
 
-function readAxiosError(error: unknown, fallback: string) {
+function readAxiosError(error: unknown, fallback: string, context?: "generation" | "edit") {
     if (axios.isCancel(error)) return "请求已取消";
     if (axios.isAxiosError<{ error?: { message?: string }; msg?: string; code?: number }>(error)) {
         const responseData = error.response?.data;
         if (responseData?.msg || responseData?.error?.message) return responseData?.msg || responseData?.error?.message || fallback;
-        if (!error.response) return readNetworkError(error.code, fallback);
-        return readStatusError(error.response.status, fallback);
+        if (!error.response) return readNetworkError(error.code, fallback, context, error.message);
+        return readStatusError(error.response.status, fallback, context);
     }
     if (error instanceof DOMException && error.name === "AbortError") return "请求已取消";
     return error instanceof Error ? error.message : fallback;
 }
 
-function readNetworkError(code: string | undefined, fallback: string) {
+function readNetworkError(code: string | undefined, fallback: string, context?: "generation" | "edit", rawMessage?: string) {
+    const closed = /ERR_CONNECTION_CLOSED|ECONNRESET|socket hang up|Network Error|Failed to fetch/i.test(`${code || ""} ${rawMessage || ""}`);
+    if (context === "edit") {
+        if (code === "ECONNABORTED" || code === "ETIMEDOUT") {
+            return `${fallback}：图生图（/images/edits）连接超时。请减少参考图数量/分辨率后重试；若仍失败，当前中转可能不支持该模型的 edits`;
+        }
+        if (closed || !code) {
+            return `${fallback}：图生图（/images/edits）连接被中转关闭。常见原因：① 渠道/模型不支持参考图编辑 ② 参考图 multipart 过大被掐断。可先去掉参考图走文生图，或换支持 /v1/images/edits 的模型/渠道；本机也可改用自定义调用脚本`;
+        }
+        return `${fallback}：无法连接图生图接口，请确认 Base URL 可从浏览器直连，且服务商支持 /v1/images/edits（不是只支持文生图 generations）`;
+    }
     if (code === "ECONNABORTED" || code === "ETIMEDOUT") return `${fallback}：图片接口连接超时，请检查 Base URL、网络代理或服务商状态`;
+    if (closed) {
+        return `${fallback}：文生图连接被对端关闭（ERR_CONNECTION_CLOSED，无 HTTP 状态码）。这通常是中转站/网络/系统代理问题，而不是「参考图适配」：① 浏览器能否直连该 Base URL ② Key/套餐是否开通 gpt-image ③ 系统代理是否干扰 ④ 中转是否瞬时故障。可在同一网络用控制台或其它客户端对 /v1/images/generations 做对比测试`;
+    }
     return `${fallback}：无法连接到图片接口，请确认 Base URL 可从浏览器直连、服务商支持 /v1/images/generations，且没有被代理、防火墙或 CORS 策略拦截`;
 }
 
-function readStatusError(status: number | undefined, fallback: string) {
-    if (status === 400) return `${fallback}（400），请检查图片模型、尺寸、数量和参考图是否被当前渠道支持`;
+function readStatusError(status: number | undefined, fallback: string, context?: "generation" | "edit") {
+    if (status === 400) {
+        return context === "edit"
+            ? `${fallback}（400），当前渠道可能不接受该模型的参考图编辑，请检查模型是否支持图生图、参考图格式/张数，或去掉参考图改文生图`
+            : `${fallback}（400），请检查图片模型、尺寸、数量是否被当前渠道支持`;
+    }
     if (status === 401 || status === 403) return "鉴权失败，请检查 API Key、套餐权限或模型权限";
-    if (status === 404) return `${fallback}（404），当前渠道可能不支持 /images/generations 接口或所选图片模型，请确认模型与 Base URL 匹配`;
+    if (status === 404) {
+        return context === "edit"
+            ? `${fallback}（404），当前渠道可能不支持 /images/edits（图生图）。请换支持图生图的模型/中转，或清空参考图改用文生图`
+            : `${fallback}（404），当前渠道可能不支持 /images/generations 接口或所选图片模型，请确认模型与 Base URL 匹配`;
+    }
+    if (status === 413) return `${fallback}（413），参考图或请求体过大，请减少张数或使用更小分辨率的参考图`;
     if (status === 429) return "请求被限流或额度不足，请稍后重试";
     return status ? `${fallback}：${status}` : fallback;
+}
+
+async function referenceImageToUploadFile(image: ReferenceImage) {
+    const dataUrl = await ensureLocalImageDataUrl(image);
+    // 中转 multipart 对大图很敏感；压缩后再传，降低 ERR_CONNECTION_CLOSED。
+    const compact = dataUrl.startsWith("data:image/") ? await compressImageDataUrl(dataUrl, IMAGE_EDIT_MAX_EDGE, IMAGE_EDIT_JPEG_QUALITY) : dataUrl;
+    const name = (image.name || "reference.png").replace(/\.[^.]+$/, "") + (compact.startsWith("data:image/jpeg") || compact.startsWith("data:image/jpg") ? ".jpg" : ".png");
+    const type = compact.startsWith("data:image/jpeg") || compact.startsWith("data:image/jpg") ? "image/jpeg" : image.type || "image/png";
+    return dataUrlToFile({ ...image, name, type, dataUrl: compact });
 }
 
 function withSystemPrompt(config: AiConfig, prompt: string) {
@@ -720,7 +798,7 @@ function parseGeminiImagePayload(payload: GeminiPayload) {
     return images;
 }
 
-export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions) {
+export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions): Promise<GeneratedImageResult[]> {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
     assertImageModel(requestConfig.model);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
@@ -747,38 +825,52 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
         try {
             return await requestGeminiImages(requestConfig, prompt, [], n, options);
         } catch (error) {
-            throw new Error(readAxiosError(error, "请求失败"));
+            throw new Error(readAxiosError(error, "请求失败", "generation"));
         }
     }
     const quality = normalizeQuality(config.quality);
     const requestSize = resolveRequestSize(quality, config.size);
     const background = normalizeBackground(config.background);
+    const fragileRelay = isFragileImageRelay(requestConfig.baseUrl);
+    // 标准 OpenAI 兼容最小集；output_format 是较新字段，部分中转会因此异常/掐连接
+    const primaryBody: Record<string, unknown> = {
+        model: requestConfig.model,
+        prompt: withSystemPrompt(requestConfig, prompt),
+        n,
+        ...(requestSize ? { size: requestSize } : {}),
+        response_format: "b64_json",
+    };
+    if (quality) primaryBody.quality = quality;
+    if (background) primaryBody.background = background;
+    if (!fragileRelay) primaryBody.output_format = IMAGE_OUTPUT_FORMAT;
+
+    const postGeneration = (body: Record<string, unknown>) =>
+        axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/generations"), body, {
+            headers: aiHeaders(requestConfig, "application/json"),
+            signal: options?.signal,
+            timeout: IMAGE_GEN_TIMEOUT_MS,
+        });
+
     try {
-        const response = await axios.post<ImageApiResponse>(
-            aiApiUrl(requestConfig, "/images/generations"),
-            {
+        try {
+            return parseImagePayload((await postGeneration(primaryBody)).data);
+        } catch (error) {
+            // 连接被关：再试一次「更瘦」的 body（只保留模型/提示词/张数/b64），排除 size/quality 扩展字段踩雷
+            if (!isConnectionClosedError(error) || options?.signal?.aborted) throw error;
+            const minimalBody: Record<string, unknown> = {
                 model: requestConfig.model,
                 prompt: withSystemPrompt(requestConfig, prompt),
-                n,
-                ...(quality ? { quality } : {}),
-                ...(requestSize ? { size: requestSize } : {}),
-                ...(background ? { background } : {}),
+                n: 1,
                 response_format: "b64_json",
-                output_format: IMAGE_OUTPUT_FORMAT,
-            },
-            {
-                headers: aiHeaders(requestConfig, "application/json"),
-                signal: options?.signal,
-            },
-        );
-        const images = parseImagePayload(response.data);
-        return images;
+            };
+            return parseImagePayload((await postGeneration(minimalBody)).data);
+        }
     } catch (error) {
-        throw new Error(readAxiosError(error, "请求失败"));
+        throw new Error(readAxiosError(error, "请求失败", "generation"));
     }
 }
 
-export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions) {
+export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions): Promise<GeneratedImageResult[]> {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
     assertImageModel(requestConfig.model);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
@@ -820,6 +912,25 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
             throw new Error(readAxiosError(error, "请求失败"));
         }
     }
+
+    // codex2api 等：edits 常不可用，无蒙版时走「瘦 edits → generations 带参考图」旁路；其它渠道仍只走标准 edits。
+    if (isFragileImageRelay(requestConfig.baseUrl) && !mask) {
+        return requestEditOnFragileRelay(requestConfig, config, requestPrompt, references, n, options);
+    }
+
+    return requestOpenAiCompatibleEdit(requestConfig, config, requestPrompt, references, mask, n, options, { slim: false });
+}
+
+async function requestOpenAiCompatibleEdit(
+    requestConfig: AiConfig,
+    config: AiConfig,
+    requestPrompt: string,
+    references: ReferenceImage[],
+    mask: ReferenceImage | undefined,
+    n: number,
+    options: RequestOptions | undefined,
+    mode: { slim: boolean },
+) {
     const quality = normalizeQuality(config.quality);
     const requestSize = resolveRequestSize(quality, config.size);
     const background = normalizeBackground(config.background);
@@ -828,35 +939,120 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     formData.set("prompt", withSystemPrompt(requestConfig, requestPrompt));
     formData.set("n", String(n));
     formData.set("response_format", "b64_json");
-    formData.set("output_format", IMAGE_OUTPUT_FORMAT);
-    if (quality) {
-        formData.set("quality", quality);
+    // 脆弱中转：不带 output_format / 可选 quality，减少 multipart 被掐断
+    if (!mode.slim) {
+        formData.set("output_format", IMAGE_OUTPUT_FORMAT);
+        if (quality) formData.set("quality", quality);
     }
-    if (requestSize) {
-        formData.set("size", requestSize);
+    if (requestSize) formData.set("size", requestSize);
+    if (background && !mode.slim) formData.set("background", background);
+
+    let files: File[];
+    try {
+        files = await Promise.all(references.map((image) => referenceImageToUploadFile(image)));
+    } catch (error) {
+        throw new Error(error instanceof Error ? error.message : "参考图无法读取，请重新上传本地图片后再试图生图");
     }
-    if (background) {
-        formData.set("background", background);
-    }
-    const files = await Promise.all(
-        references.map(async (image) => {
-            const dataUrl = await ensureLocalImageDataUrl(image);
-            return dataUrlToFile({ ...image, dataUrl });
-        }),
-    );
     files.forEach((file) => formData.append("image", file));
     if (mask) {
         if (!mask.dataUrl.startsWith("data:")) throw new Error("蒙版图片无法读取，请重新上传本地图片");
         formData.set("mask", dataUrlToFile(mask));
     }
 
+    const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), formData, {
+        headers: aiHeaders(requestConfig),
+        signal: options?.signal,
+        timeout: IMAGE_EDIT_TIMEOUT_MS,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+    });
+    return parseImagePayload(response.data);
+}
+
+/**
+ * 仅 fragile 中转（codex2api 等），无蒙版：
+ * 1) 瘦身 edits（多数会 connection closed，只试一次）
+ * 2) generations + 缩小后的参考图字段（少候选，避免刷屏）
+ * 3) 仍失败 → 降级纯文生图并标记 degradedFromEdit（不静默丢参考意图）
+ * 不碰 Gemini / 自定义脚本 / 其它 Base URL / 蒙版编辑。
+ */
+async function requestEditOnFragileRelay(requestConfig: AiConfig, config: AiConfig, requestPrompt: string, references: ReferenceImage[], n: number, options?: RequestOptions): Promise<GeneratedImageResult[]> {
+    let editsError: unknown;
     try {
-        const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), formData, { headers: aiHeaders(requestConfig), signal: options?.signal });
-        const images = parseImagePayload(response.data);
-        return images;
+        return await requestOpenAiCompatibleEdit(requestConfig, config, requestPrompt, references, undefined, n, options, { slim: true });
     } catch (error) {
-        throw new Error(readAxiosError(error, "请求失败"));
+        editsError = error;
+        if (options?.signal?.aborted || !shouldFallbackEditOnFragileRelay(error)) {
+            throw new Error(readAxiosError(error, "图生图失败", "edit"));
+        }
     }
+
+    let primary = "";
+    try {
+        const dataUrl = await ensureLocalImageDataUrl(references[0]);
+        if (dataUrl.startsWith("data:image/")) {
+            primary = await compressImageDataUrl(dataUrl, FRAGILE_REF_MAX_EDGE, FRAGILE_REF_JPEG_QUALITY);
+            // 仍偏大再压一档，降低 JSON body 被中转掐断概率
+            if (primary.length > 400_000) {
+                primary = await compressImageDataUrl(primary, 512, 0.65);
+            }
+        } else {
+            primary = dataUrl;
+        }
+    } catch (error) {
+        throw new Error(error instanceof Error ? error.message : "参考图无法读取，请重新上传本地图片后再试图生图");
+    }
+    if (!primary.startsWith("data:image/")) {
+        throw new Error(readAxiosError(editsError, "图生图失败", "edit"));
+    }
+
+    const fullPrompt = withSystemPrompt(requestConfig, requestPrompt);
+    // 只试 2 个带图候选（dataURL / raw b64），避免多次 CONNECTION_CLOSED 刷控制台
+    const candidates: Record<string, unknown>[] = [
+        { model: requestConfig.model, prompt: fullPrompt, n: 1, response_format: "b64_json", image: primary },
+        { model: requestConfig.model, prompt: fullPrompt, n: 1, response_format: "b64_json", image: dataUrlToRawBase64(primary) },
+    ];
+
+    let lastError: unknown = editsError;
+    let allConnectionClosed = isConnectionClosedError(editsError);
+    for (const body of candidates) {
+        if (options?.signal?.aborted) break;
+        try {
+            const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/generations"), body, {
+                headers: aiHeaders(requestConfig, "application/json"),
+                signal: options?.signal,
+                timeout: IMAGE_GEN_TIMEOUT_MS,
+            });
+            return parseImagePayload(response.data);
+        } catch (error) {
+            lastError = error;
+            allConnectionClosed = allConnectionClosed && isConnectionClosedError(error);
+            if (axios.isAxiosError(error) && (error.response?.status === 401 || error.response?.status === 403 || error.response?.status === 429)) {
+                break;
+            }
+            if (!isConnectionClosedError(error) && axios.isAxiosError(error) && error.response && ![400, 404, 405, 415, 501].includes(error.response.status || 0)) {
+                break;
+            }
+        }
+    }
+
+    // 最后手段：该中转对「带图」请求一律掐连接时，降级纯文生图（仅 fragile + 无蒙版）
+    if (!options?.signal?.aborted && allConnectionClosed) {
+        try {
+            const degradedPrompt = `${requestPrompt}\n\n（说明：当前中转不支持参考图编辑，已按文生图生成，未实际使用参考图像素。）`;
+            const images = await requestGeneration({ ...config, model: requestConfig.model, count: String(n) }, degradedPrompt, options);
+            return markDegraded(
+                images,
+                "当前中转（如 codex2api）的 gpt-image 无法走 /images/edits，带参考图的 generations 也被关闭，已降级为纯文生图；参考图未参与生成。",
+            );
+        } catch {
+            // 文生图也挂则抛出旁路错误
+        }
+    }
+
+    throw new Error(
+        `${readAxiosError(lastError, "图生图失败", "edit")}（已尝试 edits、generations 参考图旁路；当前中转可能不支持 gpt-image 参考图。可清空参考图只用文生图，或换支持 edits 的渠道）`,
+    );
 }
 
 function assertImageModel(model: string) {

@@ -65,6 +65,8 @@ export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 export type ModelCapability = "image" | "video" | "text" | "audio";
 const CHANNEL_MODEL_SEPARATOR = "::";
 export const AI_PROXY_BASE_URL = "/ai-proxy";
+/** Same-origin LAN OpenAI-compatible relay (nginx/vite → private IP). Avoids browser CORS. */
+export const LAN_AI_BASE_URL = "/lan-ai";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 // Built-in relay for self-deploy / first-run convenience. API Key stays empty; users fill their own.
@@ -178,7 +180,7 @@ function modelListKey(capability: ModelCapability) {
 
 function isAiConfigReady(config: AiConfig, model: string) {
     const channel = resolveModelChannel(config, model);
-    return Boolean(model.trim() && channel.baseUrl.trim() && (channel.apiKey.trim() || isAiProxyBaseUrl(channel.baseUrl)));
+    return Boolean(model.trim() && channel.baseUrl.trim() && (channel.apiKey.trim() || isSameOriginRelayBaseUrl(channel.baseUrl)));
 }
 
 export const useConfigStore = create<ConfigStore>()(
@@ -544,6 +546,23 @@ export function isAiProxyBaseUrl(baseUrl: string) {
     } catch {
         return false;
     }
+}
+
+/** Same-origin path that nginx/vite forwards to a LAN OpenAI-compatible server. */
+export function isLanAiBaseUrl(baseUrl: string) {
+    const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "").toLowerCase();
+    if (normalizedBaseUrl === LAN_AI_BASE_URL || normalizedBaseUrl.startsWith(`${LAN_AI_BASE_URL}/`)) return true;
+    try {
+        const path = new URL(normalizedBaseUrl).pathname.replace(/\/+$/, "");
+        return path === LAN_AI_BASE_URL || path.startsWith(`${LAN_AI_BASE_URL}/`);
+    } catch {
+        return false;
+    }
+}
+
+/** Browser may leave API Key empty for same-origin server/LAN relays. */
+export function isSameOriginRelayBaseUrl(baseUrl: string) {
+    return isAiProxyBaseUrl(baseUrl) || isLanAiBaseUrl(baseUrl);
 }
 
 function normalizeArkPlanBaseUrl(baseUrl: string) {

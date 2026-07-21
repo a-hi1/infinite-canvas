@@ -35,6 +35,22 @@ export default defineConfig({
                 target: process.env.VITE_DEV_PROXY_TARGET || "http://127.0.0.1:3011",
                 changeOrigin: true,
             },
+            // 本地 bun dev 直连内网 AI（绕过浏览器 CORS）。例：VITE_LAN_AI_TARGET=http://192.168.6.78:8000
+            // Docker 部署请用 compose LAN_AI_UPSTREAM + 渠道 Base URL=/lan-ai，不必走本项。
+            ...(process.env.VITE_LAN_AI_TARGET
+                ? {
+                      "/lan-ai": {
+                          target: process.env.VITE_LAN_AI_TARGET,
+                          changeOrigin: true,
+                          rewrite: (path: string) => path.replace(/^\/lan-ai/, ""),
+                      },
+                  }
+                : {
+                      "/lan-ai": {
+                          target: process.env.VITE_DEV_PROXY_TARGET || "http://127.0.0.1:3011",
+                          changeOrigin: true,
+                      },
+                  }),
         },
     },
 });

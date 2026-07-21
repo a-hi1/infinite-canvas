@@ -8,7 +8,7 @@ import { fetchChannelModels } from "@/services/api/image";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
-import { AI_PROXY_BASE_URL, createModelChannel, defaultBaseUrlForApiFormat, encodeChannelModel, filterModelsByCapability, isAiProxyBaseUrl, listConfiguredModelScripts, modelOptionLabel, modelOptionName, modelOptionsFromChannels, normalizeModelOptionValue, pruneModelScripts, resolveModelScript, setModelScript, useConfigStore, type AiConfig, type ApiCallFormat, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { AI_PROXY_BASE_URL, createModelChannel, defaultBaseUrlForApiFormat, encodeChannelModel, filterModelsByCapability, isAiProxyBaseUrl, isLanAiBaseUrl, isSameOriginRelayBaseUrl, LAN_AI_BASE_URL, listConfiguredModelScripts, modelOptionLabel, modelOptionName, modelOptionsFromChannels, normalizeModelOptionValue, pruneModelScripts, resolveModelScript, setModelScript, useConfigStore, type AiConfig, type ApiCallFormat, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -118,7 +118,7 @@ export function AppConfigModal() {
     };
 
     const finishConfig = () => {
-        const ready = config.channels.some((channel) => channel.baseUrl.trim() && (channel.apiKey.trim() || isAiProxyBaseUrl(channel.baseUrl)) && channel.models.length);
+        const ready = config.channels.some((channel) => channel.baseUrl.trim() && (channel.apiKey.trim() || isSameOriginRelayBaseUrl(channel.baseUrl)) && channel.models.length);
         setConfigDialogOpen(false);
         if (!ready) return;
         message.success(shouldPromptContinue ? "配置已保存，请继续刚才的请求" : "配置已保存");
@@ -156,6 +156,19 @@ export function AppConfigModal() {
         message.success("已添加服务器代理渠道，并已把 agnes-video-v2.0 设为默认视频模型");
     };
 
+    const addLanAiChannel = () => {
+        const name = "内网 AI（同源中继）";
+        const lanChannel = createModelChannel({
+            name,
+            baseUrl: LAN_AI_BASE_URL,
+            apiFormat: "openai",
+            // 常见局域网 OpenAI 兼容默认；可点「拉取模型」覆盖
+            models: ["grok-3", "grok-2-image", "gpt-4o", "gpt-4o-mini"],
+        });
+        updateChannels([...config.channels, lanChannel]);
+        message.success("已添加内网渠道。Base URL 为 /lan-ai（勿填局域网 IP）。需在部署侧配置 LAN_AI_UPSTREAM，例如 192.168.6.78:8000");
+    };
+
     const deleteChannel = (id: string) => {
         if (config.channels.length <= 1) {
             message.warning("至少保留一个渠道");
@@ -165,8 +178,8 @@ export function AppConfigModal() {
     };
 
     const refreshChannelModels = async (channel: ModelChannel) => {
-        if (!channel.baseUrl.trim() || (!channel.apiKey.trim() && !isAiProxyBaseUrl(channel.baseUrl))) {
-            message.error("请先填写该渠道的 Base URL 和 API Key；服务器代理未启用访问令牌时 API Key 可留空");
+        if (!channel.baseUrl.trim() || (!channel.apiKey.trim() && !isSameOriginRelayBaseUrl(channel.baseUrl))) {
+            message.error("请先填写该渠道的 Base URL 和 API Key；服务器代理/内网中继未要求令牌时 API Key 可留空");
             return;
         }
         setLoadingChannelId(channel.id);
@@ -182,9 +195,9 @@ export function AppConfigModal() {
     };
 
     const refreshAllModels = async () => {
-        const runnable = config.channels.filter((channel) => channel.baseUrl.trim() && (channel.apiKey.trim() || isAiProxyBaseUrl(channel.baseUrl)));
+        const runnable = config.channels.filter((channel) => channel.baseUrl.trim() && (channel.apiKey.trim() || isSameOriginRelayBaseUrl(channel.baseUrl)));
         if (!runnable.length) {
-            message.error("请先填写至少一个渠道的 Base URL 和 API Key；服务器代理未启用访问令牌时 API Key 可留空");
+            message.error("请先填写至少一个渠道的 Base URL 和 API Key；服务器代理/内网中继未要求令牌时 API Key 可留空");
             return;
         }
         setLoadingChannelId("all");
@@ -301,6 +314,7 @@ export function AppConfigModal() {
                                             拉取全部
                                         </Button>
                                         <Button onClick={addProxyChannel}>添加服务器代理</Button>
+                                        <Button onClick={addLanAiChannel}>添加内网中继</Button>
                                         <Button type="primary" icon={<Plus className="size-4" />} onClick={addChannel}>
                                             新增渠道
                                         </Button>
@@ -333,7 +347,17 @@ export function AppConfigModal() {
                                                 <Form.Item label="Base URL" className="mb-0">
                                                     <Input value={channel.baseUrl} onChange={(event) => updateChannel(channel.id, { baseUrl: event.target.value })} />
                                                 </Form.Item>
-                                                <Form.Item label="API Key / 代理访问令牌" extra={isAiProxyBaseUrl(channel.baseUrl) ? "使用服务器代理时，这里填写 AI_PROXY_ACCESS_TOKEN；若服务器未启用访问令牌可留空。" : undefined} className="mb-0">
+                                                <Form.Item
+                                                    label="API Key / 代理访问令牌"
+                                                    extra={
+                                                        isAiProxyBaseUrl(channel.baseUrl)
+                                                            ? "使用服务器代理时，这里填写 AI_PROXY_ACCESS_TOKEN；若服务器未启用访问令牌可留空。"
+                                                            : isLanAiBaseUrl(channel.baseUrl)
+                                                              ? "内网中继：Base URL 保持 /lan-ai。部署侧设置 LAN_AI_UPSTREAM=局域网IP:端口 后重建 app。内网服务若无鉴权可留空 Key；勿在浏览器里填 http://192.168.x.x（会 CORS）。"
+                                                              : undefined
+                                                    }
+                                                    className="mb-0"
+                                                >
                                                     <Input.Password value={channel.apiKey} onChange={(event) => updateChannel(channel.id, { apiKey: event.target.value })} />
                                                 </Form.Item>
                                                 <Form.Item label="模型列表" className="mb-0 md:col-span-2">

@@ -1,5 +1,5 @@
 import { requestImageQuestion } from "@/services/api/image";
-import { isAiProxyBaseUrl, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
+import { isSameOriginRelayBaseUrl, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 
 export type PromptOptimizeMode = "image" | "video" | "text" | "audio";
 
@@ -65,7 +65,7 @@ export async function optimizeGenerationPrompt(config: AiConfig, prompt: string,
         textModel,
     );
     if (!requestConfig.baseUrl.trim()) throw new Error("请先配置文本模型渠道的 Base URL");
-    if (!requestConfig.apiKey.trim() && !isAiProxyBaseUrl(requestConfig.baseUrl)) throw new Error("请先配置文本模型渠道的 API Key");
+    if (!requestConfig.apiKey.trim() && !isSameOriginRelayBaseUrl(requestConfig.baseUrl)) throw new Error("请先配置文本模型渠道的 API Key");
 
     const meta = MODE_META[mode] || MODE_META.image;
     const answer = await requestImageQuestion(

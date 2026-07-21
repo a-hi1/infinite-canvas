@@ -115,6 +115,20 @@ export default function ImagePage() {
             return false;
         }
     });
+    const referencesScrollerRef = useRef<HTMLDivElement | null>(null);
+
+    // React 的 onWheel 默认 passive，无法 preventDefault；用非 passive 监听做横向滚动。
+    useEffect(() => {
+        const el = referencesScrollerRef.current;
+        if (!el) return;
+        const onWheel = (event: WheelEvent) => {
+            if (el.scrollWidth <= el.clientWidth) return;
+            event.preventDefault();
+            el.scrollLeft += event.deltaY;
+        };
+        el.addEventListener("wheel", onWheel, { passive: false });
+        return () => el.removeEventListener("wheel", onWheel);
+    }, []);
 
     const model = effectiveConfig.imageModel || effectiveConfig.model;
     const textModel = effectiveConfig.textModel || effectiveConfig.model;
@@ -500,6 +514,9 @@ export default function ImagePage() {
         // 优先一次请求拿齐 count；失败或数量不足时再串行补齐，避免并发触发 429。
         try {
             const generated = snapshot.references.length ? await requestEdit({ ...snapshot.config, count: String(count) }, snapshot.text, snapshot.references) : await requestGeneration({ ...snapshot.config, count: String(count) }, snapshot.text);
+            if (generated.some((item) => item.degradedFromEdit)) {
+                message.warning(generated.find((item) => item.degradeReason)?.degradeReason || "当前中转不支持参考图，已按文生图生成");
+            }
             const images: GeneratedImage[] = [];
             for (let index = 0; index < Math.min(generated.length, count); index += 1) {
                 const image = generated[index];
@@ -609,6 +626,9 @@ export default function ImagePage() {
             const result = snapshot.references.length ? await requestEdit(snapshot.config, snapshot.text, snapshot.references) : await requestGeneration(snapshot.config, snapshot.text);
             const image = result[0];
             if (!image) throw new Error("接口没有返回图片");
+            if (image.degradedFromEdit) {
+                message.warning(image.degradeReason || "当前中转不支持参考图，已按文生图生成");
+            }
             let dataUrl = image.dataUrl;
             let storageKey: string | undefined;
             let width = 0;
@@ -739,12 +759,8 @@ export default function ImagePage() {
                                     </div>
                                 </div>
                                 <div
+                                    ref={referencesScrollerRef}
                                     className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700"
-                                    onWheel={(event) => {
-                                        if (event.currentTarget.scrollWidth <= event.currentTarget.clientWidth) return;
-                                        event.preventDefault();
-                                        event.currentTarget.scrollLeft += event.deltaY;
-                                    }}
                                 >
                                     {references.map((item, index) => (
                                         <div key={item.id} className="group relative size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">

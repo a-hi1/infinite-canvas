@@ -29,6 +29,7 @@ import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
 import { CANVAS_AGENT_PANEL_MOTION_MS, CanvasAssistantPanel } from "@/components/canvas/canvas-assistant-panel";
 import { CanvasNodeContextMenu } from "@/components/canvas/canvas-context-menu";
+import { CanvasMultiSelectBar } from "@/components/canvas/canvas-multi-select-bar";
 import { CanvasNodeAngleDialog, type CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
 import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/canvas/canvas-node-crop-dialog";
 import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
@@ -1519,8 +1520,10 @@ function InfiniteCanvasPage() {
 
             if (event.key === "Delete" || event.key === "Backspace") {
                 if (selectedNodeIdsRef.current.size) {
+                    event.preventDefault();
                     deleteNodes(new Set(selectedNodeIdsRef.current));
                 } else if (selectedConnectionId) {
+                    event.preventDefault();
                     deleteConnection(selectedConnectionId);
                 }
             }
@@ -2830,6 +2833,12 @@ function InfiniteCanvasPage() {
                             onContextMenu={(event, id) => {
                                 event.preventDefault();
                                 event.stopPropagation();
+                                // 右键目标若不在当前多选中，则改为单选该节点；已在多选中则保留多选以便批量删除
+                                setSelectedNodeIds((current) => {
+                                    if (current.has(id) && current.size > 1) return current;
+                                    return new Set([id]);
+                                });
+                                setSelectedConnectionId(null);
                                 setContextMenu({ type: "node", x: event.clientX, y: event.clientY, nodeId: id });
                             }}
                         />
@@ -2913,6 +2922,13 @@ function InfiniteCanvasPage() {
                     }}
                 />
 
+                <CanvasMultiSelectBar
+                    count={selectedNodeIds.size}
+                    onDelete={() => deleteNodes(new Set(selectedNodeIds))}
+                    onDeselect={deselectCanvas}
+                    onCopy={copySelectedNodes}
+                />
+
                 {isMiniMapOpen ? <Minimap nodes={nodes} viewport={viewport} viewportSize={size} onViewportChange={setViewport} /> : null}
 
                 <CanvasZoomControls scale={viewport.k} onScaleChange={setZoomScale} onReset={resetViewport} isMiniMapOpen={isMiniMapOpen} onToggleMiniMap={() => setIsMiniMapOpen((value) => !value)} />
@@ -2920,15 +2936,25 @@ function InfiniteCanvasPage() {
                 {contextMenu ? (
                     <CanvasNodeContextMenu
                         menu={contextMenu}
+                        selectedCount={contextMenu.type === "node" ? (selectedNodeIds.has(contextMenu.nodeId) ? selectedNodeIds.size : 1) : 1}
                         onClose={() => setContextMenu(null)}
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);
                             setContextMenu(null);
                         }}
+                        onCopy={() => {
+                            copySelectedNodes();
+                            setContextMenu(null);
+                        }}
                         onDelete={() => {
                             if (contextMenu.type === "node") {
-                                deleteNodes(new Set([contextMenu.nodeId]));
+                                // 多选中右键：删全部选中；否则只删该节点
+                                if (selectedNodeIds.has(contextMenu.nodeId) && selectedNodeIds.size > 1) {
+                                    deleteNodes(new Set(selectedNodeIds));
+                                } else {
+                                    deleteNodes(new Set([contextMenu.nodeId]));
+                                }
                             } else {
                                 deleteConnection(contextMenu.connectionId);
                             }

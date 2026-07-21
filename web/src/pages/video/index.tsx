@@ -18,7 +18,7 @@ import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
 import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
-import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
+import { createVideoGenerationTask, pollVideoGenerationTask, rewritePrivateVideoUrlToLanRelay, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
 import { CloudHistoryPanel } from "@/components/cloud-history-panel";
 import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyncStatus } from "@/lib/cloud-sync";
 import { formatYuanFromCents, hasEnoughCredits, isPlatformVideoReady, platformVideoPriceCents } from "@/lib/platform-credits";
@@ -26,7 +26,7 @@ import { generatePlatformVideo, isStorageQuotaError } from "@/services/cloud-api
 import { saveVideoToCloudDetailed } from "@/services/cloud-history";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useAuthStore } from "@/stores/use-auth-store";
-import { isAiProxyBaseUrl, modelOptionLabel, modelOptionName, resolveModelChannel, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { isSameOriginRelayBaseUrl, modelOptionLabel, modelOptionName, resolveModelChannel, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -824,15 +824,20 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
 
 function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedVideo; onDownload: (video: GeneratedVideo) => void; onSaveAsset: (video: GeneratedVideo) => void }) {
     const [previewError, setPreviewError] = useState(false);
-    const isBlob = (video.url || "").startsWith("blob:");
-    const isProxy = (video.url || "").includes("/ai-proxy/media");
-    const isRemote = /^https?:\/\//i.test(video.url || "") && !isProxy;
+    const rawUrl = video.url || "";
+    // 历史远程直链若是 127.0.0.1，尽量改写到 /lan-ai；真正可播仍依赖生成时已落盘 blob
+    const lanUrl = rewritePrivateVideoUrlToLanRelay(rawUrl) || "";
+    const playUrl = video.storageKey ? rawUrl : lanUrl || rawUrl;
+    const isBlob = playUrl.startsWith("blob:") || Boolean(video.storageKey);
+    const isLan = playUrl.includes("/lan-ai/") || playUrl.startsWith("/lan-ai");
+    const isProxy = playUrl.includes("/ai-proxy/media");
+    const isRemote = /^https?:\/\//i.test(playUrl) && !isProxy && !isLan;
     return (
         <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-            {video.url && !previewError ? (
+            {playUrl && !previewError ? (
                 <video
-                    key={video.url}
-                    src={video.url}
+                    key={playUrl}
+                    src={playUrl}
                     controls
                     playsInline
                     preload="auto"
@@ -845,10 +850,17 @@ function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedV
                     <span className="text-xs text-white/50">
                         {isProxy
                             ? "本机代理拉不到远端 CDN（常见于 vidgen 出网超时）。生成可能已成功：请用新标签打开原始视频链接，或换可访问外网的网络后重试"
-                            : isRemote
-                              ? "远端视频地址无法在当前网络播放。可新标签打开链接，或下载后本地播放"
-                              : "可尝试下载后本地播放"}
+                            : isLan
+                              ? "内网中继预览失败：请确认 LAN_AI_UPSTREAM 指向可访问的视频服务，且返回的文件路径可被 /lan-ai 转发"
+                              : isRemote
+                                ? "远端视频地址无法在当前网络播放。若是内网 127.0.0.1/局域网链接，请用「内网中继」渠道重新生成以落盘；也可新标签打开链接"
+                                : "可尝试下载后本地播放"}
                     </span>
+                    {rawUrl && /^https?:\/\//i.test(rawUrl) ? (
+                        <a className="text-xs text-sky-300 underline" href={lanUrl || rawUrl} target="_blank" rel="noreferrer">
+                            新标签打开视频
+                        </a>
+                    ) : null}
                 </div>
             )}
             <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-200 px-3 py-2.5 dark:border-stone-800">
@@ -859,6 +871,7 @@ function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedV
                     <span>{formatBytes(video.bytes)}</span>
                     <span>{formatDuration(video.durationMs)}</span>
                     {isBlob || video.storageKey ? <span className="text-emerald-600 dark:text-emerald-400">本地可播</span> : null}
+                    {isLan && !video.storageKey ? <span className="text-sky-600 dark:text-sky-400">内网中继</span> : null}
                     {isProxy && !video.storageKey ? <span className="text-sky-600 dark:text-sky-400">代理预览</span> : null}
                     {isRemote && !video.storageKey ? <span className="text-amber-600 dark:text-amber-400">远程直链</span> : null}
                 </div>
@@ -1248,7 +1261,7 @@ function getVideoReadinessWarning(config: AiConfig, model: string) {
     const channel = resolveModelChannel(config, model);
     if (!model.trim()) return "请先配置视频模型";
     if (!channel.baseUrl.trim()) return "请先配置视频 Base URL";
-    if (!channel.apiKey.trim() && !isAiProxyBaseUrl(channel.baseUrl)) return "请先配置视频渠道 API Key";
+    if (!channel.apiKey.trim() && !isSameOriginRelayBaseUrl(channel.baseUrl)) return "请先配置视频渠道 API Key";
     if (channel.apiFormat === "gemini") return "Gemini 调用格式暂不支持视频生成，请改用 OpenAI 格式渠道";
     return "";
 }

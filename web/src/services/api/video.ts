@@ -8,7 +8,7 @@ import { AGNES_VIDEO_HEIGHT, AGNES_VIDEO_WIDTH, agnesFrameCount, agnesVideoReque
 import { isCodex2apiBaseUrl, isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
 import { boolConfig, buildSeedancePromptText, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import { runModelPlugin } from "@/services/api/model-plugin";
-import { AI_PROXY_BASE_URL, buildApiUrl, isAiProxyBaseUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
+import { AI_PROXY_BASE_URL, buildApiUrl, isAiProxyBaseUrl, isSameOriginRelayBaseUrl, LAN_AI_BASE_URL, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
@@ -137,7 +137,7 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
 
 async function createScriptVideoTask(config: AiConfig, model: string, script: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     if (!config.baseUrl.trim()) throw new Error("请先配置 Base URL");
-    if (!config.apiKey.trim() && !isAiProxyBaseUrl(config.baseUrl)) throw new Error("请先配置 API Key");
+    if (!config.apiKey.trim() && !isSameOriginRelayBaseUrl(config.baseUrl)) throw new Error("请先配置 API Key");
     const refs = await Promise.all(
         references.map(async (image) => {
             try {
@@ -192,24 +192,87 @@ export async function storeGeneratedVideo(result: VideoGenerationResult, config?
         // （vidgen.x.ai 常允许 <video> 播，但禁止浏览器 JS fetch）。
         // 注意：不要在代理下载已失败后，仍把 /ai-proxy/media 写成最终播放地址——
         // 那会让预览必定 502；应回退到原始远端 URL 交给 <video> 直连尝试。
+        // 内网 Grok 常返回 http://127.0.0.1:port 或局域网 IP：浏览器 CONNECTION_REFUSED，
+        // 经 /lan-ai 同源中继后再下载/预览（仅当渠道或 URL 像内网服务时）。
         const originalUrl = unwrapMediaProxyUrl(result.url) || result.url;
+        const playableUrl = rewritePrivateVideoUrlToLanRelay(originalUrl, config) || originalUrl;
         const candidates = videoDownloadCandidates(originalUrl, config);
         for (const candidate of candidates) {
             try {
-                const blob = await downloadVideoBlob(candidate);
+                // /lan-ai 上的 /videos/.../content 通常要 Bearer，必须带渠道 Key 才能落盘
+                const blob = await downloadVideoBlob(candidate, undefined, config);
                 return uploadMediaFile(ensureVideoBlob(blob, result.mimeType), "video");
             } catch {
                 // try next
             }
         }
+        // 内网 content 需要鉴权时，不要把 127.0.0.1 或无 Key 的 /lan-ai 交给 <video>（会 REFUSED/401）
+        if (playableUrl.startsWith(LAN_AI_BASE_URL) || isPrivateOrLoopbackHost(safeHostname(originalUrl))) {
+            throw new Error(
+                "视频已生成，但无法下载预览文件。内网地址（如 127.0.0.1:8000/.../content）需经 /lan-ai 且携带 API Key 拉取。请确认：① 渠道 Base URL 为 /lan-ai ② 已填写与内网服务一致的 API Key ③ LAN_AI_UPSTREAM 已配置并重建 app",
+            );
+        }
         return {
-            url: originalUrl,
+            url: playableUrl,
             storageKey: "",
             bytes: 0,
             mimeType: result.mimeType || "video/mp4",
         };
     }
     throw new Error("视频接口没有返回可播放的视频");
+}
+
+/**
+ * 内网视频服务常在 JSON 里返回 127.0.0.1 / 局域网 IP 的 mp4 地址。
+ * 浏览器页面在 localhost:3011 时直连会 CONNECTION_REFUSED；改写为同源 /lan-ai 路径。
+ * 公网 CDN（vidgen 等）不改写。
+ */
+export function rewritePrivateVideoUrlToLanRelay(url: string, config?: AiConfig) {
+    if (!url || !/^https?:\/\//i.test(url)) return "";
+    if (isBrowserCorsBlockedVideoHost(url)) return "";
+    let parsed: URL;
+    try {
+        parsed = new URL(url);
+    } catch {
+        return "";
+    }
+    if (!isPrivateOrLoopbackHost(parsed.hostname)) return "";
+    // 环回/局域网 + 视频类路径一律改写（内网 Grok 常回 127.0.0.1:.../v1/videos/.../content）
+    const channelIsLan = Boolean(config && isSameOriginRelayBaseUrl(config.baseUrl) && !isAiProxyBaseUrl(config.baseUrl));
+    if (!channelIsLan && !looksLikeLanVideoService(parsed)) return "";
+    const pathWithQuery = `${parsed.pathname || "/"}${parsed.search || ""}`;
+    return `${LAN_AI_BASE_URL}${pathWithQuery.startsWith("/") ? pathWithQuery : `/${pathWithQuery}`}`;
+}
+
+function safeHostname(url: string) {
+    try {
+        return new URL(url).hostname;
+    } catch {
+        return "";
+    }
+}
+
+function isPrivateOrLoopbackHost(hostname: string) {
+    const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (host === "localhost" || host === "::1") return true;
+    if (/^127\.\d+\.\d+\.\d+$/.test(host)) return true;
+    if (/^10\.\d+\.\d+\.\d+$/.test(host)) return true;
+    if (/^192\.168\.\d+\.\d+$/.test(host)) return true;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+$/.test(host)) return true;
+    return false;
+}
+
+function looksLikeLanVideoService(parsed: URL) {
+    const path = parsed.pathname.toLowerCase();
+    return (
+        path.includes("/v1/") ||
+        path.includes("/videos/") ||
+        path.endsWith("/content") ||
+        path.endsWith(".mp4") ||
+        path.includes("/video") ||
+        path.includes("/media") ||
+        path.includes("/files")
+    );
 }
 
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
@@ -249,16 +312,28 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
         const video = unwrapVideoResponse((await axios.get<ApiVideoResponse>(aiApiUrl(config, `/videos/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data);
         // 部分中转在 status 未完成或没有 /content 时直接返回可播 URL
         const directUrl = openAiCompatibleVideoUrl(video);
-        if (directUrl) return { status: "completed", result: await videoResultFromUrl(directUrl, options) };
+        if (directUrl) return { status: "completed", result: await videoResultFromUrl(directUrl, options, config) };
         if (video.status === "completed") {
             try {
-                const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal });
+                // 优先走渠道 Base（/lan-ai）+ Authorization 拉 content，避免返回 127.0.0.1 给浏览器
+                const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal, timeout: 120000 });
                 await assertVideoBlob(content.data);
                 return { status: "completed", result: { blob: content.data } };
             } catch (contentError) {
-                // /content 不存在时，再尝试从任务体里抠 URL
+                // /content 不存在时，再尝试从任务体里抠 URL（内网 URL 会再经 /lan-ai + Key 下载）
                 const fallbackUrl = openAiCompatibleVideoUrl(video);
-                if (fallbackUrl) return { status: "completed", result: await videoResultFromUrl(fallbackUrl, options) };
+                if (fallbackUrl) return { status: "completed", result: await videoResultFromUrl(fallbackUrl, options, config) };
+                // 任务已完成但 content 暂不可用时，用任务 id 拼 content 路径再试一次（同源渠道）
+                if (isSameOriginRelayBaseUrl(config.baseUrl) || task.id) {
+                    try {
+                        const contentUrl = aiApiUrl(config, `/videos/${task.id}/content`);
+                        const content = await axios.get<Blob>(contentUrl, { headers: aiHeaders(config), responseType: "blob", signal: options?.signal, timeout: 120000 });
+                        await assertVideoBlob(content.data);
+                        return { status: "completed", result: { blob: content.data } };
+                    } catch {
+                        // fall through
+                    }
+                }
                 throw contentError;
             }
         }
@@ -608,7 +683,7 @@ async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, opt
     try {
         const state = unwrapSeedanceTask((await axios.get<ApiEnvelope<SeedanceTask>>(seedanceApiUrl(config, task.id), { headers: aiHeaders(config), signal: options?.signal })).data);
         const url = openAiCompatibleVideoUrl(state);
-        if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
+        if (url) return { status: "completed", result: await videoResultFromUrl(url, options, config) };
         if (state.status === "succeeded" || state.status === "completed") {
             return { status: "failed", error: "Seedance 任务成功但没有返回视频 URL" };
         }
@@ -882,15 +957,15 @@ async function resolveSeedanceAudioUrl(audio: ReferenceAudio) {
 }
 
 async function videoResultFromUrl(url: string, options?: RequestOptions, config?: AiConfig, waitUntilReady = false): Promise<VideoGenerationResult> {
-    // 落盘优先走代理；最终预览失败时回退原始远端 URL（<video> 有时比 JS fetch/代理更能播）。
+    // 落盘优先走代理/内网中继；内网 content 必须带 Key 拉成 blob，不能只回 127.0.0.1 给 <video>。
     const originalUrl = unwrapMediaProxyUrl(url) || url;
     if (waitUntilReady) {
-        // 就绪探测不要强依赖本机 ai-proxy 出网；优先用原始 URL / 非 CORS 封锁路径
         try {
-            if (!isBrowserCorsBlockedVideoHost(originalUrl)) {
-                await assertRemoteVideoReady(originalUrl, options);
+            const probeUrl = rewritePrivateVideoUrlToLanRelay(originalUrl, config) || originalUrl;
+            if (!isBrowserCorsBlockedVideoHost(probeUrl) && !isPrivateOrLoopbackHost(safeHostname(probeUrl))) {
+                await assertRemoteVideoReady(probeUrl, options);
             }
-            return { url: originalUrl, mimeType: "video/mp4" };
+            // 就绪后仍走下载逻辑拿 blob
         } catch {
             throw new VideoOutputNotReadyError();
         }
@@ -899,21 +974,34 @@ async function videoResultFromUrl(url: string, options?: RequestOptions, config?
     const candidates = videoDownloadCandidates(originalUrl, config);
     for (const candidate of candidates) {
         try {
-            const blob = await downloadVideoBlob(candidate, options);
+            const blob = await downloadVideoBlob(candidate, options, config);
             return { blob: ensureVideoBlob(blob), mimeType: "video/mp4" };
         } catch (error) {
             if (axios.isCancel(error) || options?.signal?.aborted) throw error;
             // try next candidate
         }
     }
-    // 全部下载失败：仍返回原始远端 URL，避免把必 502 的 /ai-proxy/media 写进播放器
+    // 私网地址下载失败：不要回退 127.0.0.1（浏览器必 REFUSED）
+    if (isPrivateOrLoopbackHost(safeHostname(originalUrl))) {
+        throw new Error("无法从内网视频地址下载文件（需 /lan-ai + API Key）。请检查内网中继与 Key");
+    }
+    // 公网：仍返回原始远端 URL，避免把必 502 的 /ai-proxy/media 写进播放器
     return { url: originalUrl, mimeType: "video/mp4" };
 }
 
-async function downloadVideoBlob(url: string, options?: RequestOptions) {
-    // 同源 /ai-proxy/media 用 fetch 即可；跨域 CDN 不要带 Authorization。
-    if (url.startsWith("/") || url.includes("/ai-proxy/media")) {
-        const response = await fetch(url, { signal: options?.signal, credentials: url.includes("token=") ? "include" : "same-origin" });
+async function downloadVideoBlob(url: string, options?: RequestOptions, config?: AiConfig) {
+    // 同源 /lan-ai、/ai-proxy/media：可带鉴权。跨域 CDN 不要乱加 Authorization。
+    if (url.startsWith("/") || url.includes("/ai-proxy/media") || url.includes("/lan-ai")) {
+        const headers: Record<string, string> = {};
+        const isLan = url.includes("/lan-ai") || url.startsWith(LAN_AI_BASE_URL);
+        if (isLan && config?.apiKey?.trim()) {
+            headers.Authorization = `Bearer ${config.apiKey.trim()}`;
+        }
+        const response = await fetch(url, {
+            signal: options?.signal,
+            headers,
+            credentials: url.includes("token=") ? "include" : "same-origin",
+        });
         if (!response.ok) throw new Error(`下载视频失败（${response.status}）`);
         const blob = await response.blob();
         await assertVideoBlob(blob);
@@ -923,6 +1011,12 @@ async function downloadVideoBlob(url: string, options?: RequestOptions) {
     // 已知 CORS 封锁主机：浏览器 JS 永远读不到，避免无意义的 axios 报错刷屏
     if (isBrowserCorsBlockedVideoHost(url)) {
         throw new Error("远程视频禁止浏览器直读（CORS）");
+    }
+    // 私网绝对地址：不要让浏览器直连 127.0.0.1（页面在 3011 时必失败）
+    if (isPrivateOrLoopbackHost(safeHostname(url))) {
+        const lan = rewritePrivateVideoUrlToLanRelay(url, config);
+        if (!lan) throw new Error("内网视频地址无法在浏览器直连");
+        return downloadVideoBlob(lan, options, config);
     }
     const response = await axios.get<Blob>(url, { responseType: "blob", timeout: 120000, signal: options?.signal });
     await assertVideoBlob(response.data);
@@ -942,6 +1036,9 @@ async function assertRemoteVideoReady(url: string, options?: RequestOptions) {
 
 function videoDownloadCandidates(url: string, config?: AiConfig) {
     const list: string[] = [];
+    const lanUrl = rewritePrivateVideoUrlToLanRelay(url, config);
+    // 0) 内网/环回视频地址：优先同源 /lan-ai（需 LAN_AI_UPSTREAM）
+    if (lanUrl) list.push(lanUrl);
     // 1) 当前渠道若是 ai-proxy，优先带 token 的媒体代理
     const channelProxy = mediaProxyUrl(url, config);
     if (channelProxy) list.push(channelProxy);
@@ -1017,7 +1114,7 @@ class VideoOutputNotReadyError extends Error {
 function assertVideoConfig(config: AiConfig, model: string) {
     if (!model) throw new Error("请先配置视频模型");
     if (!config.baseUrl.trim()) throw new Error("请先配置 Base URL");
-    if (!config.apiKey.trim() && !isAiProxyBaseUrl(config.baseUrl)) throw new Error("请先配置 API Key");
+    if (!config.apiKey.trim() && !isSameOriginRelayBaseUrl(config.baseUrl)) throw new Error("请先配置 API Key");
     if (config.apiFormat === "gemini") throw new Error("Gemini 调用格式暂不支持视频生成，请使用 OpenAI 格式渠道");
 }
 

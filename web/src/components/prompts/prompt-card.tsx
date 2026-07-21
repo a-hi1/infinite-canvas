@@ -1,5 +1,5 @@
 import { Copy, ImageIcon } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Card, Tag } from "antd";
 
 import { getCategoryLabel, getPromptQualityLabel, getPromptSummary, isUsablePromptCoverUrl, markPromptCoverBroken, type Prompt } from "@/services/api/prompts";
@@ -31,10 +31,23 @@ export function PromptCard({
     const initialCover = isUsablePromptCoverUrl(item.coverUrl) ? item.coverUrl.trim() : "";
     const [coverBroken, setCoverBroken] = useState(false);
     const showCover = Boolean(initialCover) && !coverBroken;
+    const actionScrollRef = useRef<HTMLDivElement | null>(null);
 
     useEffect(() => {
         setCoverBroken(false);
     }, [item.id, item.coverUrl]);
+
+    useEffect(() => {
+        const el = actionScrollRef.current;
+        if (!el) return;
+        const onWheel = (event: WheelEvent) => {
+            if (el.scrollWidth <= el.clientWidth) return;
+            event.preventDefault();
+            el.scrollLeft += event.deltaY;
+        };
+        el.addEventListener("wheel", onWheel, { passive: false });
+        return () => el.removeEventListener("wheel", onWheel);
+    }, []);
 
     const failCover = () => {
         if (coverBroken) return;
@@ -100,14 +113,7 @@ export function PromptCard({
                 </div>
             </button>
             <div className="px-4 pb-3">
-                <div
-                    className="prompt-action-scroll flex gap-2 overflow-x-auto overscroll-x-contain"
-                    onWheel={(event) => {
-                        if (event.currentTarget.scrollWidth <= event.currentTarget.clientWidth) return;
-                        event.preventDefault();
-                        event.currentTarget.scrollLeft += event.deltaY;
-                    }}
-                >
+                <div ref={actionScrollRef} className="prompt-action-scroll flex gap-2 overflow-x-auto overscroll-x-contain">
                     {extraAction}
                     <Button size="small" type={actionType} icon={actionIcon} onClick={onCopy} className="shrink-0">
                         {actionLabel}
