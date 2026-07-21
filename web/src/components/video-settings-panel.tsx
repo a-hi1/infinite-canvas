@@ -170,13 +170,14 @@ function GrokVideoSettingsPanel({ config, onConfigChange, theme, showTitle, clas
                 </SettingGroup>
                 <SettingGroup title="秒数" color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
-                        {[4, 6, 10].map((value) => (
+                        {[4, 6, 8, 10, 12, 15].map((value) => (
                             <OptionPill key={value} selected={duration === value} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
                                 {value}s
                             </OptionPill>
                         ))}
                         <NumberInput value={String(duration)} min={1} max={15} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} />
                     </div>
+                    <div className="text-[11px] leading-4 opacity-55">官方范围约 1–15 秒；部分中转 5–10 秒更稳，15 秒失败时可降到 10 秒重试</div>
                 </SettingGroup>
             </div>
         </ImageSettingsTheme>
