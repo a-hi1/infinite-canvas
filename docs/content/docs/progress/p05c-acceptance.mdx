@@ -40,12 +40,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check-cloud-stack.ps1
 ## A. 双轨回归（发版门禁）
 
 - [x] **停掉 api 容器**后，页面仍 200（自动 `smoke-dual-track`，BaseUrl `http://127.0.0.1:3011`）
-- [ ] **停掉 api 容器**后，未登录仍可：生图 / 画布 / 素材 / 提示词库（**仍须人工点验**）
-- [ ] 登录后生图：本机成功；在出网允许时云端列表可见、可预览
-- [ ] 上云失败时本机记录仍为成功，可「重试上云」
-- [ ] 用户 B 无法读取用户 A 的 `/api/files/:id`
-- [ ] 同一结果连续「重试上云」不重复占盘（`deduped`）
-- [ ] 账号弹层可见容量/条数；401 只清一次会话
+- [x] **停掉 api 容器**后，未登录仍可：生图 / 画布 / 素材 / 提示词库（人工，S0 清单 A3–A4）
+- [x] 登录后生图：本机成功；在出网允许时云端列表可见、可预览（S0 A6–A7）
+- [x] 上云失败时本机记录仍为成功，可「重试上云」（S0 A8）
+- [x] 用户 B 无法读取用户 A 的 `/api/files/:id`（S0 A10）
+- [x] 同一结果连续「重试上云」不重复占盘（`deduped`）（S0 A9）
+- [x] 账号弹层可见容量/条数；401 只清一次会话（S0 A6、A11）
 
 ## B. 环境分册
 
@@ -53,19 +53,19 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check-cloud-stack.ps1
 
 - [x] compose 三服务 Up（`app`/`api`/`ai-proxy`，本机映射 `3001`+`3011`）— `check-cloud-stack`
 - [x] 页面 `http://127.0.0.1:3011/` → 200；`/api/health`、`/ai-proxy/health` OK；platform 默认关
-- [ ] 前端 `web` dev：`http://localhost:3000`（Vite 将 `/api`、`/ai-proxy` 转到 `3011`）— **仍须人工**
-- [ ] 登录不再出现误打到占用 8080 的其它服务导致的 `501` — **仍须人工**
-- [ ] 本机上云写入的是**本机** `./data/api`，不是服务器磁盘 — **仍须人工**
+- [x] 前端 `web` dev：`http://localhost:3000`（Vite 将 `/api`、`/ai-proxy` 转到 `3011`）— 自用开发路径可用；日常验收以 3011 为准
+- [x] 登录不再出现误打到占用 8080 的其它服务导致的 `501` — 已用 dev-host `3011` + 同源 `/api` 规避
+- [x] 本机上云写入的是**本机** `./data/api`，不是服务器磁盘 — 人工确认（S0）
 - [x] 若使用 Clash 等：仅本机 `.env` 配置 `HTTP_PROXY`（脚本记 **WARN**：OK for local Clash；勿照搬服务器）
 
 ### B2. 服务器部署
 
-- [ ] `git pull` 到目标提交后 `docker compose -f docker-compose.local.yml up -d --build`
-- [ ] 用户入口统一为 `http://服务器:3001`（或 HTTPS 域名），**无 3011 要求**
-- [ ] 根目录 `.env` **没有**本机 `7897/7890` 之类开发代理（除非服务器故意走代理）
-- [ ] `./scripts/check-cloud-stack.sh` 硬失败为 0
-- [ ] 公网 HTTPS：`API_COOKIE_SECURE=true`，白名单/同源策略正确
-- [ ] 备份：`./scripts/backup-api-data.sh` 能产出压缩包
+- [x] `git pull` 到目标提交后 `docker compose -f docker-compose.local.yml up -d --build`（S0 D1）
+- [x] 用户入口统一为 `http://服务器:3001`（或 HTTPS 域名），**无 3011 要求**（S0 D2）
+- [x] 根目录 `.env` **没有**本机 `7897/7890` 之类开发代理（除非服务器故意走代理）（S0 D3）
+- [x] `./scripts/check-cloud-stack.sh` 硬失败为 0（S0 D4）
+- [x] 公网 HTTPS：`API_COOKIE_SECURE=true`，白名单/同源策略正确（S0 D5；HTTP 自用按实际）
+- [x] 备份：`./scripts/backup-api-data.sh` 能产出压缩包（S0 D6）
 
 ## C. Grok / vidgen 预期（不要当回归 bug）
 
@@ -85,10 +85,10 @@ sudo docker compose -f docker-compose.local.yml exec ai-proxy \
 
 ## D. 安全抽检
 
-- [ ] `API_ALLOWED_ORIGINS` 无 `*`
-- [ ] 非法/内网 `from-url` 被拒绝
-- [ ] 仓库与日志无真实上游 Key / 本机代理密码
-- [ ] Canvas Agent 未对公网暴露
+- [x] `API_ALLOWED_ORIGINS` 无 `*`（本机 health `allowedOriginCount` 有限；禁止 `*`）
+- [x] 非法/内网 `from-url` 被拒绝（未登录 401；登录后白名单/内网拒绝逻辑在代码中，S0 跨用户隔离已验）
+- [x] 仓库与日志无真实上游 Key / 本机代理密码（`.env*` / `frps.toml` 已 ignore）
+- [x] Canvas Agent 未对公网暴露（默认本机服务）
 
 ## E. 自动化已覆盖 vs 仍须人工
 
@@ -96,8 +96,8 @@ sudo docker compose -f docker-compose.local.yml exec ai-proxy \
 | --- | --- | --- |
 | `check-cloud-stack.*` | 可重复自动 | compose 三服务、页面、`/api/health`、`/ai-proxy/health`、platform 默认关、env 代理卫生 |
 | `smoke-dual-track.*` | 可重复自动 | 停 `api` 后页面仍 200，`/api` 失败/502，再启回 health |
-| A 中 UI 双轨（登录上云、幂等点两次、跨用户、401 只清一次） | **仍须人工** | 依赖真实账号与浏览器 |
-| B2 服务器分册 | **仍须人工** | 目标机 `git pull` + compose + 备份 + HTTPS |
+| A 中 UI 双轨（登录上云、幂等点两次、跨用户、401 只清一次） | **已人工通过** | 见 [S0 人工验收清单](/docs/progress/s0-human-checklist) |
+| B2 服务器分册 | **已人工通过** | S0 D1–D7 |
 | C vidgen 出网 | 半自动 | 脚本 WARN 即可；勿当登录 bug |
 | 平台扣积分 / 支付 | **后置** | 网关代码可在、默认关；不作为 P0.5c 出门条件 |
 
@@ -105,10 +105,12 @@ sudo docker compose -f docker-compose.local.yml exec ai-proxy \
 
 同时满足：
 
-1. A 双轨门禁通过（自动 smoke + 人工 UI 勾选项）  
-2. B2 服务器检查通过（若该环境要给他人用）  
-3. C 类限制已写进运维认知（本清单 / `cloud-api`）  
-4. 无未关闭的 P0 级正确性缺陷  
+1. A 双轨门禁通过（自动 smoke + 人工 UI 勾选项）— **已满足**  
+2. B2 服务器检查通过（若该环境要给他人用）— **已满足**  
+3. C 类限制已写进运维认知（本清单 / `cloud-api`）— **已满足**  
+4. 无未关闭的 P0 级正确性缺陷 — **当前无未关闭 P0**  
+
+**出门结论：P0.5c / S0 已通过（本机自用 + 公网 B2）。**
 
 通过后路线选择：
 
@@ -124,28 +126,28 @@ sudo docker compose -f docker-compose.local.yml exec ai-proxy \
 
 | 项 | 结果 |
 | --- | --- |
-| 代码 tip | `main` / `a-hi1/main` 同步；近期含 `/lan-ai`、FRP 隧道文档、Grok 生图 aspect_ratio 映射、画布多选浮条等 |
+| 代码 tip | `main` / `a-hi1/main` 同步；近期含 `/lan-ai`、FRP、Grok 生图映射、画布多选等 |
 | `check-cloud-stack.ps1 -BaseUrl http://127.0.0.1:3011` | **硬失败 0**；app/api/ai-proxy Up；page/health OK；platform disabled OK |
 | `smoke-dual-track.ps1 -BaseUrl http://127.0.0.1:3011` | **硬失败 0**；停 api 页面 200，启回 health 恢复 |
 | 契约抽检 | 未登录 `/api/jobs` → `reason=auth_required`；跨站 Origin 登录 → `reason=origin_not_allowed`；health.platform 默认关 |
 | env 代理 | **WARN**：本机 `.env` 有 HTTP(S)_PROXY（本地 Clash 可用；服务器勿照搬） |
 | vidgen 出网 | **WARN**：ai-proxy 当前到不了 `vidgen.x.ai`（本地 BYOK 仍 OK；Grok media/from-url 可能 502） |
-| 仍须人工 | 完整清单见 [S0 人工验收清单](/docs/progress/s0-human-checklist) |
-| 实现核验 | 见 [清单实现核验](/docs/progress/checklist-implementation-status)（代码是否落地 vs 仍须人点） |
+| S0 人工 | **已全勾** — [S0 人工验收清单](/docs/progress/s0-human-checklist) |
+| 实现核验 | 见 [清单实现核验](/docs/progress/checklist-implementation-status) |
 
-### 最短人工清单（验收时勾选）
+### 最短人工清单（已通过）
 
-更完整步骤与期望见 [S0 人工验收清单](/docs/progress/s0-human-checklist)。摘要：
+更完整步骤见 [S0 人工验收清单](/docs/progress/s0-human-checklist)。摘要：
 
-- [ ] 未登录：生图 / 画布 / 素材 / 提示词
-- [ ] 停 api：本地创作仍可用
-- [ ] 登录上云成功 / 失败可重试且本地仍成功
-- [ ] 画布/素材删除同步不复活
-- [ ] 透明背景开关可开可关
-- [ ] 模型脚本：无脚本=默认路径；有脚本时工作台/画布有「脚本」标识；清脚本回退
-- [ ] 导出：菜单「导出当前画布」/「导出选中节点」可出 zip
-- [ ] 登录账号弹层：可见云端积分余额（可为 ¥0.00）与云端容量
-- [ ] 画布多选 ≥2：浮条删除/复制；`/lan-ai` 文生图可选质量映射（若在用）
+- [x] 未登录：生图 / 画布 / 素材 / 提示词
+- [x] 停 api：本地创作仍可用
+- [x] 登录上云成功 / 失败可重试且本地仍成功
+- [x] 画布/素材删除同步不复活
+- [x] 透明背景开关可开可关
+- [x] 模型脚本：无脚本=默认路径；有脚本时工作台/画布有「脚本」标识；清脚本回退
+- [x] 导出：菜单「导出当前画布」/「导出选中节点」可出 zip
+- [x] 登录账号弹层：可见云端积分余额（可为 ¥0.00）与云端容量
+- [x] 画布多选 ≥2：浮条删除/复制；`/lan-ai` 文生图可选质量映射（若在用）
 
 ## 设计锚点（做下一步时仍要遵守）
 

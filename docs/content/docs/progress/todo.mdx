@@ -9,10 +9,10 @@ description: 当前项目后续值得处理的事项
 
 - 本地 Agent 接入后续：按[本地 Agent 接入规划](/docs/progress/local-agent-integration-plan)把 Claude Code CLI Adapter 升级为 Claude Agent SDK Adapter，并完善工具队列体验。
 - AI 接口安全代理后续：已增加首版 `ai-proxy` 服务和前端代理渠道入口，后续继续完善多用户鉴权、额度控制、分渠道上游配置和更细粒度的接口白名单体验；公开多人使用前仍需补充更完整的用户体系。
-- **当前主线（收费后置）：** 本地 BYOK 稳定 + 云历史/画布/素材同步代码已齐 + **P0.5c / S0 人工验收收口** + 上游按矩阵小切片。完整矩阵见 [上游跟进矩阵](/docs/progress/upstream-follow)。
-- 云端账号 P0.5c：清单 [P0.5c 验稳收口](/docs/progress/p05c-acceptance)；**人工逐步勾选**见 [S0 人工验收清单](/docs/progress/s0-human-checklist)；实现对照 [清单实现核验](/docs/progress/checklist-implementation-status)。自动本机已跑通：`check-cloud-stack` + `smoke-dual-track`（硬失败 0）+ reason 契约抽检。仍须人工 UI 点验。账号积分余额展示已打开；平台代生成仍默认关。**勿跳过验收直接支付/插件大改。**
-- 云端账号 P1：底座 A～G 代码已在（网关+账本默认关）。**画布扣积分 / 平台扣积分 / 支付均后置**。
-- 云端账号 P2：**P2.0-A/B/C 代码已完成**（projects/blobs/assets + tombstone）；**未做：** Postgres、S3、素材跨用户分享、完整可调宽画布侧栏。画布/素材扣积分仍后置。
-- 上游跟进：对照约 `v0.9.0`；**不整仓 merge**；推送 `a-hi1`。已移植：透明背景、组节点（最小）、模型调用脚本、导出当前/选中节点。**明确不做（现阶段）：** 完整侧栏资产 Tab（用独立素材库）、整包 0.9 侧栏/插件 registry。下一优先：人工验收收口 → 有痛点再开「仅节点列表」最小面板 →（独立工程）插件系统。
+- **当前主线（S0 已出门，收费仍后置）：** 本地 BYOK + 云双轨/画布素材同步已验收 + **S1 真痛点微修** + 上游按矩阵小切片。完整矩阵见 [上游跟进矩阵](/docs/progress/upstream-follow)。运维见 [日常运维自检](/docs/progress/ops-daily)。
+- 云端账号 P0.5c / S0：**已出门** — [P0.5c 验稳收口](/docs/progress/p05c-acceptance) 与 [S0 人工验收清单](/docs/progress/s0-human-checklist) A/B/C/D 均已勾选；自动 `check-cloud-stack` + `smoke-dual-track` 硬失败 0。账号积分余额展示已打开；平台代生成仍默认关。**支付/插件大改仍勿抢跑。**
+- 云端账号 P1：底座 A～G 代码已在（网关+账本默认关）。**画布扣积分 / 平台扣积分 / 支付均后置**（需明确要收费再开）。
+- 云端账号 P2：**P2.0-A/B/C 代码已完成且 S0 已点验**（projects/blobs/assets + tombstone）；**未做：** Postgres、S3、素材跨用户分享、完整可调宽画布侧栏。
+- 上游跟进：对照约 `v0.9.0`；**不整仓 merge**；推送 `a-hi1`。已移植：透明背景、组节点（最小）、模型调用脚本、导出当前/选中节点。**明确不做（现阶段）：** 完整侧栏资产 Tab（用独立素材库）、整包 0.9 侧栏/插件 registry。**下一优先：** S1 渠道/体验痛点（Grok2API 图生图边界、中转 429/edits 文案）→ 有需要再「仅节点列表」→（独立工程）插件系统。
 - 提示词库预览：精选只认可用封面 + 坏链 runtime 剔除已落地；单条「生成预览图」按需 BYOK 已落地。**不做：** 打开库自动批量给无图条目生封面；一键「给所有精选补图」。后续若有需要，仅考虑「我的提示词」小批量补图。
 - 内网 OpenAI 兼容（局域网 Grok 等）：已支持可选同源中继 `/lan-ai`（`LAN_AI_UPSTREAM`）。**不要**让浏览器直连 `http://192.168.x.x`（CORS）。公网要用家里 Grok2API：见 `deploy/lan-tunnel/README.md`（FRP 方案 B，独立 compose，默认不启动）。公网共享时须 API Key，`18000` 仅绑本机。
