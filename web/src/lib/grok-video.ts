@@ -56,4 +56,4 @@ export function normalizeGrokAspectRatio(value: string) {
 }
 
 export const grokVideoModeHint =
-    "Grok 视频（含 codex2api）：文生用 grok-imagine-video；图生优先本地小图 jpg/png + grok-imagine-video-1.5。时长 1–15 秒（官方上限 15；中转常 5–10 更稳）。分辨率建议 720p（1080p 中转易 400）。中转若只支持创建不支持查询，需 POST 直接返回 video.url，或补齐 GET /v1/videos/{request_id}。";
+    "Grok 视频：文生/图生均走 /videos/generations（JSON）。图生请用本地小图；模型优先用渠道「拉取模型」列表中的真实名称（不会再硬塞不存在的 1.5）。时长 1–15 秒（中转常 5–10 更稳）。分辨率建议 720p。";

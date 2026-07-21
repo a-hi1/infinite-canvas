@@ -8,7 +8,7 @@ import { AGNES_VIDEO_HEIGHT, AGNES_VIDEO_WIDTH, agnesFrameCount, agnesVideoReque
 import { isCodex2apiBaseUrl, isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
 import { boolConfig, buildSeedancePromptText, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import { runModelPlugin } from "@/services/api/model-plugin";
-import { AI_PROXY_BASE_URL, buildApiUrl, isAiProxyBaseUrl, isSameOriginRelayBaseUrl, LAN_AI_BASE_URL, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
+import { AI_PROXY_BASE_URL, buildApiUrl, encodeChannelModel, isAiProxyBaseUrl, isLanAiBaseUrl, isSameOriginRelayBaseUrl, LAN_AI_BASE_URL, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
@@ -91,8 +91,42 @@ export async function requestVideoGeneration(config: AiConfig, prompt: string, r
     throw new Error("视频生成超时，请稍后重试");
 }
 
+/**
+ * 有参考图时：在同渠道视频模型列表中自动选用更适合 I2V 的 Grok 模型（不硬塞不存在的 1.5）。
+ */
+export function resolveVideoModelForReferences(config: AiConfig, selectedModelValue: string): { modelValue: string; switched: boolean; from: string; to: string } {
+    const selected = (selectedModelValue || config.videoModel || config.model || "").trim();
+    const channel = resolveModelChannel(config, selected);
+    const fromName = modelOptionName(selected);
+    const fromLower = fromName.toLowerCase();
+    const isGrok =
+        isGrokVideoConfig({ ...config, model: selected, videoModel: selected, baseUrl: channel.baseUrl }) ||
+        (fromLower.includes("grok") && (fromLower.includes("video") || fromLower.includes("imagine")));
+    if (!isGrok) return { modelValue: selected, switched: false, from: fromName, to: fromName };
+
+    const raw = (channel.models || []).map((m) => modelOptionName(m).trim()).filter(Boolean);
+    const pick = (pred: (n: string) => boolean) => raw.find((m) => pred(m.toLowerCase())) || "";
+    // 已是明确视频模型则保留
+    if (fromLower.includes("video") || fromLower.includes("imagine-video")) {
+        return { modelValue: selected, switched: false, from: fromName, to: fromName };
+    }
+    const preferred =
+        pick((n) => n.includes("grok") && n.includes("video") && (n.includes("1.5") || n.includes("i2v"))) ||
+        pick((n) => n.includes("grok") && n.includes("video")) ||
+        pick((n) => n.includes("grok") && n.includes("imagine") && !n.includes("image-quality"));
+    if (!preferred || preferred.toLowerCase() === fromLower) {
+        return { modelValue: selected, switched: false, from: fromName, to: fromName };
+    }
+    return { modelValue: encodeChannelModel(channel.id, preferred), switched: true, from: fromName, to: preferred };
+}
+
 export async function createVideoGenerationTask(config: AiConfig, prompt: string, references: ReferenceImage[] = [], videoReferences: ReferenceVideo[] = [], audioReferences: ReferenceAudio[] = [], options?: RequestOptions): Promise<VideoGenerationTask> {
-    const selectedModel = (config.model || config.videoModel).trim();
+    let selectedModel = (config.model || config.videoModel).trim();
+    // 有参考图：自动偏向渠道列表内真实存在的 Grok 视频模型
+    if (references.length) {
+        const auto = resolveVideoModelForReferences(config, selectedModel);
+        if (auto.switched) selectedModel = auto.modelValue;
+    }
     const requestConfig = resolveModelRequestConfig(config, selectedModel);
     const script = resolveModelScript(config, selectedModel);
     // Custom scripts win only when set; empty keeps Agnes/Seedance/Grok/OpenAI defaults.
@@ -742,8 +776,10 @@ async function buildGrokPayloadCandidates(config: AiConfig, model: string, promp
     // codex2api 等中转对 1080p / 过大 data URI 更敏感：候选里主动降到 720p 再试
     const resolutions = Array.from(new Set([resolution, "720p", "480p"].filter(Boolean)));
     const imageInputs = await Promise.all(references.slice(0, 7).map((image) => resolveGrokImageInput(image, config)));
-    const models = grokModelCandidates(modelName, imageInputs.length, config.baseUrl);
-    const relay = isCodex2apiBaseUrl(config.baseUrl);
+    // 用当前渠道已拉取的模型列表约束候选，避免硬塞上游不存在的 grok-imagine-video-1.5
+    const channel = resolveModelChannel(config, model);
+    const models = grokModelCandidates(modelName, imageInputs.length, config.baseUrl, channel.models || []);
+    const relay = isCodex2apiBaseUrl(config.baseUrl) || isLanAiBaseUrl(config.baseUrl);
 
     const candidates: Array<Record<string, unknown>> = [];
     const pushUnique = (payload: Record<string, unknown>) => {
@@ -805,25 +841,63 @@ async function buildGrokPayloadCandidates(config: AiConfig, model: string, promp
     return candidates.slice(0, relay ? 10 : 6);
 }
 
-function grokModelCandidates(modelName: string, imageCount: number, baseUrl = "") {
-    const models: string[] = [];
+/**
+ * Grok 模型候选：优先用渠道列表里真实存在的名字，避免硬塞 grok-imagine-video-1.5 导致 model_not_found。
+ * knownModels 来自当前渠道 models[]（拉取模型后的列表）。
+ */
+function grokModelCandidates(modelName: string, imageCount: number, baseUrl = "", knownModels: string[] = []) {
+    const known = Array.from(
+        new Set(
+            knownModels
+                .map((m) => modelOptionName(m).trim())
+                .filter(Boolean),
+        ),
+    );
+    const knownLower = new Map(known.map((m) => [m.toLowerCase(), m] as const));
+    const resolveKnown = (name: string) => knownLower.get(name.toLowerCase()) || "";
+    const pickKnown = (predicate: (n: string) => boolean) => known.find((m) => predicate(m.toLowerCase())) || "";
+
     const lower = modelName.toLowerCase();
     const relay = isCodex2apiBaseUrl(baseUrl);
-    // 参考图生视频优先 1.5；文生在中转上优先用户选择的基础模型
+    const models: string[] = [];
+
+    const push = (name: string) => {
+        const n = (name || "").trim();
+        if (!n) return;
+        if (!models.some((x) => x.toLowerCase() === n.toLowerCase())) models.push(n);
+    };
+
     if (imageCount > 0) {
-        if (!lower.includes("1.5")) models.push("grok-imagine-video-1.5");
-        models.push(modelName);
-        if (lower.includes("1.5")) models.push("grok-imagine-video");
-    } else {
-        models.push(modelName);
-        if (lower.includes("grok-imagine-video") && !lower.includes("1.5")) {
-            // codex2api 文生优先保持基础模型，1.5 作回退
-            if (relay) models.push("grok-imagine-video-1.5");
-            else models.push("grok-imagine-video-1.5");
+        // 图生视频：同渠道内自动选更合适的 I2V 模型（不必用户手动切换）
+        // 1) 列表里带 1.5 / i2v / image-to-video 的
+        push(pickKnown((n) => n.includes("grok") && n.includes("video") && (n.includes("1.5") || n.includes("i2v") || n.includes("image-to-video"))));
+        // 2) 任意 grok*video / grok*imagine（非纯 image 文生图模型）
+        push(pickKnown((n) => n.includes("grok") && (n.includes("video") || n.includes("imagine")) && !n.includes("image-quality") && !n.endsWith("-image")));
+        // 3) 用户当前选择
+        push(modelName);
+        // 4) 仅当列表为空或用户已选 1.5 时，才尝试通用名（避免 Grok2API 上硬塞不存在的 1.5）
+        if (!known.length) {
+            push("grok-imagine-video");
+            if (relay) push("grok-imagine-video-1.5");
+        } else if (lower.includes("1.5")) {
+            push(resolveKnown("grok-imagine-video") || pickKnown((n) => n.includes("grok-imagine-video") && !n.includes("1.5")));
         }
-        if (!lower.includes("grok-imagine-video")) models.push("grok-imagine-video");
+    } else {
+        // 文生视频：用户选择优先，再回退列表里的基础名
+        push(modelName);
+        push(pickKnown((n) => n.includes("grok") && n.includes("video") && !n.includes("1.5")));
+        push(resolveKnown("grok-imagine-video"));
+        // 列表完全没有时再猜官方名；1.5 仅作可选回退且须在列表中
+        if (!known.length) push("grok-imagine-video");
+        push(resolveKnown("grok-imagine-video-1.5"));
     }
-    return Array.from(new Set(models.filter(Boolean)));
+
+    // 若 known 非空，过滤掉完全不在列表中的猜测名（保留用户当前选择即使列表暂未包含）
+    if (known.length) {
+        const filtered = models.filter((m) => m.toLowerCase() === lower || knownLower.has(m.toLowerCase()));
+        if (filtered.length) return filtered;
+    }
+    return models.filter(Boolean);
 }
 
 function buildGrokReferencePrompt(prompt: string, imageCount: number) {
@@ -839,8 +913,8 @@ async function resolveGrokImageInput(image: ReferenceImage, config?: AiConfig): 
 }
 
 async function resolveGrokReferenceImageUrl(image: ReferenceImage, config?: AiConfig) {
-    // codex2api → xAI：过大 data URI 极易 400，本地图压到更小
-    const maxEdge = config && isCodex2apiBaseUrl(config.baseUrl) ? 1024 : 1280;
+    // codex2api / 内网中转：过大 data URI 极易 400，本地图压到更小
+    const maxEdge = config && (isCodex2apiBaseUrl(config.baseUrl) || isLanAiBaseUrl(config.baseUrl)) ? 1024 : 1280;
     // 1) 本地/blob 优先转压缩后的 data URI
     const binary = await resolveReferenceBinaryDataUrl(image);
     if (binary) return compressImageDataUrl(binary, maxEdge, 0.78);
@@ -881,13 +955,15 @@ function formatGrokCreateError(error: unknown, references: ReferenceImage[], att
     });
     const hasLocalReference = references.some((image) => Boolean(image.storageKey) || (image.dataUrl || "").startsWith("blob:") || (image.dataUrl || "").startsWith("data:"));
     const vagueUpstream = /upstream returned status 400|status 400|invalid_request_error/i.test(detail);
+    const modelMissing = /model_not_found|模型不存在|unknown model/i.test(detail);
     const tips = [
         detail,
-        attemptCount > 1 ? `已按多种字段组合重试 ${attemptCount} 次（含降分辨率）` : "",
-        hasRemoteOnlyReference ? "当前参考图是远程地址（如 imgen.x.ai）。codex2api/xAI 常无法拉该临时图 → 请改用本地上传的小图" : "",
-        hasLocalReference && vagueUpstream ? "本地参考图仍 400：请换更小 jpg/png，分辨率先选 720p，模型试 grok-imagine-video-1.5" : "",
+        attemptCount > 1 ? `已按多种字段/模型组合重试 ${attemptCount} 次` : "",
+        modelMissing ? "模型名在上游不存在：请在渠道里「拉取模型」，选用列表中真实的视频模型；图生视频会自动优先用渠道内已有模型，不再硬塞 grok-imagine-video-1.5" : "",
+        hasRemoteOnlyReference ? "当前参考图是远程地址（如 imgen.x.ai）。请改用本地上传的小图" : "",
+        hasLocalReference && vagueUpstream ? "本地参考图仍 400：请换更小 jpg/png，分辨率先选 720p；确认渠道模型列表含可用的 grok 视频模型" : "",
         vagueUpstream && !hasLocalReference && !hasRemoteOnlyReference
-            ? "纯文生 400（xAI upstream）：请确认模型为 grok-imagine-video，时长 5–10 秒，分辨率 720p；codex2api 套餐需开通该视频模型"
+            ? "纯文生 400：请确认模型在渠道列表中、时长 5–10 秒、分辨率 720p；套餐需开通该视频模型"
             : "",
         vagueUpstream ? "中转只返回笼统 400 时，可在其控制台用同一 Key 测最小 body：{model,prompt,duration:8}" : "",
     ].filter(Boolean);
@@ -1359,7 +1435,12 @@ function readErrorPayload(payload: unknown): string {
 function isRetryableGrokPayloadError(error: unknown) {
     if (!axios.isAxiosError(error)) return false;
     const status = error.response?.status;
-    return status === 400 || status === 422;
+    if (status === 400 || status === 422) return true;
+    // 部分网关：不存在的模型名返回 404 / model_not_found，应换候选模型继续试
+    if (status === 404) return true;
+    const data = error.response?.data as { error?: { code?: string; message?: string }; msg?: string; reason?: string } | undefined;
+    const blob = `${data?.error?.code || ""} ${data?.error?.message || ""} ${data?.msg || ""} ${data?.reason || ""}`.toLowerCase();
+    return blob.includes("model_not_found") || blob.includes("模型不存在") || blob.includes("unknown model");
 }
 
 function statusMessage(status: number | undefined, fallback: string) {
