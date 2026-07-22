@@ -17,6 +17,7 @@ import {
 import { nanoid } from "nanoid";
 import { compressImageDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
+import { enhanceImageUpstreamError } from "@/lib/image-request-mode";
 import { ensureLocalImageDataUrl, imageToDataUrl } from "@/services/image-storage";
 import { normalizePluginImages, runModelPlugin } from "@/services/api/model-plugin";
 import type { ReferenceImage } from "@/types/image";
@@ -384,7 +385,10 @@ function readAxiosError(error: unknown, fallback: string, context?: "generation"
     if (axios.isCancel(error)) return "请求已取消";
     if (axios.isAxiosError<{ error?: { message?: string }; msg?: string; code?: number }>(error)) {
         const responseData = error.response?.data;
-        if (responseData?.msg || responseData?.error?.message) return responseData?.msg || responseData?.error?.message || fallback;
+        if (responseData?.msg || responseData?.error?.message) {
+            const upstream = responseData?.msg || responseData?.error?.message || fallback;
+            return enhanceImageUpstreamError(upstream, context, fallback);
+        }
         if (!error.response) return readNetworkError(error.code, fallback, context, error.message);
         return readStatusError(error.response.status, fallback, context);
     }
@@ -1141,7 +1145,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     const requestConfig = resolveModelRequestConfig(effectiveConfig, effectiveConfig.model || effectiveConfig.imageModel);
     assertImageModel(requestConfig.model);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
-    const requestPrompt = buildImageReferencePromptText(prompt, references);
+    const requestPrompt = buildImageReferencePromptText(prompt, references, effectiveConfig);
     const script = resolveModelScript(effectiveConfig, effectiveConfig.model || effectiveConfig.imageModel);
     if (script) {
         if (mask) throw new Error("自定义模型调用脚本暂不支持蒙版编辑，请清空脚本或改用系统默认调用");
@@ -1233,13 +1237,18 @@ async function requestGrokJsonImageEdit(
 
     const grokOpts = resolveLanGrokImageOptions(config.quality, config.size);
     const fullPrompt = withSystemPrompt(requestConfig, requestPrompt);
-    // 提示词尽量用用户原文；编号说明对 Grok 非必须，过长可能干扰
+    // Grok 多图编辑需要明确告诉上游“全部参考图都要参与”；保留多图增强提示。
+    // 单图或普通编号前缀仍尽量瘦身，避免无关说明干扰。
     const userPrompt = (config.systemPrompt || "").trim()
         ? fullPrompt
-        : (requestPrompt.includes("参考图片编号") ? requestPrompt.replace(/^参考图片编号：.*?\n\n/s, "").trim() || requestPrompt : requestPrompt);
+        : (references.length > 1
+            ? requestPrompt
+            : (requestPrompt.includes("参考图片编号") ? requestPrompt.replace(/^参考图片编号：.*?\n\n/s, "").trim() || requestPrompt : requestPrompt));
 
-    const imageObjects = dataUrls.map((url) => ({ type: "image_url" as const, url }));
+    const multiImageObjects = dataUrls.map((url) => ({ url }));
+    const singleImageObject = { url: dataUrls[0] };
     const count = Math.max(1, Math.min(4, n));
+    const isMultiReference = dataUrls.length > 1;
     // 多模型候选：优先 edit，再 quality 等（同渠道列表 + 硬编码后备）
     const modelCandidates = listGrokImageEditModelCandidates(config, encodeChannelModel(resolveModelChannel(config, requestConfig.model).id, requestConfig.model));
     const models = modelCandidates.length ? modelCandidates : [requestConfig.model];
@@ -1252,14 +1261,47 @@ async function requestGrokJsonImageEdit(
     };
 
     for (const model of models) {
-        // xAI 文档形态
+        if (isMultiReference) {
+            // 多图时只尝试真正的 multi-image 形态，避免中转静默退化成“只吃第一张”。
+            push({
+                model,
+                prompt: userPrompt,
+                n: count,
+                response_format: "b64_json",
+                images: multiImageObjects,
+                ...(grokOpts.aspect_ratio ? { aspect_ratio: grokOpts.aspect_ratio } : {}),
+                ...(grokOpts.resolution ? { resolution: grokOpts.resolution } : {}),
+            });
+            push({
+                model,
+                prompt: userPrompt,
+                n: count,
+                response_format: "b64_json",
+                images: multiImageObjects,
+                ...(grokOpts.aspect_ratio ? { aspect_ratio: grokOpts.aspect_ratio } : {}),
+            });
+            // 一些 Grok 中转把 SDK 里的 image_urls 直接透到 HTTP 层。
+            push({
+                model,
+                prompt: userPrompt,
+                n: count,
+                response_format: "b64_json",
+                image_urls: dataUrls,
+                ...(grokOpts.aspect_ratio ? { aspect_ratio: grokOpts.aspect_ratio } : {}),
+                ...(grokOpts.resolution ? { resolution: grokOpts.resolution } : {}),
+            });
+            // 兼容只接受字符串数组的中转。
+            push({ model, prompt: userPrompt, n: count, response_format: "b64_json", images: dataUrls });
+            push({ model, prompt: userPrompt, n: count, images: dataUrls });
+            continue;
+        }
+
         push({
             model,
             prompt: userPrompt,
             n: count,
             response_format: "b64_json",
-            image: imageObjects[0],
-            ...(imageObjects.length > 1 ? { images: imageObjects } : {}),
+            image: singleImageObject,
             ...(grokOpts.aspect_ratio ? { aspect_ratio: grokOpts.aspect_ratio } : {}),
             ...(grokOpts.resolution ? { resolution: grokOpts.resolution } : {}),
         });
@@ -1268,14 +1310,12 @@ async function requestGrokJsonImageEdit(
             prompt: userPrompt,
             n: 1,
             response_format: "b64_json",
-            image: imageObjects[0],
+            image: singleImageObject,
             ...(grokOpts.aspect_ratio ? { aspect_ratio: grokOpts.aspect_ratio } : {}),
         });
         push({ model, prompt: userPrompt, n: 1, response_format: "b64_json", image: { url: dataUrls[0] } });
-        push({ model, prompt: userPrompt, n: 1, image: imageObjects[0] });
         // 部分网关 image 为纯 data URI 字符串
         push({ model, prompt: userPrompt, n: 1, response_format: "b64_json", image: dataUrls[0] });
-        push({ model, prompt: userPrompt, n: 1, images: dataUrls });
     }
 
     let lastError: unknown;
@@ -1293,6 +1333,12 @@ async function requestGrokJsonImageEdit(
             lastError = error;
             if (axios.isAxiosError(error) && (error.response?.status === 401 || error.response?.status === 403)) {
                 break;
+            }
+            if (axios.isAxiosError(error) && error.response && references.length > 1 && i === 0) {
+                const upstream = readAxiosError(error, "图生图失败", "edit");
+                if (/only one image|single image|exactly 1 image|multiple images not supported|too many images/i.test(upstream)) {
+                    throw new Error(`当前中转站的 Grok 图生图接口不支持多参考图：${upstream}`);
+                }
             }
             if (isConnectionClosedError(error)) {
                 try {

@@ -253,6 +253,7 @@ sudo docker compose -f docker-compose.local.yml up -d --build
 **仍可能失败的原因（验收/排障优先看这些）：**
 
 - 带参考图走 `/v1/images/edits`，部分中转不支持。
+- **Grok 多参考图生图已针对中转做过修复：多图时只发送真正的 multi-image JSON payload（如 `images` / `image_urls`），不再混入会静默退化成“只吃第一张”的单图 fallback。** 若以后再出现“只参考第一张”，优先怀疑当前中转后端并未真正实现多图 edits，而不是先回退前端到单图候选。
 - 工作台与画布模型/尺寸/质量不一致。
 - 远程图 URL CORS 导致落盘/参考图失败（见上一节）。
 - 中转限流或上游错误（bulk 失败后串行仍可能整批失败）。
