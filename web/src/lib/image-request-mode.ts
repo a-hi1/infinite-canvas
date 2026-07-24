@@ -31,6 +31,7 @@ export function describeImageRequestMode(opts: {
   generationCount: number;
   platform?: boolean;
   platformModelLabel?: string;
+  autoSwitched?: { from: string; to: string };
   degraded?: boolean;
 }): ImageRequestModeDescription {
   const {
@@ -40,6 +41,7 @@ export function describeImageRequestMode(opts: {
     generationCount,
     platform,
     platformModelLabel,
+    autoSwitched,
     degraded,
   } = opts;
 
@@ -59,6 +61,7 @@ export function describeImageRequestMode(opts: {
       path: "/api/generate/image",
       compatLabel,
       modelLabel: platformModelLabel || modelOptionName(model),
+      autoSwitched,
       degraded,
     };
   }
@@ -66,11 +69,12 @@ export function describeImageRequestMode(opts: {
   if (script) {
     return {
       kind: "script",
-      summary: `请求模式：自定义调用脚本 · ${modelOptionName(model)} · 图生图${referenceCount ? `（参考 ${referenceCount} 张）` : ""} · 生成 ${generationCount} 张`,
+      summary: `请求模式：自定义调用脚本 · ${modelOptionName(model)} · ${referenceCount ? `图生图（参考 ${referenceCount} 张）` : "文生图"} · 生成 ${generationCount} 张`,
       tip: "当前模型已配置本地调用脚本；留空脚本则回退系统默认 OpenAI/Gemini 路径。多张时仍优先一次请求，不足再串行补齐。",
       path: "自定义脚本",
       compatLabel,
       modelLabel: modelOptionName(model),
+      autoSwitched,
       degraded,
     };
   }
@@ -84,6 +88,20 @@ export function describeImageRequestMode(opts: {
       path: "/v1/images/generations",
       compatLabel,
       modelLabel: modelOptionName(model),
+      autoSwitched,
+      degraded,
+    };
+  }
+
+  if (referenceCount === 0) {
+    return {
+      kind: "text-to-image",
+      summary: `请求模式：文生图 /images/generations · ${modelOptionName(model)} · 生成 ${generationCount} 张`,
+      tip: "当前没有参考图；兼容预设只调整该渠道发送给上游的参数字段。",
+      path: "/images/generations",
+      compatLabel,
+      modelLabel: modelOptionName(model),
+      autoSwitched,
       degraded,
     };
   }
@@ -100,6 +118,7 @@ export function describeImageRequestMode(opts: {
       path: "/images/edits",
       compatLabel,
       modelLabel: modelOptionName(model),
+      autoSwitched,
       degraded,
     };
   }
@@ -112,6 +131,7 @@ export function describeImageRequestMode(opts: {
       path: "/images/edits → generations",
       compatLabel,
       modelLabel: modelOptionName(model),
+      autoSwitched,
       degraded,
     };
   }
@@ -123,6 +143,7 @@ export function describeImageRequestMode(opts: {
     path: "/images/edits",
     compatLabel,
     modelLabel: modelOptionName(model),
+    autoSwitched,
     degraded,
   };
 }

@@ -36,9 +36,9 @@
 
 主应用默认仍可由浏览器前端直接请求用户配置的 AI Base URL。AI API Key、Base URL 默认保存在浏览器本地。画布项目、素材和生成记录默认本地优先；登录后可选云同步（云失败不丢本地）。
 
-可选云端模式（`api` 服务）：用户注册登录后，图片/视频工作台在**本地生成成功之后**异步把结果上传到服务器（`POST /api/jobs/image|video`），文件按用户隔离存储，经 `GET /api/files/:id` 鉴权访问。工作台历史侧栏支持「本机 / 云端」切换查看云端列表（预览/下载/删除）。本机记录带 `cloudSync` 状态（pending/synced/failed/skipped），失败可在本机列表重试上云，且不得把本地生成成功改成失败。上云优先本地 blob/`storageKey`；若结果只是 `imgen.x.ai`/`vidgen.x.ai` 等远程 URL（浏览器 CORS 无法 fetch），走 `POST /api/jobs/{type}/from-url` 由服务端白名单拉取后落盘。上传幂等：同一用户 + 同一 `client_local_id` 重复提交返回已有任务（`deduped: true`），为后续计费防双扣预留。未登录时行为与原先一致；云 API 不可用时不得阻断本地功能。本地开发时 Vite 将 `/api` 与 `/ai-proxy` 默认代理到 `http://127.0.0.1:3011`（需先起  
-`docker compose -f docker-compose.local.yml -f docker-compose.dev-host.yml up -d`）。  
-`dev-host` 叠加把 app 再映射 `3011`，避开 Windows 上 VS Code「端口转发」抢占的 `127.0.0.1:3001`/`8080`（否则会误打到远端/其它服务，出现上云 `501` 或登录「来源不被允许」）。  
+可选云端模式（`api` 服务）：用户注册登录后，图片/视频工作台在**本地生成成功之后**异步把结果上传到服务器（`POST /api/jobs/image|video`），文件按用户隔离存储，经 `GET /api/files/:id` 鉴权访问。工作台历史侧栏支持「本机 / 云端」切换查看云端列表（预览/下载/删除）。本机记录带 `cloudSync` 状态（pending/synced/failed/skipped），失败可在本机列表重试上云，且不得把本地生成成功改成失败。上云优先本地 blob/`storageKey`；若结果只是 `imgen.x.ai`/`vidgen.x.ai` 等远程 URL（浏览器 CORS 无法 fetch），走 `POST /api/jobs/{type}/from-url` 由服务端白名单拉取后落盘。上传幂等：同一用户 + 同一 `client_local_id` 重复提交返回已有任务（`deduped: true`），为后续计费防双扣预留。未登录时行为与原先一致；云 API 不可用时不得阻断本地功能。本地开发时 Vite 将 `/api` 与 `/ai-proxy` 默认代理到 `http://127.0.0.1:3011`（需先起
+`docker compose -f docker-compose.local.yml -f docker-compose.dev-host.yml up -d`）。
+`dev-host` 叠加把 app 再映射 `3011`，避开 Windows 上 VS Code「端口转发」抢占的 `127.0.0.1:3001`/`8080`（否则会误打到远端/其它服务，出现上云 `501` 或登录「来源不被允许」）。
 不要假设宿主机 `8080` 一定是本项目 api。云端配置示例见 `.env.api.example`。
 
 **浏览器代理 ≠ Docker 出网**：系统/Clash 美国代理只影响浏览器。视频上云若走 `/ai-proxy/media` 或 `api` 的 `from-url`，是容器去拉 `vidgen.x.ai`；容器访问超时时会 502。本机可在根目录 `.env` 设置 `HTTP_PROXY`/`HTTPS_PROXY=http://host.docker.internal:代理端口` 后重建 `api` 与 `ai-proxy`。服务器不要默认照搬本机 789x 代理。
@@ -47,11 +47,11 @@
 
 **P2.0-A / P2.0-B / P2.0-C：** `GET/PUT/DELETE /api/projects` + `POST /api/blobs` / `GET /api/blobs/by-key/:clientKey` + `GET/PUT /api/assets`（用户级素材 manifest + tombstones）。项目 JSON、画布媒体、素材清单本地优先同步；推送先媒体后清单/JSON；拉取补齐缺失 blob。云失败不丢本地。Postgres / S3 仍未做。
 
-**P0.5c：** 清单 `docs/content/docs/progress/p05c-acceptance.mdx`；自动 `scripts/check-cloud-stack.*` + `scripts/smoke-dual-track.*`；仍须人工 UI 上云与服务器 B2。本机上云占本机 `./data/api`，服务器占服务器 `./data/api`。
+**P0.5c：** 已通过并出门。清单 `docs/content/docs/progress/p05c-acceptance.mdx`；自动 `scripts/check-cloud-stack.*` + `scripts/smoke-dual-track.*` 与人工 UI/服务器 B2 均已验收。本机上云占本机 `./data/api`，服务器占服务器 `./data/api`。
 
-**上游跟进：** 矩阵见 `docs/content/docs/progress/upstream-follow.mdx`（约对照 v0.9.0）。**禁止整仓 merge**；推送 `a-hi1`。已移植：透明背景（BYOK）、组节点（最小）、模型调用脚本（旁路 `modelScripts`）、**画布导出当前/选中节点**。完整 0.9 可调宽侧栏/侧栏资产 Tab **现阶段明确不做**（素材用独立素材库；若缺找节点再做最小节点列表）。下一优先：P0.5c 人工验收收口 → 插件独立工程。`docker-compose` / `nginx` / 端口 `3001`/`3011` 禁止被上游覆盖。 
+**上游跟进：** 矩阵见 `docs/content/docs/progress/upstream-follow.mdx`（约对照 v0.9.0）。**禁止整仓 merge**；推送 `a-hi1`。已移植：透明背景（BYOK）、组节点（最小）、模型调用脚本（旁路 `modelScripts`）、**画布导出当前/选中节点**。完整 0.9 可调宽侧栏/侧栏资产 Tab **现阶段明确不做**（素材用独立素材库；若缺找节点再做最小节点列表）。当前优先 S1 渠道兼容/图生图边界微修；之后有需要再做最小节点列表，插件系统保持独立工程。`docker-compose` / `nginx` / 端口 `3001`/`3011` 禁止被上游覆盖。
 
-P0.5 扫尾（运维与体验）：`GET /auth/me` 返回 `usage`（已用字节、任务数）与 `limits`（容量上限），供顶栏账号弹层展示；受保护接口 401 时前端统一清登录态（`infinite-canvas:cloud-unauthorized` 事件），避免连环报错；未登录生成成功轻提示「登录后可跨设备回看」；上云失败若为空间不足则明确提示。备份脚本：`scripts/backup-api-data.sh` / `scripts/backup-api-data.ps1`。更完整说明见 `docs/content/docs/overview/cloud-api.mdx`。公网 HTTPS 必须设 `API_COOKIE_SECURE=true` 并收紧 `API_ALLOWED_ORIGINS`（禁止 `*`）。云端错误 envelope 已开始增加稳定 `reason` 字段，后续前端判断应优先依赖 reason，而不是长期靠中文字符串。 
+P0.5 扫尾（运维与体验）：`GET /auth/me` 返回 `usage`（已用字节、任务数）与 `limits`（容量上限），供顶栏账号弹层展示；受保护接口 401 时前端统一清登录态（`infinite-canvas:cloud-unauthorized` 事件），避免连环报错；未登录生成成功轻提示「登录后可跨设备回看」；上云失败若为空间不足则明确提示。备份脚本：`scripts/backup-api-data.sh` / `scripts/backup-api-data.ps1`。更完整说明见 `docs/content/docs/overview/cloud-api.mdx`。公网 HTTPS 必须设 `API_COOKIE_SECURE=true` 并收紧 `API_ALLOWED_ORIGINS`（禁止 `*`）。云端错误 envelope 已开始增加稳定 `reason` 字段，后续前端判断应优先依赖 reason，而不是长期靠中文字符串。
 
 **P1.0-A 已落地：** `api` 已把 JSON 数据访问按 `users / sessions / jobs / files` 拆成 repository façade，底层暂不换库、不改接口和存储格式；目的是为后续 Postgres / 账本 / 项目同步铺路，减少再次从 `index.js` 里拆逻辑。
 
@@ -59,7 +59,7 @@ P0.5 扫尾（运维与体验）：`GET /auth/me` 返回 `usage`（已用字节�
 
 **P1.0-C 已落地：** 积分账本 `credit_ledger`（append-only）+ 用户 `credit_balance_cents` 缓存；`GET /auth/me` 返回 `credits`；用户 `GET /api/credits/ledger`；管理员手工加额 `POST /api/admin/credits/grant`（`API_ADMIN_TOKEN`）。
 
-**P1.0-D / P1.0-E / P1.0-F / P1.0-G 代码已落地，但产品面后置：** 可选平台图/视频网关与账本代码保留在仓库，**默认全部关闭**。当前自用策略：**平台扣积分与支付一并后置**——未开 `API_PLATFORM_*_ENABLED` 时账号弹层不展示积分余额，工作台不展示平台开关；用户继续 BYOK/本地生成。需要收费时再开 env + 支付。`/health.platform` 与 `check-cloud-stack` 可查看就绪态。平台视频暂无参考素材/Grok/Seedance 服务端路径。 
+**P1.0-D / P1.0-E / P1.0-F / P1.0-G 代码已落地，但产品面后置：** 可选平台图/视频网关与账本代码保留在仓库，**默认全部关闭**。当前自用策略：**平台扣积分与支付一并后置**——未开 `API_PLATFORM_*_ENABLED` 时账号弹层不展示积分余额，工作台不展示平台开关；用户继续 BYOK/本地生成。需要收费时再开 env + 支付。`/health.platform` 与 `check-cloud-stack` 可查看就绪态。平台视频暂无参考素材/Grok/Seedance 服务端路径。
 
 P0.5b 安全/部署加固（为 P1 铺路，不改本地生成主路径）：`from-url` 白名单域名在 DNS 解析后拒绝内网地址、限制重定向跳数、拒绝 URL 内嵌账号；过期/吊销会话定期清理；`docker-compose.local.yml` 透传 Cookie Secure / 邀请码 / 容量等变量（Compose 从仓库根 `.env` 插值，示例见 `.env.api.example`）。同源自部署默认 `API_TRUST_PROXY_SAME_ORIGIN=true`：浏览器 Origin 与 `Host`/`X-Forwarded-Host`+协议一致时放行（解决 `http://公网IP:3001` 登录 403），跨站仍靠显式白名单；可设 `false` 回到仅白名单。Nginx 必须用 `$http_host`（保留端口）并设置 `X-Forwarded-Host`，不要只用 `$host`（会丢 `:3001`/`:3011`，表现为「localhost 能登、127.0.0.1:端口不能登」）。**当前优先真机验收云端出门条件，勿跳过验收直接做计费或画布全量同步。**
 

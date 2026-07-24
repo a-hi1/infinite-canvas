@@ -1074,9 +1074,9 @@ function channelLooksLikeGrokImage(config: AiConfig, channel: ModelChannel, sele
 }
 
 /** 同渠道内图生图模型候选：*edit* 永远排最前。 */
-export function listGrokImageEditModelCandidates(config: AiConfig, selectedModelValue: string): string[] {
+export function listGrokImageEditModelCandidates(config: AiConfig, selectedModelValue: string, channelOverride?: ModelChannel): string[] {
     const selected = (selectedModelValue || config.imageModel || config.model || "").trim();
-    const channel = resolveModelChannel(config, selected);
+    const channel = channelOverride || resolveModelChannel(config, selected);
     const fromName = modelOptionName(selected);
     const rawModels = (channel.models || []).map((m) => modelOptionName(m).trim()).filter(Boolean);
     const knownLower = new Map(rawModels.map((m) => [m.toLowerCase(), m] as const));
@@ -1095,8 +1095,8 @@ export function listGrokImageEditModelCandidates(config: AiConfig, selectedModel
     for (const p of GROK_IMAGE_EDIT_PREFERRED) {
         const hit = knownLower.get(p) || rawModels.find((m) => m.toLowerCase().includes(p));
         if (hit) push(hit);
-        else if (p.includes("edit") || isLanAiBaseUrl(channel.baseUrl) || getImageCompatStrategy(channel.baseUrl, channel.compatProfile).profile === "grok-image") {
-            // 列表可能没写全：edit 名仍尝试；quality 仅作后备
+        else if (!rawModels.length && (p.includes("edit") || isLanAiBaseUrl(channel.baseUrl) || getImageCompatStrategy(channel.baseUrl, channel.compatProfile).profile === "grok-image")) {
+            // 仅未拉取模型列表时猜通用 edit 名；有清单时不制造 model_not_found 重试。
             push(p);
         }
     }
@@ -1139,14 +1139,20 @@ export function resolveImageModelForReferences(config: AiConfig, selectedModelVa
 
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions): Promise<GeneratedImageResult[]> {
     const selectedModel = config.model || config.imageModel;
-    const auto = references.length && !mask ? resolveImageModelForReferences(config, selectedModel) : { modelValue: selectedModel, switched: false, from: "", to: "" };
+    // 用户给所选模型配置的脚本必须优先；自动切 Grok edit 不能绕过其 BYOK 调用逻辑。
+    const selectedScript = resolveModelScript(config, selectedModel);
+    const auto = references.length && !mask && !selectedScript ? resolveImageModelForReferences(config, selectedModel) : { modelValue: selectedModel, switched: false, from: "", to: "" };
     const effectiveConfig = auto.switched ? { ...config, model: auto.modelValue, imageModel: auto.modelValue } : config;
 
     const requestConfig = resolveModelRequestConfig(effectiveConfig, effectiveConfig.model || effectiveConfig.imageModel);
     assertImageModel(requestConfig.model);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
-    const requestPrompt = buildImageReferencePromptText(prompt, references, effectiveConfig);
     const script = resolveModelScript(effectiveConfig, effectiveConfig.model || effectiveConfig.imageModel);
+    if (!script && references.length > 3) {
+        throw new Error("内置图生图最多支持 3 张参考图；请删减后重试，或为当前模型配置自定义调用脚本处理更多参考图");
+    }
+    const requestReferences = references;
+    const requestPrompt = buildImageReferencePromptText(prompt, requestReferences, effectiveConfig);
     if (script) {
         if (mask) throw new Error("自定义模型调用脚本暂不支持蒙版编辑，请清空脚本或改用系统默认调用");
         try {
@@ -1178,7 +1184,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     if (requestConfig.apiFormat === "gemini") {
         if (mask) throw new Error("Gemini 调用格式暂不支持蒙版编辑");
         try {
-            return await requestGeminiImages(requestConfig, requestPrompt, references, n, options);
+            return await requestGeminiImages(requestConfig, requestPrompt, requestReferences, n, options);
         } catch (error) {
             throw new Error(readAxiosError(error, "请求失败"));
         }
@@ -1193,14 +1199,14 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     // xAI / Grok2API：POST /images/edits 仅 application/json（不支持 OpenAI multipart）
     // 见 https://docs.x.ai/developers/model-capabilities/images/editing
     if (!mask && (editStrategy.profile === "grok-image" || looksLikeGrokImage)) {
-        return requestGrokJsonImageEdit(requestConfig, effectiveConfig, requestPrompt, references, n, options);
+        return requestGrokJsonImageEdit(requestConfig, effectiveConfig, requestPrompt, requestReferences, n, options);
     }
 
     if (editStrategy.editFallbackFragile && !mask) {
-        return requestEditOnFragileRelay(requestConfig, effectiveConfig, requestPrompt, references, n, options);
+        return requestEditOnFragileRelay(requestConfig, effectiveConfig, requestPrompt, requestReferences, n, options);
     }
 
-    return requestOpenAiCompatibleEdit(requestConfig, effectiveConfig, requestPrompt, references, mask, n, options, {
+    return requestOpenAiCompatibleEdit(requestConfig, effectiveConfig, requestPrompt, requestReferences, mask, n, options, {
         slim: editStrategy.profile === "openai-slim" || editStrategy.profile === "relay-fragile",
     });
 }
@@ -1222,7 +1228,7 @@ async function requestGrokJsonImageEdit(
     let dataUrls: string[];
     try {
         dataUrls = await Promise.all(
-            references.slice(0, 3).map(async (image) => {
+            references.map(async (image) => {
                 const dataUrl = await ensureLocalImageDataUrl(image);
                 if (!dataUrl?.startsWith("data:image/")) {
                     throw new Error("参考图无法读取为本地图片，请重新上传本地图后再试");
@@ -1250,7 +1256,9 @@ async function requestGrokJsonImageEdit(
     const count = Math.max(1, Math.min(4, n));
     const isMultiReference = dataUrls.length > 1;
     // 多模型候选：优先 edit，再 quality 等（同渠道列表 + 硬编码后备）
-    const modelCandidates = listGrokImageEditModelCandidates(config, encodeChannelModel(resolveModelChannel(config, requestConfig.model).id, requestConfig.model));
+    const selectedModel = config.model || config.imageModel;
+    const selectedChannel = resolveModelChannel(config, selectedModel);
+    const modelCandidates = listGrokImageEditModelCandidates(config, selectedModel, selectedChannel);
     const models = modelCandidates.length ? modelCandidates : [requestConfig.model];
 
     const candidates: Record<string, unknown>[] = [];

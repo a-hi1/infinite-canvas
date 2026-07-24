@@ -60,7 +60,7 @@ type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: strin
 type RequestOptions = { signal?: AbortSignal };
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
-export type VideoGenerationTask = { id: string; provider: "openai" | "seedance" | "agnes" | "grok" | "script"; model: string; readyResult?: VideoGenerationResult };
+export type VideoGenerationTask = { id: string; provider: "openai" | "seedance" | "agnes" | "grok" | "script"; model: string; requestModel?: string; readyResult?: VideoGenerationResult };
 export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "failed"; error: string };
 
 /** One-shot scripted video results (script does its own create+poll). */
@@ -122,13 +122,14 @@ export function resolveVideoModelForReferences(config: AiConfig, selectedModelVa
 
 export async function createVideoGenerationTask(config: AiConfig, prompt: string, references: ReferenceImage[] = [], videoReferences: ReferenceVideo[] = [], audioReferences: ReferenceAudio[] = [], options?: RequestOptions): Promise<VideoGenerationTask> {
     let selectedModel = (config.model || config.videoModel).trim();
-    // 有参考图：自动偏向渠道列表内真实存在的 Grok 视频模型
-    if (references.length) {
+    // 用户给所选模型配置的脚本优先；自动切 I2V 模型不能绕过其 BYOK 调用逻辑。
+    const selectedScript = resolveModelScript(config, selectedModel);
+    if (references.length && !selectedScript) {
         const auto = resolveVideoModelForReferences(config, selectedModel);
         if (auto.switched) selectedModel = auto.modelValue;
     }
     const requestConfig = resolveModelRequestConfig(config, selectedModel);
-    const script = resolveModelScript(config, selectedModel);
+    const script = selectedScript || resolveModelScript(config, selectedModel);
     // Custom scripts win only when set; empty keeps Agnes/Seedance/Grok/OpenAI defaults.
     if (script) {
         if (videoReferences.length || audioReferences.length) {
@@ -401,7 +402,8 @@ async function createGrokTask(config: AiConfig, model: string, prompt: string, r
                 return {
                     id,
                     provider: "grok",
-                    model: String(payload.model || model),
+                    model,
+                    requestModel: String(payload.model || modelOptionName(model)),
                     readyResult: await videoResultFromUrl(ready, options, config),
                 };
             }
@@ -409,7 +411,7 @@ async function createGrokTask(config: AiConfig, model: string, prompt: string, r
             // 新任务清掉该 host 的“不支持查询”缓存，避免上次 404 影响本次
             grokPollHostState.delete(hostKeyOf(config));
             grokPollMissCount.delete(pollMissKey(config, id));
-            return { id, provider: "grok", model: String(payload.model || model) };
+            return { id, provider: "grok", model, requestModel: String(payload.model || modelOptionName(model)) };
         } catch (error) {
             lastError = error;
             // 只在字段兼容候选之间切换；鉴权/限流等直接结束。

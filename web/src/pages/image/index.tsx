@@ -11,6 +11,7 @@ import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
+import { describeImageRequestMode, IMAGE_EDIT_DEGRADED_DEFAULT } from "@/lib/image-request-mode";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
 import { getImageCompatStrategy, modelOptionLabel, resolveModelChannel, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -75,6 +76,7 @@ type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => 
 
 const LOG_STORE_KEY = "infinite-canvas:image_generation_logs";
 const PLATFORM_IMAGE_PREF_KEY = "infinite-canvas:prefer_platform_image";
+const MAX_IMAGE_REFERENCES = 3;
 const RESULT_ACTION_BUTTON_CLASS = "min-w-0 px-1.5 [&_.ant-btn-icon]:shrink-0 [&>span:last-child]:min-w-0 [&>span:last-child]:truncate";
 const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
 
@@ -139,9 +141,18 @@ export default function ImagePage() {
     const imagePriceCents = platformImagePriceCents(credits);
     const platformModelLabel = credits?.image_model || "平台模型";
     // 有参考图时预览将实际使用的 Grok 图生图模型（与 requestEdit 内逻辑一致）
-    const editModelPreview = !usePlatformImage && references.length ? resolveImageModelForReferences(effectiveConfig, model) : null;
+    const selectedImageUsesCustomScript = !usePlatformImage && Boolean(resolveModelScript(effectiveConfig, model));
+    const editModelPreview = !usePlatformImage && references.length && !selectedImageUsesCustomScript ? resolveImageModelForReferences(effectiveConfig, model) : null;
     const effectiveRequestModel = editModelPreview?.switched ? editModelPreview.modelValue : model;
-    const imageUsesCustomScript = !usePlatformImage && Boolean(resolveModelScript(effectiveConfig, effectiveRequestModel));
+    const requestMode = describeImageRequestMode({
+        config: effectiveConfig,
+        model: effectiveRequestModel,
+        referenceCount: references.length,
+        generationCount,
+        platform: usePlatformImage,
+        platformModelLabel,
+        autoSwitched: editModelPreview?.switched ? { from: editModelPreview.from, to: editModelPreview.to } : undefined,
+    });
 
     useEffect(() => {
         if (!running || !startedAt) return;
@@ -181,6 +192,15 @@ export default function ImagePage() {
         })();
     }, [effectiveConfig, isAiConfigReady, message, openConfigDialog, searchParams, setSearchParams, textModel]);
 
+    const appendReferences = (nextReferences: ReferenceImage[]) => {
+        setReferences((value) => {
+            const maxReferences = usePlatformImage || selectedImageUsesCustomScript ? 4 : MAX_IMAGE_REFERENCES;
+            const available = Math.max(0, maxReferences - value.length);
+            if (nextReferences.length > available) message.warning(`当前请求模式最多使用 ${maxReferences} 张参考图，超出的图片未加入`);
+            return [...value, ...nextReferences.slice(0, available)];
+        });
+    };
+
     const addReferences = async (files?: FileList | null) => {
         const imageFiles = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
         const nextReferences = await Promise.all(
@@ -189,7 +209,7 @@ export default function ImagePage() {
                 return { id: nanoid(), name: file.name, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
             }),
         );
-        setReferences((value) => [...value, ...nextReferences]);
+        appendReferences(nextReferences);
     };
 
     const addReferencesFromClipboard = async () => {
@@ -206,7 +226,7 @@ export default function ImagePage() {
                     return { id: nanoid(), name: `clipboard-${index + 1}.png`, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
                 }),
             );
-            setReferences((value) => [...value, ...nextReferences]);
+            appendReferences(nextReferences);
             message.success(`已读取 ${nextReferences.length} 张参考图`);
         } catch {
             message.error("剪切板里没有可读取的图片");
@@ -339,8 +359,7 @@ export default function ImagePage() {
             if (image.storageKey) {
                 const localUrl = await resolveImageUrl(image.storageKey, image.dataUrl);
                 if (localUrl && (localUrl.startsWith("blob:") || localUrl.startsWith("data:"))) {
-                    setReferences((value) => [
-                        ...value,
+                    appendReferences([
                         {
                             id: nanoid(),
                             name: `result-${index + 1}.png`,
@@ -362,8 +381,7 @@ export default function ImagePage() {
                         message.error("这张生成图是远程临时地址，浏览器读不到内容，无法作为参考图。请先下载到本地再上传");
                         return;
                     }
-                    setReferences((value) => [
-                        ...value,
+                    appendReferences([
                         {
                             id: nanoid(),
                             name: `result-${index + 1}.png`,
@@ -381,8 +399,7 @@ export default function ImagePage() {
             }
 
             const stored = await uploadImage(image.dataUrl);
-            setReferences((value) => [
-                ...value,
+            appendReferences([
                 {
                     id: nanoid(),
                     name: `result-${index + 1}.png`,
@@ -448,7 +465,7 @@ export default function ImagePage() {
             setPrompt(payload.content);
         } else if (payload.kind === "image") {
             const stored = await uploadImage(payload.dataUrl);
-            setReferences((value) => [...value, { id: nanoid(), name: payload.title, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }]);
+            appendReferences([{ id: nanoid(), name: payload.title, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }]);
         } else {
             message.warning("生图工作台只能使用文本或图片素材");
         }
@@ -505,7 +522,8 @@ export default function ImagePage() {
             openConfigDialog(true);
             return null;
         }
-        const autoEdit = references.length ? resolveImageModelForReferences(effectiveConfig, model) : null;
+        const selectedScript = resolveModelScript(effectiveConfig, model);
+        const autoEdit = references.length && !selectedScript ? resolveImageModelForReferences(effectiveConfig, model) : null;
         const requestModel = autoEdit?.switched ? autoEdit.modelValue : model;
         return {
             text,
@@ -545,7 +563,7 @@ export default function ImagePage() {
         try {
             const generated = snapshot.references.length ? await requestEdit({ ...snapshot.config, count: String(count) }, snapshot.text, snapshot.references) : await requestGeneration({ ...snapshot.config, count: String(count) }, snapshot.text);
             if (generated.some((item) => item.degradedFromEdit)) {
-                message.warning(generated.find((item) => item.degradeReason)?.degradeReason || "当前中转不支持参考图，已按文生图生成");
+                message.warning(generated.find((item) => item.degradeReason)?.degradeReason || IMAGE_EDIT_DEGRADED_DEFAULT);
             }
             const images: GeneratedImage[] = [];
             for (let index = 0; index < Math.min(generated.length, count); index += 1) {
@@ -665,7 +683,7 @@ export default function ImagePage() {
             const image = result[0];
             if (!image) throw new Error("接口没有返回图片");
             if (image.degradedFromEdit) {
-                message.warning(image.degradeReason || "当前中转不支持参考图，已按文生图生成");
+                message.warning(image.degradeReason || IMAGE_EDIT_DEGRADED_DEFAULT);
             }
             let dataUrl = image.dataUrl;
             let storageKey: string | undefined;
@@ -786,7 +804,7 @@ export default function ImagePage() {
 
                             <div className="min-w-0">
                                 <div className="mb-2 flex items-center justify-between gap-3">
-                                    <span className="text-base font-semibold">参考图</span>
+                                    <span className="text-base font-semibold">参考图（当前最多 {usePlatformImage || selectedImageUsesCustomScript ? 4 : MAX_IMAGE_REFERENCES} 张）</span>
                                     <div className="flex gap-2">
                                         <Button size="small" icon={<ClipboardPaste className="size-3.5" />} onClick={() => void addReferencesFromClipboard()}>
                                             剪切板
@@ -858,15 +876,10 @@ export default function ImagePage() {
                                 </div>
                             ) : null}
                             <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">
-                                {usePlatformImage
-                                    ? `请求模式：平台代生成 /api/generate/image · ${platformModelLabel} · ${references.length ? `图生图（参考 ${Math.min(references.length, 4)} 张）` : "文生图"} · 生成 ${generationCount} 张（成功后扣积分）`
-                                    : `请求模式：${modelOptionLabel(effectiveConfig, effectiveRequestModel)}${editModelPreview?.switched ? `（自动 ${editModelPreview.to}）` : ""} · ${imageUsesCustomScript ? "自定义调用脚本" : references.length ? "图生图 /v1/images/edits" : "文生图 /v1/images/generations"} · 参考图 ${references.length} 张 · 生成 ${generationCount} 张`}
+                                {requestMode.summary}
+                                {requestMode.autoSwitched ? `（原选 ${requestMode.autoSwitched.from}，自动切换 ${requestMode.autoSwitched.to}）` : ""}
                                 <div className="mt-1 opacity-75">
-                                    {usePlatformImage
-                                        ? "默认仍是你自己的 API Key；开启平台积分后走服务端 Key。参考图会以 data URL 上传服务端再调上游 edits（最多 4 张）。"
-                                        : imageUsesCustomScript
-                                          ? "当前模型已配置本地调用脚本；留空脚本则回退系统默认 OpenAI/Gemini 路径。多张时仍优先一次请求，不足再串行补齐。"
-                                          : "多张时优先一次请求；不足或失败时串行补齐，降低 429 风险。"}
+                                    {requestMode.tip} 兼容预设：{requestMode.compatLabel}。
                                 </div>
                             </div>
                             <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
