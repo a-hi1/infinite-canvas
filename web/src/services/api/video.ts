@@ -384,9 +384,11 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
 async function createGrokTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     const payloads = await buildGrokPayloadCandidates(config, model, prompt, references);
     let lastError: unknown;
+    let attemptCount = 0;
     for (const payload of payloads) {
         try {
             // 中转站图生视频可能较慢，创建超时放宽，尽量等同步结果
+            attemptCount += 1;
             const created = unwrapGrokVideoResponse(
                 (
                     await axios.post<ApiGrokVideoResponse>(grokCreateApiUrl(config), payload, {
@@ -419,7 +421,7 @@ async function createGrokTask(config: AiConfig, model: string, prompt: string, r
         }
     }
 
-    throw new Error(formatGrokCreateError(lastError, references, payloads.length));
+    throw new Error(formatGrokCreateError(lastError, references, attemptCount));
 }
 
 // host 探测：ok=查询可用；missing=确认不支持。任务级 404 先累计，不立刻判死。
@@ -770,14 +772,17 @@ function grokCreateApiUrl(config: AiConfig) {
     return aiApiUrl(config, "/videos/generations");
 }
 
-async function buildGrokPayloadCandidates(config: AiConfig, model: string, prompt: string, references: ReferenceImage[]) {
+export async function buildGrokPayloadCandidates(config: AiConfig, model: string, prompt: string, references: ReferenceImage[]) {
+    if (references.length > 7) {
+        throw new Error(`Grok 多参考图视频当前最多支持 7 张；已选择 ${references.length} 张，请删减后重试`);
+    }
     const modelName = modelOptionName(model);
     const duration = normalizeGrokDuration(config.videoSeconds);
     const aspectRatio = normalizeGrokAspectRatio(config.size);
     const resolution = normalizeGrokResolution(config.vquality);
     // codex2api 等中转对 1080p / 过大 data URI 更敏感：候选里主动降到 720p 再试
     const resolutions = Array.from(new Set([resolution, "720p", "480p"].filter(Boolean)));
-    const imageInputs = await Promise.all(references.slice(0, 7).map((image) => resolveGrokImageInput(image, config)));
+    const imageInputs = await Promise.all(references.map((image) => resolveGrokImageInput(image, config)));
     // 用当前渠道已拉取的模型列表约束候选，避免硬塞上游不存在的 grok-imagine-video-1.5
     const channel = resolveModelChannel(config, model);
     const models = grokModelCandidates(modelName, imageInputs.length, config.baseUrl, channel.models || []);
@@ -826,21 +831,49 @@ async function buildGrokPayloadCandidates(config: AiConfig, model: string, promp
             if (!relay) pushUnique({ model: nextModel, prompt, images: [image.url], duration });
         }
     } else {
+        // 多图：每个模型先生成同样顺序的兼容形态，再按形态轮询模型，避免全局上限饿死后备模型。
         const labeledPrompt = buildGrokReferencePrompt(prompt, imageInputs.length);
         const urls = imageInputs.map((item) => item.url);
         const multiDuration = Math.min(duration, 10);
-        for (const nextModel of models) {
-            // 多图：官方 reference_images 对象数组优先
-            pushUnique({ model: nextModel, prompt: labeledPrompt, reference_images: imageInputs, duration: multiDuration });
-            pushUnique({ model: nextModel, prompt: labeledPrompt, reference_images: imageInputs, duration: multiDuration, aspect_ratio: aspectRatio });
-            pushUnique({ model: nextModel, prompt: labeledPrompt, reference_images: urls, duration: multiDuration });
-            // 中转退化：只取首图走 I2V，比整组 reference 更容易过
-            pushUnique({ model: nextModel, prompt, image: imageInputs[0], duration: multiDuration });
-            if (!relay) pushUnique({ model: nextModel, prompt: labeledPrompt, images: urls, duration: multiDuration });
+        const perModel = models.map((nextModel) => {
+            const payloads: Array<Record<string, unknown>> = [];
+            const push = (payload: Record<string, unknown>) => {
+                const key = JSON.stringify(payload);
+                if (!payloads.some((item) => JSON.stringify(item) === key)) payloads.push(payload);
+            };
+            push({ model: nextModel, prompt: labeledPrompt, reference_images: imageInputs, duration: multiDuration });
+            push({ model: nextModel, prompt: labeledPrompt, reference_images: imageInputs, duration: multiDuration, aspect_ratio: aspectRatio });
+            for (const nextResolution of resolutions) {
+                push({
+                    model: nextModel,
+                    prompt: labeledPrompt,
+                    reference_images: imageInputs,
+                    duration: multiDuration,
+                    aspect_ratio: aspectRatio,
+                    resolution: nextResolution,
+                });
+            }
+            push({ model: nextModel, prompt: labeledPrompt, reference_images: urls, duration: multiDuration });
+            push({ model: nextModel, prompt: labeledPrompt, reference_images: urls, duration: multiDuration, aspect_ratio: aspectRatio });
+            // 中转兼容：关键的扁平数组形态排在扩展 image 数组之前。
+            push({ model: nextModel, prompt: labeledPrompt, images: urls, duration: multiDuration });
+            push({ model: nextModel, prompt: labeledPrompt, image_urls: urls, duration: multiDuration });
+            push({ model: nextModel, prompt: labeledPrompt, images: imageInputs, duration: multiDuration });
+            push({ model: nextModel, prompt: labeledPrompt, image: imageInputs, duration: multiDuration });
+            push({ model: nextModel, prompt: labeledPrompt, image: urls, duration: multiDuration });
+            return payloads;
+        });
+        const maxPerModel = Math.max(0, ...perModel.map((payloads) => payloads.length));
+        for (let payloadIndex = 0; payloadIndex < maxPerModel; payloadIndex += 1) {
+            for (const payloads of perModel) {
+                const payload = payloads[payloadIndex];
+                if (payload) pushUnique(payload);
+            }
         }
     }
 
-    return candidates.slice(0, relay ? 10 : 6);
+    const limit = imageInputs.length > 1 ? (relay ? 18 : 14) : relay ? 10 : 6;
+    return candidates.slice(0, limit);
 }
 
 /**
@@ -956,20 +989,38 @@ function formatGrokCreateError(error: unknown, references: ReferenceImage[], att
         return isPublicMediaUrl(url) && !image.storageKey && !url.startsWith("data:") && !url.startsWith("blob:");
     });
     const hasLocalReference = references.some((image) => Boolean(image.storageKey) || (image.dataUrl || "").startsWith("blob:") || (image.dataUrl || "").startsWith("data:"));
+    const multiReference = references.length > 1;
     const vagueUpstream = /upstream returned status 400|status 400|invalid_request_error/i.test(detail);
     const modelMissing = /model_not_found|模型不存在|unknown model/i.test(detail);
     const tips = [
         detail,
         attemptCount > 1 ? `已按多种字段/模型组合重试 ${attemptCount} 次` : "",
+        multiReference
+            ? `当前为 ${references.length} 张参考图：已只尝试真正的多图字段（reference_images / images / image_urls），不会静默改成只发第一张`
+            : "",
+        multiReference && vagueUpstream
+            ? "若上游不支持多参考图，请减到 1 张本地小图，或换支持 multi-reference 的 Grok 视频模型/渠道"
+            : "",
         modelMissing ? "模型名在上游不存在：请在渠道里「拉取模型」，选用列表中真实的视频模型；图生视频会自动优先用渠道内已有模型，不再硬塞 grok-imagine-video-1.5" : "",
         hasRemoteOnlyReference ? "当前参考图是远程地址（如 imgen.x.ai）。请改用本地上传的小图" : "",
-        hasLocalReference && vagueUpstream ? "本地参考图仍 400：请换更小 jpg/png，分辨率先选 720p；确认渠道模型列表含可用的 grok 视频模型" : "",
+        hasLocalReference && vagueUpstream && !multiReference ? "本地参考图仍 400：请换更小 jpg/png，分辨率先选 720p；确认渠道模型列表含可用的 grok 视频模型" : "",
         vagueUpstream && !hasLocalReference && !hasRemoteOnlyReference
             ? "纯文生 400：请确认模型在渠道列表中、时长 5–10 秒、分辨率 720p；套餐需开通该视频模型"
             : "",
         vagueUpstream ? "中转只返回笼统 400 时，可在其控制台用同一 Key 测最小 body：{model,prompt,duration:8}" : "",
     ].filter(Boolean);
     return tips.join("。");
+}
+
+/**
+ * 多图 payload 是否携带全部参考图（用于单测，避免再引入「只发首图」回退）。
+ * 单图 payload 或无图 payload 返回 true。
+ */
+export function payloadKeepsAllGrokVideoReferences(payload: Record<string, unknown>, expectedCount: number) {
+    if (expectedCount <= 1) return true;
+    const arrays = [payload.reference_images, payload.images, payload.image_urls, payload.image].filter(Array.isArray) as unknown[][];
+    if (!arrays.length) return false;
+    return arrays.every((items) => items.length === expectedCount);
 }
 
 async function resolveReferenceDataUrl(image: ReferenceImage) {

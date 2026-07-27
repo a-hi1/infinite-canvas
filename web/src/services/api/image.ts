@@ -1062,15 +1062,13 @@ function isPreferredGrokEditModelName(name: string) {
     return n.includes("edit") && n.includes("image") && !n.includes("video");
 }
 
-function channelLooksLikeGrokImage(config: AiConfig, channel: ModelChannel, selectedName: string) {
+function channelLooksLikeGrokImage(selectedName: string) {
     const lower = selectedName.toLowerCase();
-    if (getImageCompatStrategy(channel.baseUrl, channel.compatProfile).profile === "grok-image") return true;
-    if (isLanAiBaseUrl(channel.baseUrl)) return true;
-    if (lower.includes("grok") && (lower.includes("imagine") || lower.includes("image"))) return true;
-    return (channel.models || []).some((m) => {
-        const n = modelOptionName(m).toLowerCase();
-        return n.includes("grok") && (n.includes("edit") || n.includes("imagine-image") || n.includes("image-quality") || (n.includes("image") && !n.includes("video")));
-    });
+    if (lower.includes("video")) return false;
+    return (
+        (lower.includes("grok") && (lower.includes("imagine") || lower.includes("image"))) ||
+        lower.includes("imagine-image")
+    );
 }
 
 /** 同渠道内图生图模型候选：*edit* 永远排最前。 */
@@ -1091,12 +1089,22 @@ export function listGrokImageEditModelCandidates(config: AiConfig, selectedModel
     for (const m of rawModels) {
         if (isPreferredGrokEditModelName(m)) push(m);
     }
-    // 2) 首选名表（含 edit 硬编码，列表未拉取时也试）
+    const hasListedEdit = out.some((m) => isPreferredGrokEditModelName(m));
+    const grokImageChannel = channelLooksLikeGrokImage(fromName);
+    // 2) 首选名表：列表命中优先；列表无 *edit* 但当前是 Grok 图模时仍注入 edit 名，
+    //    保证画布/工作台「编辑已有图」会自动走 grok-imagine-image-edit（失败再回落到 quality）。
     for (const p of GROK_IMAGE_EDIT_PREFERRED) {
         const hit = knownLower.get(p) || rawModels.find((m) => m.toLowerCase().includes(p));
-        if (hit) push(hit);
-        else if (!rawModels.length && (p.includes("edit") || isLanAiBaseUrl(channel.baseUrl) || getImageCompatStrategy(channel.baseUrl, channel.compatProfile).profile === "grok-image")) {
-            // 仅未拉取模型列表时猜通用 edit 名；有清单时不制造 model_not_found 重试。
+        if (hit) {
+            push(hit);
+            continue;
+        }
+        if (!p.includes("edit") && !p.includes("image")) continue;
+        if (!rawModels.length && grokImageChannel) {
+            push(p);
+            continue;
+        }
+        if (!hasListedEdit && grokImageChannel && p.includes("edit")) {
             push(p);
         }
     }
@@ -1119,7 +1127,7 @@ export function resolveImageModelForReferences(config: AiConfig, selectedModelVa
     const fromName = modelOptionName(selected);
     const fromLower = fromName.toLowerCase();
 
-    if (!channelLooksLikeGrokImage(config, channel, fromName)) {
+    if (!channelLooksLikeGrokImage(fromName)) {
         return { modelValue: selected, switched: false, from: fromName, to: fromName };
     }
 
@@ -1259,7 +1267,14 @@ async function requestGrokJsonImageEdit(
     const selectedModel = config.model || config.imageModel;
     const selectedChannel = resolveModelChannel(config, selectedModel);
     const modelCandidates = listGrokImageEditModelCandidates(config, selectedModel, selectedChannel);
-    const models = modelCandidates.length ? modelCandidates : [requestConfig.model];
+    const models: string[] = [];
+    const pushModel = (model: string) => {
+        const name = modelOptionName(model).trim();
+        if (name && !models.some((item) => item.toLowerCase() === name.toLowerCase())) models.push(name);
+    };
+    // requestConfig.model 是 requestEdit 已解析并保持渠道归属的最终模型，必须成为首个真实 POST。
+    pushModel(requestConfig.model);
+    modelCandidates.forEach(pushModel);
 
     const candidates: Record<string, unknown>[] = [];
     const push = (body: Record<string, unknown>) => {

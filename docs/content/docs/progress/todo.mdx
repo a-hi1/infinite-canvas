@@ -9,7 +9,7 @@ description: 当前项目后续值得处理的事项
 
 - 本地 Agent 接入后续：按[本地 Agent 接入规划](/docs/progress/local-agent-integration-plan)把 Claude Code CLI Adapter 升级为 Claude Agent SDK Adapter，并完善工具队列体验。
 - AI 接口安全代理后续：已增加首版 `ai-proxy` 服务和前端代理渠道入口，后续继续完善多用户鉴权、额度控制、分渠道上游配置和更细粒度的接口白名单体验；公开多人使用前仍需补充更完整的用户体系。
-- **当前主线（S0 已出门，收费仍后置）：** 本地 BYOK + 云双轨/画布素材同步已验收 + **个人自用体验优化** + 上游按矩阵小切片。S1 图生图边界已合入 `main`；视频多参考图/ai-proxy 白名单/Vitest lock 等微修**暂缓**。完整矩阵见 [上游跟进矩阵](/docs/progress/upstream-follow)。运维见 [日常运维自检](/docs/progress/ops-daily)。
+- **当前主线（S0 已出门，收费仍后置）：** 本地 BYOK + 云双轨/画布素材同步已验收 + **个人自用体验优化** + 上游按矩阵小切片。S1 图生图边界已合入 `main`；**视频多参考图首图静默退化已修**；ai-proxy 白名单/Vitest lock 等微修仍可暂缓。完整矩阵见 [上游跟进矩阵](/docs/progress/upstream-follow)。运维见 [日常运维自检](/docs/progress/ops-daily)。
 - 云端账号 P0.5c / S0：**已出门** — [P0.5c 验稳收口](/docs/progress/p05c-acceptance) 与 [S0 人工验收清单](/docs/progress/s0-human-checklist) A/B/C/D 均已勾选；自动 `check-cloud-stack` + `smoke-dual-track` 硬失败 0。账号积分余额展示已打开；平台代生成仍默认关。**支付/插件大改仍勿抢跑。**
 - 云端账号 P1：底座 A～G 代码已在（网关+账本默认关）。**画布扣积分 / 平台扣积分 / 支付均后置**（需明确要收费再开）。
 - 云端账号 P2：**P2.0-A/B/C 代码已完成且 S0 已点验**（projects/blobs/assets + tombstone）；**未做：** Postgres、S3、素材跨用户分享、完整可调宽画布侧栏。

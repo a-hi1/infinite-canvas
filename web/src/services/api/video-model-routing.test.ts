@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveVideoModelForReferences } from "@/services/api/video";
+import { buildGrokPayloadCandidates, payloadKeepsAllGrokVideoReferences, resolveVideoModelForReferences } from "@/services/api/video";
 import { defaultConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 
 function withChannels(channels: ModelChannel[], videoModel: string): AiConfig {
@@ -82,5 +82,74 @@ describe("Grok video model routing", () => {
 
         expect(resolved.switched).toBe(false);
         expect(resolved.modelValue).toBe("relay::grok-imagine-image-quality");
+    });
+
+    it("builds only full multi-reference candidates and covers fallback models fairly", async () => {
+        const channel: ModelChannel = {
+            id: "home",
+            name: "Home Grok",
+            baseUrl: "/lan-ai",
+            apiKey: "test-only",
+            apiFormat: "openai",
+            compatProfile: "auto",
+            models: ["grok-imagine-video-1.5", "grok-imagine-video"],
+        };
+        const config = withChannels([channel], "home::grok-imagine-video");
+        const references = ["a", "b", "c"].map((id) => ({
+            id,
+            name: `${id}.png`,
+            type: "image/png",
+            dataUrl: `https://example.com/${id}.png`,
+        }));
+
+        const candidates = await buildGrokPayloadCandidates(config, config.videoModel, "prompt", references);
+
+        expect(candidates.length).toBeLessThanOrEqual(18);
+        expect(candidates.every((payload) => payloadKeepsAllGrokVideoReferences(payload, references.length))).toBe(true);
+        expect(new Set(candidates.map((payload) => payload.model))).toEqual(new Set(["grok-imagine-video-1.5", "grok-imagine-video"]));
+        for (const model of ["grok-imagine-video-1.5", "grok-imagine-video"]) {
+            const modelPayloads = candidates.filter((payload) => payload.model === model);
+            expect(modelPayloads.some((payload) => Array.isArray(payload.reference_images))).toBe(true);
+            expect(modelPayloads.some((payload) => Array.isArray(payload.images))).toBe(true);
+            expect(modelPayloads.some((payload) => Array.isArray(payload.image_urls))).toBe(true);
+        }
+    });
+
+    it("rejects more than seven references instead of truncating them", async () => {
+        const channel: ModelChannel = {
+            id: "home",
+            name: "Home Grok",
+            baseUrl: "/lan-ai",
+            apiKey: "test-only",
+            apiFormat: "openai",
+            compatProfile: "auto",
+            models: ["grok-imagine-video"],
+        };
+        const config = withChannels([channel], "home::grok-imagine-video");
+        const references = Array.from({ length: 8 }, (_, index) => ({
+            id: String(index),
+            name: `${index}.png`,
+            type: "image/png",
+            dataUrl: `https://example.com/${index}.png`,
+        }));
+
+        await expect(buildGrokPayloadCandidates(config, config.videoModel, "prompt", references)).rejects.toThrow("最多支持 7 张");
+    });
+
+    it("rejects multi-ref payloads that only keep the first image", () => {
+        expect(payloadKeepsAllGrokVideoReferences({ model: "g", prompt: "p", image: { url: "a" }, duration: 8 }, 2)).toBe(false);
+        expect(
+            payloadKeepsAllGrokVideoReferences(
+                {
+                    model: "g",
+                    prompt: "p",
+                    reference_images: [{ url: "a" }, { url: "b" }],
+                    duration: 8,
+                },
+                2,
+            ),
+        ).toBe(true);
+        expect(payloadKeepsAllGrokVideoReferences({ model: "g", prompt: "p", images: ["a", "b"], duration: 8 }, 2)).toBe(true);
+        expect(payloadKeepsAllGrokVideoReferences({ model: "g", prompt: "p", image_urls: ["a"], duration: 8 }, 2)).toBe(false);
     });
 });

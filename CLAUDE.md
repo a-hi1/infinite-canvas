@@ -43,7 +43,7 @@
 
 **浏览器代理 ≠ Docker 出网**：系统/Clash 美国代理只影响浏览器。视频上云若走 `/ai-proxy/media` 或 `api` 的 `from-url`，是容器去拉 `vidgen.x.ai`；容器访问超时时会 502。本机可在根目录 `.env` 设置 `HTTP_PROXY`/`HTTPS_PROXY=http://host.docker.internal:代理端口` 后重建 `api` 与 `ai-proxy`。服务器不要默认照搬本机 789x 代理。
 
-**当前主线（S0/P0.5c 已出门，收费仍后置）：** 本地 BYOK + 云历史双轨与画布/素材同步已人工验收（见 `docs/.../s0-human-checklist.mdx`、`p05c-acceptance.mdx`）+ **个人自用体验优化** + 上游按矩阵切片。S1 图生图边界已合 `main`；视频多参考图/ai-proxy 白名单/Vitest lock 等微修暂缓。平台扣积分/支付/画布扣积分**后置**。
+**当前主线（S0/P0.5c 已出门，收费仍后置）：** 本地 BYOK + 云历史双轨与画布/素材同步已人工验收（见 `docs/.../s0-human-checklist.mdx`、`p05c-acceptance.mdx`）+ **个人自用体验优化** + 上游按矩阵切片。S1 图生图边界已合 `main`；视频多参考图首图静默退化已修；ai-proxy 白名单/Vitest lock 等微修暂缓。平台扣积分/支付/画布扣积分**后置**。
 
 **P2.0-A / P2.0-B / P2.0-C：** `GET/PUT/DELETE /api/projects` + `POST /api/blobs` / `GET /api/blobs/by-key/:clientKey` + `GET/PUT /api/assets`（用户级素材 manifest + tombstones）。项目 JSON、画布媒体、素材清单本地优先同步；推送先媒体后清单/JSON；拉取补齐缺失 blob。云失败不丢本地。Postgres / S3 仍未做。
 
