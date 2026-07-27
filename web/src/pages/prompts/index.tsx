@@ -7,6 +7,7 @@ import { PromptCard } from "@/components/prompts/prompt-card";
 import { usePromptList, type PromptLibraryScope } from "@/components/prompts/use-prompt-list";
 import { PromptDetailDialog } from "./components/prompt-detail-dialog";
 import { useCopyText } from "@/hooks/use-copy-text";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { generatePromptCover } from "@/lib/prompt-cover-generate";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
 import { cn } from "@/lib/utils";
@@ -35,6 +36,8 @@ export default function PromptsPage() {
     const navigate = useNavigate();
     const [form] = Form.useForm<MyPromptForm>();
     const [titleKeyword, setTitleKeyword] = useState("");
+    // 输入即时回显，查询用防抖值，避免每键一次远端/本地过滤
+    const debouncedKeyword = useDebouncedValue(titleKeyword, 280);
     const [selectedTags, setSelectedTags] = useState<string[]>([]);
     const [selectedCategory, setSelectedCategory] = useState(ALL_PROMPTS_OPTION);
     const [qualityMode, setQualityMode] = useState<PromptQualityMode>("featured");
@@ -71,7 +74,7 @@ export default function PromptsPage() {
         refresh,
         noteCoverBroken,
     } = usePromptList({
-        keyword: titleKeyword,
+        keyword: debouncedKeyword,
         tags: selectedTags,
         category: selectedCategory,
         qualityMode,

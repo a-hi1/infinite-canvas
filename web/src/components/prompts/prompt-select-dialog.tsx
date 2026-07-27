@@ -14,6 +14,7 @@ import {
     type Prompt,
     type PromptQualityMode,
 } from "@/services/api/prompts";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
 import { cn } from "@/lib/utils";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -39,6 +40,8 @@ export function PromptSelectDialog({
     const textModel = effectiveConfig.textModel || effectiveConfig.model;
 
     const [keyword, setKeyword] = useState("");
+    // 弹窗搜索同样防抖，避免画布/工作台打开库时每键触发查询
+    const debouncedKeyword = useDebouncedValue(keyword, 280);
     const [selectedTags, setSelectedTags] = useState<string[]>([]);
     const [selectedCategory, setSelectedCategory] = useState(ALL_PROMPTS_OPTION);
     const [qualityMode, setQualityMode] = useState<PromptQualityMode>("featured");
@@ -65,7 +68,7 @@ export function PromptSelectDialog({
         refresh,
         noteCoverBroken,
     } = usePromptList({
-        keyword,
+        keyword: debouncedKeyword,
         tags: selectedTags,
         category: selectedCategory,
         qualityMode,

@@ -293,47 +293,49 @@ export const CanvasNode = React.memo(function CanvasNode({
             }}
             onContextMenu={(event) => onContextMenu(event, data.id)}
         >
-            {/* 名称放在节点正上方外侧，短标签样式，不盖住画面内容 */}
-            <div className="pointer-events-auto absolute left-1/2 top-0 z-[90] max-w-[min(220px,90%)] -translate-x-1/2 -translate-y-[calc(100%+6px)]" data-canvas-no-zoom>
-                {isEditingTitle ? (
-                    <input
-                        ref={titleInputRef}
-                        value={titleDraft}
-                        className="h-7 w-full min-w-[96px] rounded-md border px-2 text-center text-[11px] font-medium outline-none"
-                        style={{ background: theme.toolbar.panel, borderColor: selectionBlue, color: theme.node.text }}
-                        onChange={(event) => setTitleDraft(event.target.value)}
-                        onBlur={commitTitle}
-                        onKeyDown={(event) => {
-                            event.stopPropagation();
-                            if (event.key === "Enter") {
-                                event.preventDefault();
-                                commitTitle();
-                            }
-                            if (event.key === "Escape") {
-                                event.preventDefault();
-                                setTitleDraft(data.title || "");
-                                setIsEditingTitle(false);
-                            }
-                        }}
-                        onMouseDown={(event) => event.stopPropagation()}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => event.stopPropagation()}
-                    />
-                ) : (
-                    <button
-                        type="button"
-                        className={`mx-auto flex h-7 max-w-full items-center truncate rounded-md px-2 text-[11px] font-medium transition ${isSelected || hovered ? "opacity-100" : "opacity-70"}`}
-                        style={{ background: "transparent", color: theme.node.muted }}
-                        title={`${data.title || "未命名节点"}（单击改名）`}
-                        onClick={beginEditTitle}
-                        onMouseDown={(event) => event.stopPropagation()}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onDoubleClick={beginEditTitle}
-                    >
-                        {displayNodeTitle(data.title, data.type, data.metadata?.prompt)}
-                    </button>
-                )}
-            </div>
+            {/* 名称默认隐藏，仅选中 / 悬停 / 改名时显示，减少画面噪声（对齐上游 v0.9 体验） */}
+            {(isSelected || hovered || isEditingTitle) && (
+                <div className="pointer-events-auto absolute left-1/2 top-0 z-[90] max-w-[min(220px,90%)] -translate-x-1/2 -translate-y-[calc(100%+6px)]" data-canvas-no-zoom>
+                    {isEditingTitle ? (
+                        <input
+                            ref={titleInputRef}
+                            value={titleDraft}
+                            className="h-7 w-full min-w-[96px] rounded-md border px-2 text-center text-[11px] font-medium outline-none"
+                            style={{ background: theme.toolbar.panel, borderColor: selectionBlue, color: theme.node.text }}
+                            onChange={(event) => setTitleDraft(event.target.value)}
+                            onBlur={commitTitle}
+                            onKeyDown={(event) => {
+                                event.stopPropagation();
+                                if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    commitTitle();
+                                }
+                                if (event.key === "Escape") {
+                                    event.preventDefault();
+                                    setTitleDraft(data.title || "");
+                                    setIsEditingTitle(false);
+                                }
+                            }}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => event.stopPropagation()}
+                        />
+                    ) : (
+                        <button
+                            type="button"
+                            className="mx-auto flex h-7 max-w-full items-center truncate rounded-md px-2 text-[11px] font-medium opacity-100 transition"
+                            style={{ background: "transparent", color: theme.node.muted }}
+                            title={`${data.title || "未命名节点"}（单击改名）`}
+                            onClick={beginEditTitle}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onDoubleClick={beginEditTitle}
+                        >
+                            {displayNodeTitle(data.title, data.type, data.metadata?.prompt)}
+                        </button>
+                    )}
+                </div>
+            )}
             <div
                 className="relative h-full w-full overflow-visible rounded-3xl border-2"
                 style={{
