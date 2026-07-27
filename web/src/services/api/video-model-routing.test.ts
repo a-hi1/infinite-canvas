@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildGrokPayloadCandidates, payloadKeepsAllGrokVideoReferences, resolveVideoModelForReferences } from "@/services/api/video";
+import { buildGrokPayloadCandidates, grokCreatePathCandidates, payloadKeepsAllGrokVideoReferences, resolveVideoModelForReferences } from "@/services/api/video";
 import { defaultConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 
 function withChannels(channels: ModelChannel[], videoModel: string): AiConfig {
@@ -151,5 +151,71 @@ describe("Grok video model routing", () => {
         ).toBe(true);
         expect(payloadKeepsAllGrokVideoReferences({ model: "g", prompt: "p", images: ["a", "b"], duration: 8 }, 2)).toBe(true);
         expect(payloadKeepsAllGrokVideoReferences({ model: "g", prompt: "p", image_urls: ["a"], duration: 8 }, 2)).toBe(false);
+    });
+
+    it("prefers OpenAI /videos path for generic New API hosts and generations for xAI/codex2api", () => {
+        const newApi = withChannels(
+            [
+                {
+                    id: "home",
+                    name: "Home NewAPI",
+                    baseUrl: "http://192.168.6.78:3000/v1",
+                    apiKey: "test-only",
+                    apiFormat: "openai",
+                    compatProfile: "auto",
+                    models: ["grok-imagine-video"],
+                },
+            ],
+            "home::grok-imagine-video",
+        );
+        // New API + Grok：优先 /video/generations，避免 OpenAI /videos 触发 invalid api platform:48
+        expect(grokCreatePathCandidates(newApi, 0, "home::grok-imagine-video")[0]).toBe("/video/generations");
+        expect(grokCreatePathCandidates(newApi, 2, "home::grok-imagine-video")).toEqual(
+            expect.arrayContaining(["/video/generations", "/videos/generations", "/videos"]),
+        );
+        expect(grokCreatePathCandidates(newApi, 2, "home::grok-imagine-video")).not.toContain("/videos/edits");
+
+        const codex = withChannels(
+            [
+                {
+                    id: "relay",
+                    name: "codex2api",
+                    baseUrl: "https://www.codex2api.com/v1",
+                    apiKey: "test-only",
+                    apiFormat: "openai",
+                    compatProfile: "auto",
+                    models: ["grok-imagine-video"],
+                },
+            ],
+            "relay::grok-imagine-video",
+        );
+        expect(grokCreatePathCandidates(codex, 0, "relay::grok-imagine-video")[0]).toBe("/videos/generations");
+        expect(grokCreatePathCandidates(codex, 0, "relay::grok-imagine-video")).not.toContain("/videos");
+        // 多图参考仍是 generation，禁止 edits / 不存在的 /videos
+        expect(grokCreatePathCandidates(codex, 2, "relay::grok-imagine-video")).toEqual(["/videos/generations"]);
+        expect(grokCreatePathCandidates(codex, 2, "relay::grok-imagine-video")).not.toContain("/videos/edits");
+        expect(grokCreatePathCandidates(codex, 2, "relay::grok-imagine-video")).not.toContain("/videos");
+    });
+
+    it("includes OpenAI-compatible seconds/size fields for pure-text Grok candidates", async () => {
+        const channel: ModelChannel = {
+            id: "home",
+            name: "Home NewAPI",
+            baseUrl: "http://192.168.6.78:3000/v1",
+            apiKey: "test-only",
+            apiFormat: "openai",
+            compatProfile: "auto",
+            models: ["grok-imagine-video"],
+        };
+        const config = {
+            ...withChannels([channel], "home::grok-imagine-video"),
+            videoSeconds: "8",
+            size: "16:9",
+            vquality: "720p",
+        };
+        const candidates = await buildGrokPayloadCandidates(config, config.videoModel, "吃饭", []);
+        expect(candidates.some((payload) => payload.duration === 8)).toBe(true);
+        expect(candidates.some((payload) => payload.seconds === "8" || payload.seconds === 8)).toBe(true);
+        expect(candidates.some((payload) => payload.size === "1280x720")).toBe(true);
     });
 });

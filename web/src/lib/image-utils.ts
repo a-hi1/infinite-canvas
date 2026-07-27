@@ -67,33 +67,47 @@ export function dataUrlToFile(image: ReferenceImage) {
 }
 
 /** 压缩 data URI，避免 Grok / 中转站因 base64 过大直接 400。 */
-export async function compressImageDataUrl(dataUrl: string, maxEdge = 1280, quality = 0.82) {
+/**
+ * 压缩 data URI 图片。
+ * maxBytes 为压缩后目标上限（默认 1.5MB）；多参考图视频会传更小预算，避免中转 400。
+ */
+export async function compressImageDataUrl(dataUrl: string, maxEdge = 1280, quality = 0.82, maxBytes = 1.5 * 1024 * 1024) {
     if (!dataUrl.startsWith("data:image/")) return dataUrl;
-    if (getDataUrlByteSize(dataUrl) <= 1.2 * 1024 * 1024 && !needsImageResize(dataUrl, maxEdge)) return dataUrl;
+    const targetBytes = Math.max(32 * 1024, maxBytes);
+    const currentSize = getDataUrlByteSize(dataUrl);
+    // 已足够小且边长预算宽松时跳过；maxEdge 较小时仍走压缩以保证尺寸。
+    if (currentSize > 0 && currentSize <= Math.min(targetBytes, 1.2 * 1024 * 1024) && currentSize <= 800 * 1024 && maxEdge >= 2048) {
+        return dataUrl;
+    }
 
     const image = await loadHtmlImage(dataUrl);
-    const scale = Math.min(1, maxEdge / Math.max(image.naturalWidth || maxEdge, image.naturalHeight || maxEdge));
-    const width = Math.max(1, Math.round((image.naturalWidth || maxEdge) * scale));
-    const height = Math.max(1, Math.round((image.naturalHeight || maxEdge) * scale));
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext("2d");
-    if (!context) return dataUrl;
-    context.drawImage(image, 0, 0, width, height);
-
+    let edge = Math.max(256, maxEdge);
     let nextQuality = quality;
-    let compressed = canvas.toDataURL("image/jpeg", nextQuality);
-    while (getDataUrlByteSize(compressed) > 1.5 * 1024 * 1024 && nextQuality > 0.5) {
-        nextQuality -= 0.1;
+    let compressed = dataUrl;
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+        const scale = Math.min(1, edge / Math.max(image.naturalWidth || edge, image.naturalHeight || edge));
+        const width = Math.max(1, Math.round((image.naturalWidth || edge) * scale));
+        const height = Math.max(1, Math.round((image.naturalHeight || edge) * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d");
+        if (!context) return dataUrl;
+        context.drawImage(image, 0, 0, width, height);
+
+        nextQuality = quality;
         compressed = canvas.toDataURL("image/jpeg", nextQuality);
+        while (getDataUrlByteSize(compressed) > targetBytes && nextQuality > 0.4) {
+            nextQuality = Math.max(0.4, nextQuality - 0.08);
+            compressed = canvas.toDataURL("image/jpeg", nextQuality);
+        }
+        if (getDataUrlByteSize(compressed) <= targetBytes) return compressed;
+        // 仍超预算：继续缩小边长
+        edge = Math.max(256, Math.floor(edge * 0.75));
+        quality = Math.max(0.4, quality - 0.05);
     }
     return compressed;
-}
-
-function needsImageResize(dataUrl: string, maxEdge: number) {
-    // 快速路径：没有尺寸信息时也允许压缩函数走完整逻辑。
-    return getDataUrlByteSize(dataUrl) > 800 * 1024 || maxEdge < 4096;
 }
 
 function loadHtmlImage(src: string) {

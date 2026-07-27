@@ -5,7 +5,7 @@ import { compressImageDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { AGNES_VIDEO_HEIGHT, AGNES_VIDEO_WIDTH, agnesFrameCount, agnesVideoRequestError, isAgnesBaseUrl, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
-import { isCodex2apiBaseUrl, isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
+import { isCodex2apiBaseUrl, isGrokVideoConfig, isXaiBaseUrl, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
 import { boolConfig, buildSeedancePromptText, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import { runModelPlugin } from "@/services/api/model-plugin";
 import { AI_PROXY_BASE_URL, buildApiUrl, encodeChannelModel, isAiProxyBaseUrl, isLanAiBaseUrl, isSameOriginRelayBaseUrl, LAN_AI_BASE_URL, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
@@ -383,45 +383,93 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
 
 async function createGrokTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     const payloads = await buildGrokPayloadCandidates(config, model, prompt, references);
+    const paths = grokCreatePathCandidates(config, references.length, model);
     let lastError: unknown;
     let attemptCount = 0;
-    for (const payload of payloads) {
-        try {
-            // 中转站图生视频可能较慢，创建超时放宽，尽量等同步结果
-            attemptCount += 1;
-            const created = unwrapGrokVideoResponse(
-                (
-                    await axios.post<ApiGrokVideoResponse>(grokCreateApiUrl(config), payload, {
-                        headers: aiHeaders(config, "application/json"),
-                        timeout: 180000,
-                        signal: options?.signal,
-                    })
-                ).data,
-            );
-            const id = created.request_id || created.id || "grok-inline";
-            const ready = extractGrokReadyResult(created);
-            if (ready) {
-                return {
-                    id,
-                    provider: "grok",
-                    model,
-                    requestModel: String(payload.model || modelOptionName(model)),
-                    readyResult: await videoResultFromUrl(ready, options, config),
-                };
+    let lastCreateUrl = "";
+
+    for (const path of paths) {
+        const createUrl = aiApiUrl(config, path);
+        lastCreateUrl = createUrl;
+        let pathMissingHits = 0;
+        let platformMismatchHits = 0;
+
+        for (const payload of payloads) {
+            try {
+                // 中转站图生视频可能较慢，创建超时放宽，尽量等同步结果
+                attemptCount += 1;
+                const created = unwrapGrokVideoResponse(
+                    (
+                        await axios.post<ApiGrokVideoResponse>(createUrl, payload, {
+                            headers: aiHeaders(config, "application/json"),
+                            timeout: 180000,
+                            signal: options?.signal,
+                        })
+                    ).data,
+                );
+                rememberGrokCreatePath(config, path, references.length);
+                const id = created.request_id || created.id || "grok-inline";
+                const ready = extractGrokReadyResult(created);
+                if (ready) {
+                    return {
+                        id,
+                        provider: "grok",
+                        model,
+                        requestModel: String(payload.model || modelOptionName(model)),
+                        readyResult: await videoResultFromUrl(ready, options, config),
+                    };
+                }
+                if (!created.request_id && !created.id) throw new Error("Grok 视频接口没有返回 request_id");
+                // 新任务清掉该 host 的“不支持查询”缓存，避免上次 404 影响本次
+                grokPollHostState.delete(hostKeyOf(config));
+                grokPollMissCount.delete(pollMissKey(config, id));
+                return { id, provider: "grok", model, requestModel: String(payload.model || modelOptionName(model)) };
+            } catch (error) {
+                lastError = error;
+                if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+                // New API：渠道类型/平台不匹配（invalid api platform: 48）——换 body 无意义，立刻换路径
+                if (isNewApiPlatformMismatchError(error)) {
+                    platformMismatchHits += 1;
+                    break;
+                }
+                // 多图大 body 在 codex2api 上偶发 “404 page not found”，不能把第一次 404 当成路径不存在而清空后续候选
+                if (isGrokCreatePathMissingError(error, { hasImages: references.length > 0, payload })) {
+                    pathMissingHits += 1;
+                    // 纯文生：路径真不存在时立刻换路径；多图：连续两次路径型 404 再换
+                    if (references.length === 0 || pathMissingHits >= 2) break;
+                    continue;
+                }
+                // 只在字段/模型兼容候选之间切换；鉴权/限流等直接结束。
+                if (!isRetryableGrokPayloadError(error)) {
+                    throw new Error(formatGrokCreateError(lastError, references, attemptCount, createUrl));
+                }
             }
-            if (!created.request_id && !created.id) throw new Error("Grok 视频接口没有返回 request_id");
-            // 新任务清掉该 host 的“不支持查询”缓存，避免上次 404 影响本次
-            grokPollHostState.delete(hostKeyOf(config));
-            grokPollMissCount.delete(pollMissKey(config, id));
-            return { id, provider: "grok", model, requestModel: String(payload.model || modelOptionName(model)) };
-        } catch (error) {
-            lastError = error;
-            // 只在字段兼容候选之间切换；鉴权/限流等直接结束。
-            if (!isRetryableGrokPayloadError(error)) break;
+        }
+
+        // 平台不匹配：继续下一条路径（如 /videos → /video/generations），不要刷 30 次 body
+        if (platformMismatchHits > 0) continue;
+
+        if (pathMissingHits === 0 && lastError && !isRetryableGrokPayloadError(lastError) && !isGrokCreatePathMissingError(lastError, { hasImages: references.length > 0 })) {
+            break;
         }
     }
 
-    throw new Error(formatGrokCreateError(lastError, references, attemptCount));
+    // 仅 New API / 非 codex2api 才回退 multipart OpenAI /videos（codex2api 上 /videos 不存在）
+    // 若已明确是 platform mismatch，multipart 同一路径通常仍 48，仍可试一次 /video/generations 失败后的 OpenAI 路径
+    if (shouldTryOpenAiCompatibleGrokFallback(config, lastError, references) && !isNewApiPlatformMismatchError(lastError)) {
+        try {
+            attemptCount += 1;
+            lastCreateUrl = aiApiUrl(config, "/videos");
+            const openaiTask = await createOpenAIVideoTask(config, model, prompt, references, options);
+            rememberGrokCreatePath(config, "/videos", references.length);
+            return { ...openaiTask, provider: "grok", requestModel: modelOptionName(model) };
+        } catch (error) {
+            lastError = error;
+            lastCreateUrl = aiApiUrl(config, "/videos");
+        }
+    }
+
+    throw new Error(formatGrokCreateError(lastError, references, attemptCount, lastCreateUrl));
 }
 
 // host 探测：ok=查询可用；missing=确认不支持。任务级 404 先累计，不立刻判死。
@@ -768,8 +816,85 @@ function agnesPollApiUrl(config: AiConfig, taskId: string) {
     return agnesApiUrl(config, `/agnesapi?video_id=${encodeURIComponent(taskId)}`);
 }
 
-function grokCreateApiUrl(config: AiConfig) {
-    return aiApiUrl(config, "/videos/generations");
+/** 按渠道+是否带参考图缓存已验证可用的 Grok 创建路径。 */
+const grokCreatePathState = new Map<string, string>();
+
+function grokCreatePathCacheKey(config: AiConfig, imageCount = 0) {
+    return `${hostKeyOf(config)}::${imageCount > 0 ? "img" : "txt"}`;
+}
+
+/**
+ * Grok 创建路径候选（仅 generation，不含 video edits）：
+ * - 多参考图/图生/文生都是 generation，不是 POST /videos/edits
+ * - 公网 codex2api / xAI：/videos/generations（该站 /videos 不存在）
+ * - 内网 New API：Grok 模型优先 /video/generations（OpenAI /videos 会 invalid api platform:48）
+ * - 其它中转：/videos 与 generations 都试
+ */
+export function grokCreatePathCandidates(config: AiConfig, imageCount = 0, model = "") {
+    const cacheKey = grokCreatePathCacheKey(config, imageCount);
+    const cached = grokCreatePathState.get(cacheKey);
+    const codex = isCodex2apiBaseUrl(config.baseUrl);
+    const xai = isXaiBaseUrl(config.baseUrl);
+    const modelName = modelOptionName(model || config.videoModel || config.model || "").toLowerCase();
+    const grokLike = modelName.includes("grok") || modelName.includes("imagine-video") || modelName.includes("imagine_video");
+    // 多图参考仍走 generation；edits 是「已有视频 + 提示词」能力，禁止混用
+    let ordered: string[];
+    if (codex || xai) {
+        ordered = ["/videos/generations"];
+    } else if (grokLike) {
+        // New API 实测：/videos 存在但 Grok 渠道类型常报 platform 48；/video/generations 存在；/videos/generations 不存在
+        ordered = ["/video/generations", "/videos/generations", "/videos"];
+    } else {
+        ordered = ["/videos", "/video/generations", "/videos/generations"];
+    }
+    if (!cached || !ordered.includes(cached)) return ordered;
+    return [cached, ...ordered.filter((path) => path !== cached)];
+}
+
+/** New API：模型绑定的渠道类型与当前 API 路径不匹配（如 Grok 打到 OpenAI Videos）。 */
+function isNewApiPlatformMismatchError(error: unknown) {
+    if (!axios.isAxiosError(error) && !(error instanceof Error)) {
+        return /invalid api platform/i.test(String(error || ""));
+    }
+    const data = axios.isAxiosError(error) ? (error.response?.data as { error?: { message?: string; code?: string }; msg?: string; message?: string } | string | undefined) : undefined;
+    const raw = typeof data === "string" ? data : `${data?.error?.message || ""} ${data?.error?.code || ""} ${data?.msg || ""} ${data?.message || ""} ${axios.isAxiosError(error) ? error.message : (error as Error).message || ""}`;
+    return /invalid api platform/i.test(raw);
+}
+
+function rememberGrokCreatePath(config: AiConfig, path: string, imageCount = 0) {
+    grokCreatePathState.set(grokCreatePathCacheKey(config, imageCount), path);
+}
+
+function grokCreateApiUrl(config: AiConfig, imageCount = 0) {
+    const path = grokCreatePathCandidates(config, imageCount)[0] || "/videos/generations";
+    return aiApiUrl(config, path);
+}
+
+/** New API 等对不存在的路由返回 404 + "Invalid URL"；codex2api 多图大 body 也可能假 404，不能一律当路径不存在。 */
+function isGrokCreatePathMissingError(error: unknown, context?: { hasImages?: boolean; payload?: Record<string, unknown> }) {
+    if (!axios.isAxiosError(error)) return false;
+    const status = error.response?.status;
+    const data = error.response?.data as { error?: { code?: string; message?: string }; msg?: string; message?: string } | string | undefined;
+    const rawText = typeof data === "string" ? data : `${data?.error?.code || ""} ${data?.error?.message || ""} ${data?.msg || ""} ${data?.message || ""} ${error.message || ""}`;
+    const blob = rawText.toLowerCase();
+    if (blob.includes("model_not_found") || blob.includes("模型不存在") || blob.includes("unknown model") || blob.includes("no such model")) {
+        return false;
+    }
+    // New API：未知路由 → Invalid URL
+    if (isInvalidUrlGrokError(error)) return true;
+    if (status !== 404 && status !== 405) return false;
+    // 多图/带图时，codex2api 对过大 payload 可能回纯文本 “404 page not found”，更像网关拒包，不是路由缺失
+    if (context?.hasImages && /page not found|not found/.test(blob) && !/invalid url/.test(blob)) {
+        return false;
+    }
+    return true;
+}
+
+function shouldTryOpenAiCompatibleGrokFallback(config: AiConfig, error: unknown, references: ReferenceImage[]) {
+    // codex2api 的 /v1/videos 不存在，回退只会浪费请求
+    if (isCodex2apiBaseUrl(config.baseUrl) || isXaiBaseUrl(config.baseUrl)) return false;
+    if (!error) return true;
+    return isGrokCreatePathMissingError(error, { hasImages: references.length > 0 }) || isInvalidUrlGrokError(error) || (axios.isAxiosError(error) && [400, 404, 405, 415, 422].includes(error.response?.status || 0));
 }
 
 export async function buildGrokPayloadCandidates(config: AiConfig, model: string, prompt: string, references: ReferenceImage[]) {
@@ -782,7 +907,7 @@ export async function buildGrokPayloadCandidates(config: AiConfig, model: string
     const resolution = normalizeGrokResolution(config.vquality);
     // codex2api 等中转对 1080p / 过大 data URI 更敏感：候选里主动降到 720p 再试
     const resolutions = Array.from(new Set([resolution, "720p", "480p"].filter(Boolean)));
-    const imageInputs = await Promise.all(references.map((image) => resolveGrokImageInput(image, config)));
+    const imageInputs = await Promise.all(references.map((image) => resolveGrokImageInput(image, config, references.length)));
     // 用当前渠道已拉取的模型列表约束候选，避免硬塞上游不存在的 grok-imagine-video-1.5
     const channel = resolveModelChannel(config, model);
     const models = grokModelCandidates(modelName, imageInputs.length, config.baseUrl, channel.models || []);
@@ -797,20 +922,27 @@ export async function buildGrokPayloadCandidates(config: AiConfig, model: string
 
     if (!imageInputs.length) {
         for (const nextModel of models) {
-            // 文生视频：中转优先「官方最小字段」，再补全 aspect/resolution，最后 seconds 兼容
+            // 文生视频：
+            // - xAI/codex2api：duration + aspect_ratio/resolution
+            // - New API / OpenAI Videos：seconds（字符串）+ size
             // 文档：https://docs.x.ai/docs/guides/video-generation
             pushUnique({ model: nextModel, prompt, duration });
+            pushUnique({ model: nextModel, prompt, seconds: String(duration) });
+            pushUnique({ model: nextModel, prompt, seconds: duration });
             for (const nextResolution of resolutions) {
                 pushUnique({ model: nextModel, prompt, duration, aspect_ratio: aspectRatio, resolution: nextResolution });
             }
             pushUnique({ model: nextModel, prompt, duration, aspect_ratio: aspectRatio });
+            // OpenAI Videos 兼容（New API 等）
+            const openAiSize = openAiVideoSizeFromGrok(aspectRatio, resolution);
+            if (openAiSize) pushUnique({ model: nextModel, prompt, seconds: String(duration), size: openAiSize });
             if (relay) {
                 pushUnique({ model: nextModel, prompt, seconds: duration, aspect_ratio: aspectRatio, resolution: "720p" });
             } else {
                 pushUnique({ model: nextModel, prompt, seconds: String(duration), aspect_ratio: aspectRatio, resolution });
             }
         }
-        return candidates.slice(0, relay ? 8 : 6);
+        return candidates.slice(0, relay ? 10 : 8);
     }
 
     // 图生视频 / 参考生视频
@@ -831,19 +963,21 @@ export async function buildGrokPayloadCandidates(config: AiConfig, model: string
             if (!relay) pushUnique({ model: nextModel, prompt, images: [image.url], duration });
         }
     } else {
-        // 多图：每个模型先生成同样顺序的兼容形态，再按形态轮询模型，避免全局上限饿死后备模型。
+        // 多图参考生视频 = multi-reference generation（POST /videos/generations），不是 video edits
+        // 只发真正的多图字段；codex2api 压小图 + 更短 duration，降低网关 404 page not found
         const labeledPrompt = buildGrokReferencePrompt(prompt, imageInputs.length);
         const urls = imageInputs.map((item) => item.url);
-        const multiDuration = Math.min(duration, 10);
+        const multiDuration = Math.min(duration, relay ? 8 : 10);
         const perModel = models.map((nextModel) => {
             const payloads: Array<Record<string, unknown>> = [];
             const push = (payload: Record<string, unknown>) => {
                 const key = JSON.stringify(payload);
                 if (!payloads.some((item) => JSON.stringify(item) === key)) payloads.push(payload);
             };
+            // 官方/中转多图：reference_images 对象数组优先
             push({ model: nextModel, prompt: labeledPrompt, reference_images: imageInputs, duration: multiDuration });
             push({ model: nextModel, prompt: labeledPrompt, reference_images: imageInputs, duration: multiDuration, aspect_ratio: aspectRatio });
-            for (const nextResolution of resolutions) {
+            for (const nextResolution of resolutions.slice(0, relay ? 1 : resolutions.length)) {
                 push({
                     model: nextModel,
                     prompt: labeledPrompt,
@@ -853,14 +987,15 @@ export async function buildGrokPayloadCandidates(config: AiConfig, model: string
                     resolution: nextResolution,
                 });
             }
+            // 扁平兼容（仍是 generation 字段，不是 edits）
             push({ model: nextModel, prompt: labeledPrompt, reference_images: urls, duration: multiDuration });
-            push({ model: nextModel, prompt: labeledPrompt, reference_images: urls, duration: multiDuration, aspect_ratio: aspectRatio });
-            // 中转兼容：关键的扁平数组形态排在扩展 image 数组之前。
             push({ model: nextModel, prompt: labeledPrompt, images: urls, duration: multiDuration });
             push({ model: nextModel, prompt: labeledPrompt, image_urls: urls, duration: multiDuration });
             push({ model: nextModel, prompt: labeledPrompt, images: imageInputs, duration: multiDuration });
-            push({ model: nextModel, prompt: labeledPrompt, image: imageInputs, duration: multiDuration });
-            push({ model: nextModel, prompt: labeledPrompt, image: urls, duration: multiDuration });
+            if (!relay) {
+                push({ model: nextModel, prompt: labeledPrompt, image: imageInputs, duration: multiDuration });
+                push({ model: nextModel, prompt: labeledPrompt, image: urls, duration: multiDuration });
+            }
             return payloads;
         });
         const maxPerModel = Math.max(0, ...perModel.map((payloads) => payloads.length));
@@ -872,7 +1007,7 @@ export async function buildGrokPayloadCandidates(config: AiConfig, model: string
         }
     }
 
-    const limit = imageInputs.length > 1 ? (relay ? 18 : 14) : relay ? 10 : 6;
+    const limit = imageInputs.length > 1 ? (relay ? 12 : 14) : relay ? 10 : 6;
     return candidates.slice(0, limit);
 }
 
@@ -918,13 +1053,9 @@ function grokModelCandidates(modelName: string, imageCount: number, baseUrl = ""
             push(resolveKnown("grok-imagine-video") || pickKnown((n) => n.includes("grok-imagine-video") && !n.includes("1.5")));
         }
     } else {
-        // 文生视频：用户选择优先，再回退列表里的基础名
+        // 文生视频：只用用户当前选择。中转 Invalid URL 时自动换 1.5 只会掩盖问题、制造误导请求。
         push(modelName);
-        push(pickKnown((n) => n.includes("grok") && n.includes("video") && !n.includes("1.5")));
-        push(resolveKnown("grok-imagine-video"));
-        // 列表完全没有时再猜官方名；1.5 仅作可选回退且须在列表中
-        if (!known.length) push("grok-imagine-video");
-        push(resolveKnown("grok-imagine-video-1.5"));
+        if (!known.length && !lower.includes("grok")) push("grok-imagine-video");
     }
 
     // 若 known 非空，过滤掉完全不在列表中的猜测名（保留用户当前选择即使列表暂未包含）
@@ -942,27 +1073,33 @@ function buildGrokReferencePrompt(prompt: string, imageCount: number) {
     return `${prompt.trim()}\n\n请结合参考图 ${labels} 保持主体与风格一致。`;
 }
 
-async function resolveGrokImageInput(image: ReferenceImage, config?: AiConfig): Promise<{ url: string }> {
-    const url = await resolveGrokReferenceImageUrl(image, config);
+async function resolveGrokImageInput(image: ReferenceImage, config?: AiConfig, imageCount = 1): Promise<{ url: string }> {
+    const url = await resolveGrokReferenceImageUrl(image, config, imageCount);
     return { url };
 }
 
-async function resolveGrokReferenceImageUrl(image: ReferenceImage, config?: AiConfig) {
-    // codex2api / 内网中转：过大 data URI 极易 400，本地图压到更小
-    const maxEdge = config && (isCodex2apiBaseUrl(config.baseUrl) || isLanAiBaseUrl(config.baseUrl)) ? 1024 : 1280;
+async function resolveGrokReferenceImageUrl(image: ReferenceImage, config?: AiConfig, imageCount = 1) {
+    // codex2api / 多图：过大 data URI 会 400，甚至网关直接 404 page not found
+    const relay = Boolean(config && (isCodex2apiBaseUrl(config.baseUrl) || isLanAiBaseUrl(config.baseUrl)));
+    const multi = imageCount > 1;
+    const maxEdge = multi ? (relay ? 768 : 960) : relay ? 1024 : 1280;
+    const quality = multi ? (relay ? 0.68 : 0.74) : relay ? 0.76 : 0.8;
+    // 多图总包体控制：单图约 70–90KB，2 张合计尽量 < 180KB
+    const maxBytes = multi ? (relay ? 72 * 1024 : 96 * 1024) : relay ? 220 * 1024 : 360 * 1024;
+
     // 1) 本地/blob 优先转压缩后的 data URI
     const binary = await resolveReferenceBinaryDataUrl(image);
-    if (binary) return compressImageDataUrl(binary, maxEdge, 0.78);
+    if (binary) return compressImageDataUrl(binary, maxEdge, quality, maxBytes);
 
     // 2) 已是 data URI
     const directUrl = (image.url || image.dataUrl || "").trim();
-    if (directUrl.startsWith("data:")) return compressImageDataUrl(directUrl, maxEdge, 0.78);
+    if (directUrl.startsWith("data:")) return compressImageDataUrl(directUrl, maxEdge, quality, maxBytes);
 
     // 3) 公网 URL 直接透传（浏览器 CORS 读不了时，交给上游服务端拉取）
     if (isPublicMediaUrl(directUrl)) return directUrl;
 
     const fallback = await imageToDataUrl(image);
-    if (fallback?.startsWith("data:")) return compressImageDataUrl(fallback, maxEdge, 0.78);
+    if (fallback?.startsWith("data:")) return compressImageDataUrl(fallback, maxEdge, quality, maxBytes);
     if (fallback && isPublicMediaUrl(fallback)) return fallback;
     throw new Error("参考图读取失败，请改用本地上传的图片（远程 imgen.x.ai 图常因 CORS 无法在浏览器读取）");
 }
@@ -982,8 +1119,18 @@ async function resolveReferenceBinaryDataUrl(image: ReferenceImage) {
     return "";
 }
 
-function formatGrokCreateError(error: unknown, references: ReferenceImage[], attemptCount: number) {
+function openAiVideoSizeFromGrok(aspectRatio: string, resolution: string) {
+    const height = resolution === "1080p" ? 1080 : resolution === "480p" ? 480 : 720;
+    if (aspectRatio === "9:16") return height >= 1080 ? "1080x1920" : height <= 480 ? "480x854" : "720x1280";
+    if (aspectRatio === "1:1") return height >= 1080 ? "1080x1080" : height <= 480 ? "480x480" : "720x720";
+    // 16:9 及默认
+    return height >= 1080 ? "1920x1080" : height <= 480 ? "854x480" : "1280x720";
+}
+
+function formatGrokCreateError(error: unknown, references: ReferenceImage[], attemptCount: number, createUrl = "") {
     const detail = readAxiosError(error, "Grok 视频任务创建失败");
+    const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+    const requestUrl = createUrl || (axios.isAxiosError(error) ? String(error.config?.url || "") : "");
     const hasRemoteOnlyReference = references.some((image) => {
         const url = (image.url || image.dataUrl || "").trim();
         return isPublicMediaUrl(url) && !image.storageKey && !url.startsWith("data:") && !url.startsWith("blob:");
@@ -992,22 +1139,46 @@ function formatGrokCreateError(error: unknown, references: ReferenceImage[], att
     const multiReference = references.length > 1;
     const vagueUpstream = /upstream returned status 400|status 400|invalid_request_error/i.test(detail);
     const modelMissing = /model_not_found|模型不存在|unknown model/i.test(detail);
+    const plain404 = /404 page not found|page not found/i.test(detail);
+    const platformMismatch = isNewApiPlatformMismatchError(error) || /invalid api platform/i.test(detail);
+    const pathMissing = ((status === 404 && !modelMissing) || isGrokCreatePathMissingError(error, { hasImages: references.length > 0 })) && !plain404 && !platformMismatch;
+    const invalidUrl = isInvalidUrlGrokError(error);
+    const newApiHint = /new_api|oneapi|x-new-api|invalid api platform/i.test(`${requestUrl} ${detail}`) || /192\.168\.\d+\.\d+:\d+/.test(requestUrl);
+    const codexHint = /codex2api/i.test(requestUrl);
     const tips = [
         detail,
-        attemptCount > 1 ? `已按多种字段/模型组合重试 ${attemptCount} 次` : "",
+        requestUrl ? `请求地址：${requestUrl}` : "",
+        attemptCount > 1 ? `已按多种创建路径/字段/模型组合重试 ${attemptCount} 次` : "",
+        platformMismatch
+            ? "New API「invalid api platform」= 模型绑定的渠道类型与请求路径不匹配（不是参考图字段问题）。本应用对 Grok 会优先 POST /v1/video/generations，并避免在 /v1/videos 上反复刷 body。请在 New API 后台把 grok-imagine-video 配到支持 xAI/Grok 视频的渠道类型，且上游能处理 multi-reference generation；公网 codex2api 渠道请用 https://www.codex2api.com/v1 + /videos/generations"
+            : "",
+        multiReference && (plain404 || status === 400 || status === 404) && !platformMismatch
+            ? "多参考图生视频是 generation：公网 codex2api 用 /v1/videos/generations；内网 New API 优先 /v1/video/generations。常见失败：① data URI 过大 ② 模型未开通 multi-reference。本应用会压小本地参考图并只发完整多图字段"
+            : "",
+        invalidUrl || pathMissing
+            ? "创建路径不被当前中转识别。双渠道约定：codex2api → /v1/videos/generations；New API Grok → /v1/video/generations（不是 /videos/edits）。Base URL 只写到主机或 /v1"
+            : "",
+        codexHint && multiReference
+            ? "当前渠道为 codex2api：多图参考只打 /v1/videos/generations，不会回退到不存在的 /v1/videos，也不会误走 /videos/edits"
+            : "",
+        newApiHint && !platformMismatch
+            ? "当前像 New API / 内网中转：Grok 优先 POST /v1/video/generations，OpenAI 视频模型才优先 /v1/videos"
+            : "",
         multiReference
-            ? `当前为 ${references.length} 张参考图：已只尝试真正的多图字段（reference_images / images / image_urls），不会静默改成只发第一张`
+            ? `当前为 ${references.length} 张参考图：已只尝试真正的多图 generation 字段（reference_images / images / image_urls），不会静默改成只发第一张，也不会改走视频编辑接口`
             : "",
         multiReference && vagueUpstream
             ? "若上游不支持多参考图，请减到 1 张本地小图，或换支持 multi-reference 的 Grok 视频模型/渠道"
             : "",
         modelMissing ? "模型名在上游不存在：请在渠道里「拉取模型」，选用列表中真实的视频模型；图生视频会自动优先用渠道内已有模型，不再硬塞 grok-imagine-video-1.5" : "",
         hasRemoteOnlyReference ? "当前参考图是远程地址（如 imgen.x.ai）。请改用本地上传的小图" : "",
-        hasLocalReference && vagueUpstream && !multiReference ? "本地参考图仍 400：请换更小 jpg/png，分辨率先选 720p；确认渠道模型列表含可用的 grok 视频模型" : "",
-        vagueUpstream && !hasLocalReference && !hasRemoteOnlyReference
+        hasLocalReference && vagueUpstream && !multiReference && !invalidUrl && !platformMismatch ? "本地参考图仍 400：请换更小 jpg/png，分辨率先选 720p；确认渠道模型列表含可用的 grok 视频模型" : "",
+        vagueUpstream && !hasLocalReference && !hasRemoteOnlyReference && !invalidUrl && !platformMismatch
             ? "纯文生 400：请确认模型在渠道列表中、时长 5–10 秒、分辨率 720p；套餐需开通该视频模型"
             : "",
-        vagueUpstream ? "中转只返回笼统 400 时，可在其控制台用同一 Key 测最小 body：{model,prompt,duration:8}" : "",
+        vagueUpstream && !invalidUrl && !platformMismatch
+            ? "中转只返回笼统 400 时：公网测 POST /v1/videos/generations；内网 New API 测 POST /v1/video/generations；多图在同一路径加 reference_images"
+            : "",
     ].filter(Boolean);
     return tips.join("。");
 }
@@ -1485,14 +1656,30 @@ function readErrorPayload(payload: unknown): string {
     }
 }
 
+function isInvalidUrlGrokError(error: unknown) {
+    if (!axios.isAxiosError(error)) return /invalid url/i.test(String((error as Error)?.message || error || ""));
+    const data = error.response?.data as { error?: { message?: string; code?: string }; msg?: string; message?: string } | undefined;
+    const blob = `${data?.error?.message || ""} ${data?.error?.code || ""} ${data?.msg || ""} ${data?.message || ""} ${error.message || ""}`;
+    return /invalid url/i.test(blob);
+}
+
 function isRetryableGrokPayloadError(error: unknown) {
     if (!axios.isAxiosError(error)) return false;
+    // 中转上游地址坏掉时，换 model/duration/字段都没用，继续重试只会刷屏并误切到 1.5
+    if (isInvalidUrlGrokError(error)) return false;
+    // New API 渠道类型不匹配：换 body/模型候选无意义，必须换路径或改后台渠道类型
+    if (isNewApiPlatformMismatchError(error)) return false;
     const status = error.response?.status;
-    if (status === 400 || status === 422) return true;
-    // 部分网关：不存在的模型名返回 404 / model_not_found，应换候选模型继续试
-    if (status === 404) return true;
+    if (status === 400 || status === 422) {
+        // 400 里若是 platform 文案，上面已拦截；其余可换字段
+        return true;
+    }
     const data = error.response?.data as { error?: { code?: string; message?: string }; msg?: string; reason?: string } | undefined;
-    const blob = `${data?.error?.code || ""} ${data?.error?.message || ""} ${data?.msg || ""} ${data?.reason || ""}`.toLowerCase();
+    const blob = `${data?.error?.code || ""} ${data?.error?.message || ""} ${data?.msg || ""} ${data?.reason || ""} ${error.message || ""}`.toLowerCase();
+    // 仅「模型不存在」类 404 值得换候选模型；路径 404 换 body 重试只会刷屏
+    if (status === 404) {
+        return blob.includes("model_not_found") || blob.includes("模型不存在") || blob.includes("unknown model") || blob.includes("no such model");
+    }
     return blob.includes("model_not_found") || blob.includes("模型不存在") || blob.includes("unknown model");
 }
 

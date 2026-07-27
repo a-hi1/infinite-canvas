@@ -56,4 +56,4 @@ export function normalizeGrokAspectRatio(value: string) {
 }
 
 export const grokVideoModeHint =
-    "Grok 视频：文生/图生均走 /videos/generations（JSON）。图生请用本地小图；模型优先用渠道「拉取模型」列表中的真实名称（不会再硬塞不存在的 1.5）。时长 1–15 秒（中转常 5–10 更稳）。分辨率建议 720p。";
+    "Grok 视频：文生/图生/多参考图都走 generation——公网 codex2api: /videos/generations；内网 New API: 优先 /video/generations（避免 OpenAI /videos 的 invalid api platform）。不走 /videos/edits。多图压小本地参考图且不静默只发第一张。时长 1–15 秒，分辨率建议 720p。";
