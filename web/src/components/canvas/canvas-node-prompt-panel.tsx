@@ -50,9 +50,11 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const optimizeMode = promptOptimizeMode(mode);
     const canOptimize = Boolean(prompt.trim()) && !optimizingPrompt && !isRunning;
 
+    // 仅切换节点时重置输入框；同一节点生成完成后 content 写回会让 isEditingExistingContent 变 true，此时保留用户刚才提交的提示词，便于微调再生成。
     useEffect(() => {
         setPrompt(isEditingExistingContent ? "" : node.metadata?.prompt || "");
-    }, [isEditingExistingContent, node.id]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only reset on node switch
+    }, [node.id]);
 
     const focusPrompt = (options?: { placeAtEnd?: boolean }) => {
         const textarea = promptTextareaRef.current;
@@ -124,7 +126,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         const text = prompt.trim();
         if (!text || isRunning || optimizingPrompt) return;
         onGenerate(node.id, mode, text);
-        setPrompt("");
+        // 不在这里清空：生成完成后仍显示原提示词，方便改词重跑（对齐上游 v0.10 体验）
     };
 
     const optimizePrompt = async () => {

@@ -43,13 +43,13 @@
 
 **浏览器代理 ≠ Docker 出网**：系统/Clash 美国代理只影响浏览器。视频上云若走 `/ai-proxy/media` 或 `api` 的 `from-url`，是容器去拉 `vidgen.x.ai`；容器访问超时时会 502。本机可在根目录 `.env` 设置 `HTTP_PROXY`/`HTTPS_PROXY=http://host.docker.internal:代理端口` 后重建 `api` 与 `ai-proxy`。服务器不要默认照搬本机 789x 代理。
 
-**当前主线（S0/P0.5c 已出门，收费仍后置）：** 本地 BYOK + 云历史双轨与画布/素材同步已人工验收（见 `docs/.../s0-human-checklist.mdx`、`p05c-acceptance.mdx`）+ **S1 真痛点微修** + 上游按矩阵切片。平台扣积分/支付/画布扣积分**后置**。
+**当前主线（S0/P0.5c 已出门，收费仍后置）：** 本地 BYOK + 云历史双轨与画布/素材同步已人工验收（见 `docs/.../s0-human-checklist.mdx`、`p05c-acceptance.mdx`）+ **个人自用体验优化** + 上游按矩阵切片。S1 图生图边界已合 `main`；视频多参考图/ai-proxy 白名单/Vitest lock 等微修暂缓。平台扣积分/支付/画布扣积分**后置**。
 
 **P2.0-A / P2.0-B / P2.0-C：** `GET/PUT/DELETE /api/projects` + `POST /api/blobs` / `GET /api/blobs/by-key/:clientKey` + `GET/PUT /api/assets`（用户级素材 manifest + tombstones）。项目 JSON、画布媒体、素材清单本地优先同步；推送先媒体后清单/JSON；拉取补齐缺失 blob。云失败不丢本地。Postgres / S3 仍未做。
 
 **P0.5c：** 已通过并出门。清单 `docs/content/docs/progress/p05c-acceptance.mdx`；自动 `scripts/check-cloud-stack.*` + `scripts/smoke-dual-track.*` 与人工 UI/服务器 B2 均已验收。本机上云占本机 `./data/api`，服务器占服务器 `./data/api`。
 
-**上游跟进：** 矩阵见 `docs/content/docs/progress/upstream-follow.mdx`（约对照 v0.9.0）。**禁止整仓 merge**；推送 `a-hi1`。已移植：透明背景（BYOK）、组节点（最小）、模型调用脚本（旁路 `modelScripts`）、**画布导出当前/选中节点**。完整 0.9 可调宽侧栏/侧栏资产 Tab **现阶段明确不做**（素材用独立素材库；若缺找节点再做最小节点列表）。当前优先 S1 渠道兼容/图生图边界微修；之后有需要再做最小节点列表，插件系统保持独立工程。`docker-compose` / `nginx` / 端口 `3001`/`3011` 禁止被上游覆盖。
+**上游跟进：** 矩阵见 `docs/content/docs/progress/upstream-follow.mdx`（对照 **v0.10.0**）。**禁止整仓 merge**；推送 `a-hi1`。已移植：透明背景（BYOK）、组节点（最小）、模型调用脚本（旁路 `modelScripts`）、**画布导出当前/选中节点**、**生成后保留节点提示词**。完整可调宽侧栏/侧栏资产 Tab **现阶段明确不做**（素材用独立素材库；若缺找节点再做最小节点列表）。当前优先自用体验小切片；插件系统保持独立工程。`docker-compose` / `nginx` / 端口 `3001`/`3011` 禁止被上游覆盖。
 
 P0.5 扫尾（运维与体验）：`GET /auth/me` 返回 `usage`（已用字节、任务数）与 `limits`（容量上限），供顶栏账号弹层展示；受保护接口 401 时前端统一清登录态（`infinite-canvas:cloud-unauthorized` 事件），避免连环报错；未登录生成成功轻提示「登录后可跨设备回看」；上云失败若为空间不足则明确提示。备份脚本：`scripts/backup-api-data.sh` / `scripts/backup-api-data.ps1`。更完整说明见 `docs/content/docs/overview/cloud-api.mdx`。公网 HTTPS 必须设 `API_COOKIE_SECURE=true` 并收紧 `API_ALLOWED_ORIGINS`（禁止 `*`）。云端错误 envelope 已开始增加稳定 `reason` 字段，后续前端判断应优先依赖 reason，而不是长期靠中文字符串。
 
