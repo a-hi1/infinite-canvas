@@ -17,12 +17,78 @@ export type ImageRequestModeDescription = {
   path: string;
   compatLabel: string;
   modelLabel: string;
+  /** 有参考图时：推荐/可用图生图模型提示（便于用户选型） */
+  modelHint?: string;
   autoSwitched?: { from: string; to: string };
   degraded?: boolean;
 };
 
 export const IMAGE_EDIT_DEGRADED_DEFAULT =
   "当前中转无法完成参考图编辑，已降级为纯文生图；参考图像素未参与生成。可换支持图生图的渠道，或在配置里调整「生图兼容预设」后再试。";
+
+/** 官方 xAI 图模（文生/图生共用）；中转可能另有 *-edit 别名。 */
+export const GROK_OFFICIAL_IMAGE_MODELS = [
+  "grok-imagine-image",
+  "grok-imagine-image-pro",
+  "grok-imagine-image-quality",
+] as const;
+
+/**
+ * 有参考图时，根据当前渠道模型列表给出「可用/推荐图生图模型」提示。
+ * 不改实际请求模型；只帮助选型。无参考图返回空串。
+ */
+export function describeImageEditModelHint(opts: {
+  config: AiConfig;
+  model: string;
+  referenceCount: number;
+  platform?: boolean;
+}): string {
+  const { config, model, referenceCount, platform } = opts;
+  if (!referenceCount || platform) return "";
+
+  const channel = resolveModelChannel(config, model || config.imageModel || "");
+  if (resolveModelScript(config, model || config.imageModel || "")) {
+    return "图生图：当前模型走自定义调用脚本，以脚本实现为准。";
+  }
+  if (channel.apiFormat === "gemini") {
+    return "图生图：Gemini 图模可带参考图（不支持蒙版）。";
+  }
+
+  const selected = modelOptionName(model || config.imageModel || "").trim();
+  const listed = (channel.models || []).map((item) => modelOptionName(item).trim()).filter(Boolean);
+  const listedLower = new Set(listed.map((item) => item.toLowerCase()));
+  const lower = selected.toLowerCase();
+  const isGrokLike =
+    (lower.includes("grok") && (lower.includes("imagine") || lower.includes("image"))) ||
+    lower.includes("imagine-image");
+  const strategy = getImageCompatStrategy(channel.baseUrl, channel.compatProfile);
+
+  if (strategy.profile === "grok-image" || isGrokLike) {
+    const officialInList = GROK_OFFICIAL_IMAGE_MODELS.filter((name) => listedLower.has(name));
+    const relayEditInList = listed.filter((name) => {
+      const n = name.toLowerCase();
+      return n.includes("edit") && n.includes("image") && !n.includes("video");
+    });
+    const preferred = (officialInList.length ? officialInList : [...GROK_OFFICIAL_IMAGE_MODELS]).slice(0, 3);
+    const parts = [
+      `图生图可用模型（官方）：${preferred.join(" / ")}`,
+      "与文生共用模型名，靠是否带参考图区分，不会自动改成 *-edit",
+    ];
+    if (relayEditInList.length) {
+      parts.push(`中转列表另有：${relayEditInList.slice(0, 3).join(" / ")}${relayEditInList.length > 3 ? " 等" : ""}（可选，非官方必需）`);
+    } else if (listed.length && !officialInList.length) {
+      parts.push("当前渠道列表未含官方名时，优先选名称含 grok-imagine-image 的图模");
+    }
+    if (selected) parts.push(`当前：${selected}`);
+    return parts.join("。") + "。";
+  }
+
+  if (strategy.editFallbackFragile) {
+    return `图生图：当前为脆弱中转路径，优先使用渠道列表中的图片模型（当前 ${selected || "未选"}）；部分 gpt-image 可能不支持参考图。`;
+  }
+
+  return `图生图：使用当前所选图片模型即可（当前 ${selected || "未选"}）；走 /images/edits，依赖上游是否支持参考图编辑。`;
+}
 
 export function describeImageRequestMode(opts: {
   config: AiConfig;
@@ -51,6 +117,7 @@ export function describeImageRequestMode(opts: {
   const compatLabel = profile === "auto"
     ? `自动（${CHANNEL_COMPAT_OPTIONS.find(o => o.value === resolvedProfile)?.label || resolvedProfile}）`
     : CHANNEL_COMPAT_OPTIONS.find(o => o.value === profile)?.label || profile;
+  const modelHint = describeImageEditModelHint({ config, model, referenceCount, platform });
 
   const script = resolveModelScript(config, model || config.imageModel || "");
   if (platform) {
@@ -61,6 +128,7 @@ export function describeImageRequestMode(opts: {
       path: "/api/generate/image",
       compatLabel,
       modelLabel: platformModelLabel || modelOptionName(model),
+      modelHint: referenceCount ? "图生图：平台模式使用服务端配置的图片模型（最多 4 张参考图）。" : undefined,
       autoSwitched,
       degraded,
     };
@@ -74,6 +142,7 @@ export function describeImageRequestMode(opts: {
       path: "自定义脚本",
       compatLabel,
       modelLabel: modelOptionName(model),
+      modelHint: modelHint || undefined,
       autoSwitched,
       degraded,
     };
@@ -88,6 +157,7 @@ export function describeImageRequestMode(opts: {
       path: "/v1/images/generations",
       compatLabel,
       modelLabel: modelOptionName(model),
+      modelHint: modelHint || undefined,
       autoSwitched,
       degraded,
     };
@@ -114,10 +184,11 @@ export function describeImageRequestMode(opts: {
     return {
       kind: "edit-grok-json",
       summary: `请求模式：Grok JSON 图生图 /images/edits · ${modelOptionName(model)} · 图生图（参考 ${referenceCount} 张） · 生成 ${generationCount} 张`,
-      tip: "参考图以 JSON data URL 提交；有参考图时可能自动切换到 *-edit 模型。",
+      tip: "参考图以 JSON data URL 提交到 /images/edits。官方 Grok 图生图模型为 grok-imagine-image（及 pro/quality），与文生共用模型名、靠是否带参考图区分；不会自动改成 *-edit。",
       path: "/images/edits",
       compatLabel,
       modelLabel: modelOptionName(model),
+      modelHint: modelHint || undefined,
       autoSwitched,
       degraded,
     };
@@ -131,6 +202,7 @@ export function describeImageRequestMode(opts: {
       path: "/images/edits → generations",
       compatLabel,
       modelLabel: modelOptionName(model),
+      modelHint: modelHint || undefined,
       autoSwitched,
       degraded,
     };
@@ -143,6 +215,7 @@ export function describeImageRequestMode(opts: {
     path: "/images/edits",
     compatLabel,
     modelLabel: modelOptionName(model),
+    modelHint: modelHint || undefined,
     autoSwitched,
     degraded,
   };
@@ -156,7 +229,7 @@ export function enhanceImageUpstreamError(upstream: string, context?: "generatio
 
   if (context === "edit") {
     if (/(application\/json|only support.*json|content-type|multipart)/i.test(lower) && /multipart|form-data|image/i.test(lower)) {
-      hints.push("该上游图生图只要 JSON body（如 Grok），不要 multipart。请把渠道「生图兼容预设」设为「Grok / Grok2API 生图」或换 grok-imagine-image-edit 模型");
+      hints.push("该上游图生图只要 JSON body（如 Grok），不要 multipart。请把渠道「生图兼容预设」设为「Grok / Grok2API 生图」，模型用 grok-imagine-image（官方）或渠道列表中的图模，不要依赖自动 *-edit");
     }
     if (/multipart|form-data/i.test(lower) && /not support|unsupported|invalid/i.test(lower)) {
       hints.push("当前渠道可能不接受 multipart 参考图。可改兼容预设、换模型，或清空参考图改文生图");

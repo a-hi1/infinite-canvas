@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
-import { describeImageRequestMode, enhanceImageUpstreamError } from "@/lib/image-request-mode";
+import { describeImageEditModelHint, describeImageRequestMode, enhanceImageUpstreamError } from "@/lib/image-request-mode";
 import { defaultConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 
@@ -39,14 +39,43 @@ describe("describeImageRequestMode", () => {
             model: config.imageModel,
             referenceCount: 3,
             generationCount: 1,
-            autoSwitched: { from: "grok-imagine-image-quality", to: "grok-imagine-image-edit" },
         });
 
         expect(mode.kind).toBe("edit-grok-json");
         expect(mode.path).toBe("/images/edits");
         expect(mode.summary).toContain("Grok JSON");
         expect(mode.compatLabel).toContain("Grok / Grok2API");
-        expect(mode.autoSwitched).toEqual({ from: "grok-imagine-image-quality", to: "grok-imagine-image-edit" });
+        expect(mode.tip).toContain("grok-imagine-image");
+        expect(mode.tip).toContain("不会自动改成");
+        expect(mode.modelHint).toContain("图生图可用模型");
+        expect(mode.modelHint).toContain("grok-imagine-image");
+        expect(mode.autoSwitched).toBeUndefined();
+    });
+
+    it("lists official Grok image models for img2img selection hints", () => {
+        const channel: ModelChannel = {
+            id: "relay",
+            name: "Relay",
+            baseUrl: "https://www.codex2api.com/v1",
+            apiKey: "test-only",
+            apiFormat: "openai",
+            compatProfile: "grok-image",
+            models: ["grok-imagine-image", "grok-imagine-image-quality", "grok-imagine-image-edit"],
+        };
+        const config = configWithChannel(channel, "grok-imagine-image-quality");
+
+        const hint = describeImageEditModelHint({
+            config,
+            model: config.imageModel,
+            referenceCount: 2,
+        });
+
+        expect(hint).toContain("grok-imagine-image");
+        expect(hint).toContain("grok-imagine-image-quality");
+        expect(hint).toContain("不会自动改成");
+        expect(hint).toContain("中转列表另有");
+        expect(hint).toContain("grok-imagine-image-edit");
+        expect(describeImageEditModelHint({ config, model: config.imageModel, referenceCount: 0 })).toBe("");
     });
 
     it("keeps standard OpenAI edits on multipart", () => {

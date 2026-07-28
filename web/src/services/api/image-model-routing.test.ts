@@ -17,7 +17,7 @@ function withChannels(channels: ModelChannel[], imageModel: string): AiConfig {
 }
 
 describe("Grok image edit model routing", () => {
-    it("uses the selected channel inventory when duplicate model names exist", () => {
+    it("keeps the selected channel model first when duplicate names exist", () => {
         const channelA: ModelChannel = {
             id: "a",
             name: "A",
@@ -40,11 +40,13 @@ describe("Grok image edit model routing", () => {
 
         const candidates = listGrokImageEditModelCandidates(config, config.imageModel);
 
-        expect(candidates[0]).toBe("grok-imagine-image-edit-b");
+        // 用户选择优先；中转 *-edit 仅列表命中时出现，且不抢首位
+        expect(candidates[0]).toBe("grok-imagine-image-quality");
+        expect(candidates).toContain("grok-imagine-image-edit-b");
         expect(candidates).not.toContain("grok-imagine-image-edit-a");
     });
 
-    it("prefers listed edit models and still injects edit names when inventory has only quality", () => {
+    it("does not inject edit names when inventory only lists quality", () => {
         const channel: ModelChannel = {
             id: "grok",
             name: "Grok",
@@ -58,12 +60,12 @@ describe("Grok image edit model routing", () => {
 
         const candidates = listGrokImageEditModelCandidates(config, config.imageModel);
 
-        // 列表没有 *edit* 时仍注入 edit 候选，保证画布「编辑已有图」会自动切 edit
-        expect(candidates[0]).toBe("grok-imagine-image-edit");
-        expect(candidates).toContain("grok-imagine-image-quality");
+        // 官方图生图与文生共用 quality/image；禁止凭空注入 *-edit
+        expect(candidates[0]).toBe("grok-imagine-image-quality");
+        expect(candidates).not.toContain("grok-imagine-image-edit");
     });
 
-    it("keeps channel qualification when auto-switching to a real edit model", () => {
+    it("never auto-switches model when references are present", () => {
         const channel: ModelChannel = {
             id: "home",
             name: "Home Grok",
@@ -77,8 +79,10 @@ describe("Grok image edit model routing", () => {
 
         const resolved = resolveImageModelForReferences(config, config.imageModel);
 
-        expect(resolved.switched).toBe(true);
-        expect(resolved.modelValue).toBe("home::grok-imagine-image-edit");
+        expect(resolved.switched).toBe(false);
+        expect(resolved.modelValue).toBe("home::grok-imagine-image-quality");
+        expect(resolved.from).toBe("grok-imagine-image-quality");
+        expect(resolved.to).toBe("grok-imagine-image-quality");
     });
 
     it("does not switch a non-Grok model just because it uses /lan-ai", () => {
@@ -102,7 +106,7 @@ describe("Grok image edit model routing", () => {
         });
     });
 
-    it("keeps an already resolved unlisted edit model first", () => {
+    it("keeps an already selected edit model first without forcing others onto it", () => {
         const channel: ModelChannel = {
             id: "home",
             name: "Home Grok",
@@ -110,30 +114,31 @@ describe("Grok image edit model routing", () => {
             apiKey: "test-only",
             apiFormat: "openai",
             compatProfile: "grok-image",
-            models: ["grok-imagine-image-quality"],
+            models: ["grok-imagine-image-quality", "grok-imagine-image-edit"],
         };
         const config = withChannels([channel], "home::grok-imagine-image-edit");
 
         expect(listGrokImageEditModelCandidates(config, config.imageModel)[0]).toBe("grok-imagine-image-edit");
+        expect(resolveImageModelForReferences(config, config.imageModel).switched).toBe(false);
     });
 
-    it("auto-switches quality to edit even when the channel inventory only lists quality", () => {
+    it("prefers official image names from inventory after the user selection", () => {
         const channel: ModelChannel = {
             id: "home",
             name: "Home Grok",
-            baseUrl: "/lan-ai",
+            baseUrl: "https://www.codex2api.com/v1",
             apiKey: "test-only",
             apiFormat: "openai",
             compatProfile: "grok-image",
-            models: ["grok-imagine-image-quality", "grok-imagine-image"],
+            models: ["grok-imagine-image-quality", "grok-imagine-image", "grok-imagine-image-edit"],
         };
         const config = withChannels([channel], "home::grok-imagine-image-quality");
 
-        const resolved = resolveImageModelForReferences(config, config.imageModel);
+        const candidates = listGrokImageEditModelCandidates(config, config.imageModel);
 
-        expect(resolved.switched).toBe(true);
-        expect(resolved.from).toBe("grok-imagine-image-quality");
-        expect(resolved.to).toBe("grok-imagine-image-edit");
-        expect(resolved.modelValue).toBe("home::grok-imagine-image-edit");
+        expect(candidates[0]).toBe("grok-imagine-image-quality");
+        expect(candidates).toContain("grok-imagine-image");
+        // edit 在列表中可以出现，但不抢用户选择的首位
+        expect(candidates.indexOf("grok-imagine-image")).toBeLessThan(candidates.indexOf("grok-imagine-image-edit"));
     });
 });

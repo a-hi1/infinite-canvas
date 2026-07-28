@@ -816,6 +816,11 @@ export default function ImagePage() {
                                         </Button>
                                     </div>
                                 </div>
+                                {requestMode.modelHint ? (
+                                    <div className="mb-2 rounded-md border border-amber-200/80 bg-amber-50 px-2.5 py-1.5 text-xs leading-5 text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100">
+                                        {requestMode.modelHint}
+                                    </div>
+                                ) : null}
                                 <div
                                     ref={referencesScrollerRef}
                                     className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700"
@@ -849,7 +854,13 @@ export default function ImagePage() {
                             </div>
 
                             <div className="hidden gap-4 sm:grid sm:grid-cols-2">
-                                <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
+                                <GenerationSettings
+                                    config={effectiveConfig}
+                                    model={model}
+                                    updateConfig={updateConfig}
+                                    openConfigDialog={openConfigDialog}
+                                    modelHint={references.length ? requestMode.modelHint : undefined}
+                                />
                             </div>
                         </div>
 
@@ -880,6 +891,7 @@ export default function ImagePage() {
                             <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">
                                 {requestMode.summary}
                                 {requestMode.autoSwitched ? `（原选 ${requestMode.autoSwitched.from}，自动切换 ${requestMode.autoSwitched.to}）` : ""}
+                                {requestMode.modelHint ? <div className="mt-1 font-medium text-stone-700 dark:text-stone-200">{requestMode.modelHint}</div> : null}
                                 <div className="mt-1 opacity-75">
                                     {requestMode.tip} 兼容预设：{requestMode.compatLabel}。
                                 </div>
@@ -947,7 +959,13 @@ export default function ImagePage() {
             </Drawer>
             <Drawer title="参数" placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
-                    <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
+                    <GenerationSettings
+                        config={effectiveConfig}
+                        model={model}
+                        updateConfig={updateConfig}
+                        openConfigDialog={openConfigDialog}
+                        modelHint={references.length ? requestMode.modelHint : undefined}
+                    />
                 </div>
             </Drawer>
             <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} optimizeMode="image" />
@@ -959,7 +977,19 @@ export default function ImagePage() {
     );
 }
 
-function GenerationSettings({ config, model, updateConfig, openConfigDialog }: { config: AiConfig; model: string; updateConfig: UpdateAiConfig; openConfigDialog: (shouldPromptContinue?: boolean) => void }) {
+function GenerationSettings({
+    config,
+    model,
+    updateConfig,
+    openConfigDialog,
+    modelHint,
+}: {
+    config: AiConfig;
+    model: string;
+    updateConfig: UpdateAiConfig;
+    openConfigDialog: (shouldPromptContinue?: boolean) => void;
+    modelHint?: string;
+}) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
 
     return (
@@ -967,6 +997,7 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
             <label className="col-span-2 block min-w-0 sm:col-span-1">
                 <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">模型</span>
                 <ModelPicker config={config} value={model} onChange={(value) => updateConfig("imageModel", value)} capability="image" fullWidth onMissingConfig={() => openConfigDialog(false)} />
+                {modelHint ? <div className="mt-1.5 text-xs leading-5 text-stone-500 dark:text-stone-400">{modelHint}</div> : null}
             </label>
             <div className="col-span-2">
                 <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} />

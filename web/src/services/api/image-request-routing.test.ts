@@ -47,7 +47,7 @@ describe("Grok image edit request routing", () => {
         vi.mocked(axios.post).mockResolvedValue({ data: { data: [{ b64_json: "a".repeat(80) }] } });
     });
 
-    it("posts the auto-selected edit model first when inventory only lists quality", async () => {
+    it("posts the user-selected image model first and never auto-jumps to *-edit", async () => {
         await requestEdit(grokConfig(), "edit this", [
             {
                 id: "reference",
@@ -58,9 +58,11 @@ describe("Grok image edit request routing", () => {
         ]);
 
         expect(axios.post).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(axios.post).mock.calls[0]?.[0]).toContain("/images/edits");
         expect(vi.mocked(axios.post).mock.calls[0]?.[1]).toMatchObject({
-            model: "grok-imagine-image-edit",
+            model: "grok-imagine-image-quality",
             image: { url: "data:image/png;base64,reference" },
         });
+        expect(JSON.stringify(vi.mocked(axios.post).mock.calls[0]?.[1])).not.toContain("grok-imagine-image-edit");
     });
 });

@@ -2,7 +2,6 @@ import axios from "axios";
 
 import {
     buildApiUrl,
-    encodeChannelModel,
     getImageCompatStrategy,
     isAiProxyBaseUrl,
     isLanAiBaseUrl,
@@ -1081,29 +1080,33 @@ function nearestAspectRatioLabel(label: string) {
     return nearestAspectRatio(Number(m[1]) / Number(m[2]));
 }
 
-/** 图生图优先：Grok2API 实际可用的是 *edit*，不是 *quality*（quality 多为文生）。 */
-const GROK_IMAGE_EDIT_PREFERRED = [
+/**
+ * 官方 xAI ImageGenerationModel（见 xai-sdk types/model.py）：
+ *   grok-imagine-image | grok-imagine-image-pro | grok-imagine-image-quality
+ * 官方图生图/多参考编辑与文生图共用同一模型族，靠请求是否带 image_url(s) 区分能力；
+ * **没有** 单独的 grok-imagine-image-edit 模型名。
+ * 部分中转仍暴露 *-edit 别名；仅当用户选中或渠道列表真实存在时才作为候选，绝不自动注入/跳转。
+ */
+const GROK_IMAGE_OFFICIAL = [
+    "grok-imagine-image",
+    "grok-imagine-image-pro",
+    "grok-imagine-image-quality",
+] as const;
+/** 中转兼容别名（非官方 SDK 类型）；只在列表命中或用户已选时加入候选。 */
+const GROK_IMAGE_RELAY_ALIASES = [
     "grok-imagine-image-edit",
     "grok-imagine-image-edit-quality",
     "grok-2-image-edit",
-    "grok-imagine-image-quality",
-    "grok-imagine-image",
     "grok-2-image-1212",
     "grok-2-image",
-];
+] as const;
 
 function isGrokImageEditModelName(name: string) {
     const n = name.toLowerCase();
     if (n.includes("video")) return false;
-    // 明确 edit 名最优先识别
     if (n.includes("edit") && n.includes("image")) return true;
     if (n.includes("imagine-image-edit")) return true;
     return n.includes("imagine-image") || n.includes("image-quality") || (n.includes("grok") && n.includes("image") && !n.includes("video"));
-}
-
-function isPreferredGrokEditModelName(name: string) {
-    const n = name.toLowerCase();
-    return n.includes("edit") && n.includes("image") && !n.includes("video");
 }
 
 function channelLooksLikeGrokImage(selectedName: string) {
@@ -1115,7 +1118,10 @@ function channelLooksLikeGrokImage(selectedName: string) {
     );
 }
 
-/** 同渠道内图生图模型候选：*edit* 永远排最前。 */
+/**
+ * 同渠道内图生图模型候选。
+ * 顺序：用户当前选择 → 官方 image/pro/quality（列表命中）→ 其它列表内 Grok 图模 → 中转 *-edit 别名（仅列表命中，不注入）。
+ */
 export function listGrokImageEditModelCandidates(config: AiConfig, selectedModelValue: string, channelOverride?: ModelChannel): string[] {
     const selected = (selectedModelValue || config.imageModel || config.model || "").trim();
     const channel = channelOverride || resolveModelChannel(config, selected);
@@ -1129,70 +1135,50 @@ export function listGrokImageEditModelCandidates(config: AiConfig, selectedModel
         if (!out.some((x) => x.toLowerCase() === n.toLowerCase())) out.push(n);
     };
 
-    // 1) 列表里所有带 edit 的图模（最重要）
-    for (const m of rawModels) {
-        if (isPreferredGrokEditModelName(m)) push(m);
-    }
-    const hasListedEdit = out.some((m) => isPreferredGrokEditModelName(m));
+    // 1) 永远先用用户当前选择（官方图生图与文生共用 grok-imagine-image*）
+    push(fromName);
+
+    // 2) 官方模型名：列表命中才加入；列表为空且当前是 Grok 图模时补官方主名便于重试
     const grokImageChannel = channelLooksLikeGrokImage(fromName);
-    // 2) 首选名表：列表命中优先；列表无 *edit* 但当前是 Grok 图模时仍注入 edit 名，
-    //    保证画布/工作台「编辑已有图」会自动走 grok-imagine-image-edit（失败再回落到 quality）。
-    for (const p of GROK_IMAGE_EDIT_PREFERRED) {
-        const hit = knownLower.get(p) || rawModels.find((m) => m.toLowerCase().includes(p));
+    for (const p of GROK_IMAGE_OFFICIAL) {
+        const hit = knownLower.get(p) || rawModels.find((m) => m.toLowerCase() === p);
         if (hit) {
             push(hit);
             continue;
         }
-        if (!p.includes("edit") && !p.includes("image")) continue;
-        if (!rawModels.length && grokImageChannel) {
-            push(p);
-            continue;
-        }
-        if (!hasListedEdit && grokImageChannel && p.includes("edit")) {
-            push(p);
-        }
+        if (!rawModels.length && grokImageChannel) push(p);
     }
-    // 3) 其它 grok 图模
+
+    // 3) 列表里其它 Grok 图模（含用户渠道自定义名）
     for (const m of rawModels) {
         if (isGrokImageEditModelName(m)) push(m);
     }
-    if (isGrokImageEditModelName(fromName)) push(fromName);
-    push(fromName);
+
+    // 4) 中转 *-edit 等别名：仅当渠道列表真实存在时加入，绝不凭空注入
+    for (const p of GROK_IMAGE_RELAY_ALIASES) {
+        const hit = knownLower.get(p) || rawModels.find((m) => m.toLowerCase().includes(p));
+        if (hit) push(hit);
+    }
+
     return out;
 }
 
 /**
- * 有参考图时，在同渠道内自动选用更适合 JSON 图生图的 Grok 模型（无需用户手动切换）。
- * 任意选中 grok / /lan-ai 渠道模型时，只要有参考图就尽量切到 imagine-image*。
+ * 有参考图时 **不** 再自动改模型名。
+ * 官方图生图用 grok-imagine-image（或 pro/quality）；是否带参考图由 /images/edits + image 字段决定，
+ * 与是否叫 *-edit 无关。保留此函数供 UI 诊断与旧调用点兼容（始终 switched:false）。
  */
 export function resolveImageModelForReferences(config: AiConfig, selectedModelValue: string): { modelValue: string; switched: boolean; from: string; to: string } {
     const selected = (selectedModelValue || config.imageModel || config.model || "").trim();
-    const channel = resolveModelChannel(config, selected);
     const fromName = modelOptionName(selected);
-    const fromLower = fromName.toLowerCase();
-
-    if (!channelLooksLikeGrokImage(fromName)) {
-        return { modelValue: selected, switched: false, from: fromName, to: fromName };
-    }
-
-    const candidates = listGrokImageEditModelCandidates(config, selected);
-    const picked = candidates[0] || fromName;
-    // 已是 *edit* 模型则不换；若当前是 quality/文生名则必须切到 edit
-    if (picked.toLowerCase() === fromLower && isPreferredGrokEditModelName(fromName)) {
-        return { modelValue: selected, switched: false, from: fromName, to: fromName };
-    }
-    if (picked.toLowerCase() === fromLower) {
-        return { modelValue: selected, switched: false, from: fromName, to: fromName };
-    }
-
-    const modelValue = encodeChannelModel(channel.id, picked);
-    return { modelValue, switched: true, from: fromName, to: picked };
+    return { modelValue: selected, switched: false, from: fromName, to: fromName };
 }
 
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions): Promise<GeneratedImageResult[]> {
     const selectedModel = config.model || config.imageModel;
-    // 用户给所选模型配置的脚本必须优先；自动切 Grok edit 不能绕过其 BYOK 调用逻辑。
+    // 用户给所选模型配置的脚本必须优先。官方图生图与文生共用 grok-imagine-image*，不再自动改成 *-edit。
     const selectedScript = resolveModelScript(config, selectedModel);
+    // resolveImageModelForReferences 现始终 switched:false，保留调用仅兼容诊断/旧路径。
     const auto = references.length && !mask && !selectedScript ? resolveImageModelForReferences(config, selectedModel) : { modelValue: selectedModel, switched: false, from: "", to: "" };
     const effectiveConfig = auto.switched ? { ...config, model: auto.modelValue, imageModel: auto.modelValue } : config;
 
