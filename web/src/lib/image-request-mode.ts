@@ -57,7 +57,7 @@ export function describeImageRequestMode(opts: {
     return {
       kind: "platform",
       summary: `请求模式：平台代生成 · ${platformModelLabel || model} · ${referenceCount ? `图生图（参考 ${Math.min(referenceCount, 4)} 张）` : "文生图"} · 生成 ${generationCount} 张`,
-      tip: "默认仍是你自己的 API Key；开启平台积分后走服务端 Key。参考图会以 data URL 上传服务端再调上游 edits（最多 4 张）。",
+      tip: "默认仍是你自己的 API Key；开启平台积分后走服务端 Key。参考图会以 data URL 上传服务端再调上游 edits（平台最多 4 张；本地 BYOK 最多 6 张）。",
       path: "/api/generate/image",
       compatLabel,
       modelLabel: platformModelLabel || modelOptionName(model),
@@ -168,6 +168,12 @@ export function enhanceImageUpstreamError(upstream: string, context?: "generatio
     if (/(aspect_ratio|resolution|size|quality)/i.test(lower) && /unknown|invalid|not support|unexpected/i.test(lower)) {
       hints.push("上游可能不接受 size/quality 字段。Grok 类请用「Grok」兼容预设；挑剔中转可用「OpenAI 精简」或「脆弱中转」");
     }
+  }
+  if (/no available channel|无可用渠道|无渠道|channel not found|未配置渠道/i.test(lower)) {
+    hints.push("这是 New API 网关侧问题：到管理后台「渠道」里给当前 Grok 图片模型绑定可用上游，并确认令牌所属分组能访问该模型");
+  }
+  if (/service unavailable|503|502|504|upstream.*(down|unavailable|failed)|overloaded/i.test(lower)) {
+    hints.push("多为中转上游不可用，不是本站画布/工作台逻辑错误。请在 New API 日志里看该 request id 的具体失败原因，并检查上游 Grok Key/额度");
   }
   if (/rate limit|too many|429/i.test(lower)) {
     hints.push("疑似限流，请降低张数或稍后重试");

@@ -210,7 +210,9 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                     onSubmit={submit}
                     disabled={optimizingPrompt}
                     autoFocus
-                    className="canvas-prompt-scrollbar canvas-prompt-caret h-28 w-full resize-none rounded-xl border px-3 py-2 text-sm leading-5 outline-none select-text"
+                    // 默认更高 + 可纵向拖右下角拉高；框内滚轮滚动文本，不拖动画布缩放
+                    containerClassName="min-h-40"
+                    className="canvas-prompt-scrollbar canvas-prompt-caret min-h-40 max-h-[min(50vh,28rem)] h-40 w-full resize-y overflow-y-auto rounded-xl border px-3 py-2 text-sm leading-6 outline-none select-text"
                     style={{ background: theme.node.fill, borderColor: theme.node.stroke, color: theme.node.text || "#111827", caretColor: "#2563eb" }}
                     placeholder={promptPlaceholder(mode, hasImageContent, hasTextContent)}
                     onPointerDown={(event) => {
@@ -218,6 +220,10 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                         event.stopPropagation();
                     }}
                     onMouseDown={(event) => {
+                        event.stopPropagation();
+                    }}
+                    onWheel={(event) => {
+                        // 阻止画布缩放；可滚动时让浏览器滚文本框本身
                         event.stopPropagation();
                     }}
                 />

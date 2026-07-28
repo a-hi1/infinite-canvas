@@ -301,51 +301,61 @@
         caret-color: #60a5fa !important;
     }
 
-    /* 画布节点文本框 / 提示词输入：滚动条加粗，方便点击拖动 */
+    /* 画布节点文本框 / 提示词输入：滚动条加粗，方便点击拖动；右下角可 resize */
     .canvas-prompt-scrollbar {
-        scrollbar-color: rgba(28, 25, 23, 0.72) rgba(28, 25, 23, 0.08);
+        scrollbar-color: rgba(28, 25, 23, 0.78) rgba(28, 25, 23, 0.1);
         scrollbar-width: auto;
     }
 
     .canvas-prompt-scrollbar::-webkit-scrollbar {
-        height: 10px;
-        width: 10px;
+        height: 12px;
+        width: 12px;
     }
 
     .canvas-prompt-scrollbar::-webkit-scrollbar-track {
-        background: rgba(28, 25, 23, 0.08);
+        background: rgba(28, 25, 23, 0.1);
         border-radius: 999px;
     }
 
     .canvas-prompt-scrollbar::-webkit-scrollbar-thumb {
-        background: rgba(28, 25, 23, 0.72);
+        background: rgba(28, 25, 23, 0.78);
         border-radius: 999px;
         border: 2px solid transparent;
         background-clip: content-box;
-        min-height: 28px;
+        min-height: 36px;
     }
 
     .canvas-prompt-scrollbar::-webkit-scrollbar-thumb:hover {
-        background: rgba(28, 25, 23, 0.9);
+        background: rgba(28, 25, 23, 0.92);
         background-clip: content-box;
+    }
+
+    .canvas-prompt-scrollbar::-webkit-resizer {
+        background: linear-gradient(135deg, transparent 50%, rgba(28, 25, 23, 0.35) 50%);
+        border-bottom-right-radius: 0.75rem;
     }
 
     .dark .canvas-prompt-scrollbar {
-        scrollbar-color: rgba(245, 245, 244, 0.7) rgba(245, 245, 244, 0.12);
+        scrollbar-color: rgba(245, 245, 244, 0.78) rgba(245, 245, 244, 0.14);
     }
 
     .dark .canvas-prompt-scrollbar::-webkit-scrollbar-track {
-        background: rgba(245, 245, 244, 0.12);
+        background: rgba(245, 245, 244, 0.14);
     }
 
     .dark .canvas-prompt-scrollbar::-webkit-scrollbar-thumb {
-        background: rgba(245, 245, 244, 0.7);
+        background: rgba(245, 245, 244, 0.78);
         background-clip: content-box;
+        min-height: 36px;
     }
 
     .dark .canvas-prompt-scrollbar::-webkit-scrollbar-thumb:hover {
-        background: rgba(245, 245, 244, 0.88);
+        background: rgba(245, 245, 244, 0.92);
         background-clip: content-box;
+    }
+
+    .dark .canvas-prompt-scrollbar::-webkit-resizer {
+        background: linear-gradient(135deg, transparent 50%, rgba(245, 245, 244, 0.4) 50%);
     }
 
     /* 提示词卡片底部操作条：深色滚动条加粗，方便点击拖动 */

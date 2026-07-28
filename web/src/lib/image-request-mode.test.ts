@@ -183,4 +183,11 @@ describe("enhanceImageUpstreamError", () => {
         expect(text).toContain("确认模型支持参考图");
         expect(text).toContain("调整生图兼容预设");
     });
+
+    it("points New API no-channel failures to the gateway console", () => {
+        const text = enhanceImageUpstreamError("No available channel for model grok-imagine-image-edit (request id: abc)", "edit", "图生图失败");
+
+        expect(text).toMatch(/New API|渠道/);
+        expect(text).toMatch(/绑定|分组|令牌/);
+    });
 });

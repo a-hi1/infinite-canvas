@@ -16,6 +16,7 @@ import {
 } from "@/stores/use-config-store";
 import { nanoid } from "nanoid";
 import { compressImageDataUrl, dataUrlToFile } from "@/lib/image-utils";
+import { BYOK_IMAGE_REFERENCE_LIMIT, SCRIPT_IMAGE_REFERENCE_LIMIT } from "@/lib/image-reference-limits";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { enhanceImageUpstreamError } from "@/lib/image-request-mode";
 import { ensureLocalImageDataUrl, imageToDataUrl } from "@/services/image-storage";
@@ -381,12 +382,50 @@ function parseImagePayload(payload: ImageApiResponse) {
     return images;
 }
 
+function extractUpstreamErrorMessage(data: unknown): string {
+    if (!data || typeof data !== "object") return "";
+    const row = data as {
+        msg?: string;
+        message?: string;
+        error?: { message?: string; msg?: string } | string;
+    };
+    if (typeof row.msg === "string" && row.msg.trim()) return row.msg.trim();
+    if (typeof row.message === "string" && row.message.trim()) return row.message.trim();
+    if (typeof row.error === "string" && row.error.trim()) return row.error.trim();
+    if (row.error && typeof row.error === "object") {
+        if (typeof row.error.message === "string" && row.error.message.trim()) return row.error.message.trim();
+        if (typeof row.error.msg === "string" && row.error.msg.trim()) return row.error.msg.trim();
+    }
+    return "";
+}
+
+/** New API / 中转侧「无渠道、上游宕机」等，换 body 形态重试也没用 */
+export function isPermanentImageUpstreamFailure(error: unknown): boolean {
+    if (!axios.isAxiosError(error) || !error.response) return false;
+    const status = error.response.status;
+    if (status === 401 || status === 403) return true;
+    const message = extractUpstreamErrorMessage(error.response.data).toLowerCase();
+    if (status === 503 || status === 502 || status === 504) {
+        // 无可用渠道 / 上游不可用：继续刷候选 body 只会拖时间
+        if (!message) return true;
+        if (/no available channel|no channel|channel not found|无可用渠道|无渠道|未配置渠道|model_not_found|not have access|group not|distributor|upstream.*(down|unavailable|failed)|service unavailable|overloaded/i.test(message)) {
+            return true;
+        }
+        // 其它 5xx 也视为本轮不必穷尽所有 body 变体（仍抛出可读错误）
+        return true;
+    }
+    if (/no available channel|无可用渠道|无渠道可用|model not found|invalid token|insufficient quota|余额不足/i.test(message)) {
+        return true;
+    }
+    return false;
+}
+
 function readAxiosError(error: unknown, fallback: string, context?: "generation" | "edit") {
     if (axios.isCancel(error)) return "请求已取消";
-    if (axios.isAxiosError<{ error?: { message?: string }; msg?: string; code?: number }>(error)) {
+    if (axios.isAxiosError(error)) {
         const responseData = error.response?.data;
-        if (responseData?.msg || responseData?.error?.message) {
-            const upstream = responseData?.msg || responseData?.error?.message || fallback;
+        const upstream = extractUpstreamErrorMessage(responseData);
+        if (upstream) {
             return enhanceImageUpstreamError(upstream, context, fallback);
         }
         if (!error.response) return readNetworkError(error.code, fallback, context, error.message);
@@ -428,6 +467,11 @@ function readStatusError(status: number | undefined, fallback: string, context?:
     }
     if (status === 413) return `${fallback}（413），参考图或请求体过大，请减少张数或使用更小分辨率的参考图`;
     if (status === 429) return "请求被限流或额度不足，请稍后重试";
+    if (status === 502 || status === 503 || status === 504) {
+        return context === "edit"
+            ? `${fallback}（${status}），局域网 New API / 中转网关未能完成图生图。常见原因：① 管理后台该模型未绑定可用「渠道」或渠道已禁用 ② 上游 Grok/xAI 账号或 Key 失效 ③ 分组/令牌无权访问该模型。请打开 New API 控制台检查渠道与日志（本机请求路径本身已打到 /v1/images/edits）`
+            : `${fallback}（${status}），中转网关或上游暂时不可用。请检查 New API 渠道状态、上游 Key 与额度后重试`;
+    }
     return status ? `${fallback}：${status}` : fallback;
 }
 
@@ -1156,8 +1200,10 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     assertImageModel(requestConfig.model);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const script = resolveModelScript(effectiveConfig, effectiveConfig.model || effectiveConfig.imageModel);
-    if (!script && references.length > 3) {
-        throw new Error("内置图生图最多支持 3 张参考图；请删减后重试，或为当前模型配置自定义调用脚本处理更多参考图");
+    // 内置 edits 与 UI 上限一致；脚本可在 SCRIPT 上限内自行消费（不静默截断）
+    const maxReferences = script ? SCRIPT_IMAGE_REFERENCE_LIMIT : BYOK_IMAGE_REFERENCE_LIMIT;
+    if (references.length > maxReferences) {
+        throw new Error(`图生图最多支持 ${maxReferences} 张参考图；请删减后重试${script ? "" : "，或为当前模型配置自定义调用脚本"}`);
     }
     const requestReferences = references;
     const requestPrompt = buildImageReferencePromptText(prompt, requestReferences, effectiveConfig);
@@ -1354,7 +1400,8 @@ async function requestGrokJsonImageEdit(
             return parseImagePayload(response.data);
         } catch (error) {
             lastError = error;
-            if (axios.isAxiosError(error) && (error.response?.status === 401 || error.response?.status === 403)) {
+            // 鉴权失败 / New API 无渠道 / 网关 5xx：换 body 形态也没用，立刻停
+            if (isPermanentImageUpstreamFailure(error)) {
                 break;
             }
             if (axios.isAxiosError(error) && error.response && references.length > 1 && i === 0) {

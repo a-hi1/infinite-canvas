@@ -12,7 +12,7 @@ import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSettingsSummary } from "@/components/video-settings-panel";
 import { AGNES_VIDEO_SIZE, agnesVideoModeHint, agnesVideoRequestError, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { grokVideoModeHint, isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
+import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS, grokVideoModeHint, isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
 import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
@@ -181,12 +181,21 @@ export default function VideoPage() {
         const selectedFiles = Array.from(files || []);
         const unsupported = selectedFiles.filter((file) => !file.type.startsWith("image/") && !file.type.startsWith("video/") && !isSupportedAudioFile(file));
         if (unsupported.length) message.warning("已忽略不支持的参考素材，请使用图片、mp4/mov 视频或 mp3/wav 音频");
-        const imageFiles = selectedFiles.filter((file) => file.type.startsWith("image/") && file.size <= SEEDANCE_REFERENCE_LIMITS.imageMaxBytes).slice(0, SEEDANCE_REFERENCE_LIMITS.images - references.length);
-        const videoFiles = selectedFiles.filter((file) => file.type.startsWith("video/") && file.size <= SEEDANCE_REFERENCE_LIMITS.videoMaxBytes).slice(0, SEEDANCE_REFERENCE_LIMITS.videos - videoReferences.length);
-        const audioFiles = selectedFiles.filter((file) => isSupportedAudioFile(file) && file.size <= SEEDANCE_REFERENCE_LIMITS.audioMaxBytes).slice(0, SEEDANCE_REFERENCE_LIMITS.audios - audioReferences.length);
+        const imageMax = SEEDANCE_REFERENCE_LIMITS.images;
+        const videoMax = grokMode ? GROK_EDIT_REFERENCE_LIMITS.videos : SEEDANCE_REFERENCE_LIMITS.videos;
+        const videoMaxBytes = grokMode ? GROK_EDIT_REFERENCE_LIMITS.videoMaxBytes : SEEDANCE_REFERENCE_LIMITS.videoMaxBytes;
+        const audioMax = SEEDANCE_REFERENCE_LIMITS.audios;
+        const imageFiles = selectedFiles.filter((file) => file.type.startsWith("image/") && file.size <= SEEDANCE_REFERENCE_LIMITS.imageMaxBytes).slice(0, imageMax - references.length);
+        const videoFiles = selectedFiles.filter((file) => file.type.startsWith("video/") && file.size <= videoMaxBytes).slice(0, Math.max(0, videoMax - videoReferences.length));
+        const audioFiles = selectedFiles.filter((file) => isSupportedAudioFile(file) && file.size <= SEEDANCE_REFERENCE_LIMITS.audioMaxBytes).slice(0, audioMax - audioReferences.length);
         if (selectedFiles.some((file) => file.type.startsWith("image/") && file.size > SEEDANCE_REFERENCE_LIMITS.imageMaxBytes)) message.warning("已忽略超过 30MB 的参考图");
-        if (selectedFiles.some((file) => file.type.startsWith("video/") && file.size > SEEDANCE_REFERENCE_LIMITS.videoMaxBytes)) message.warning("已忽略超过 50MB 的参考视频");
+        if (selectedFiles.some((file) => file.type.startsWith("video/") && file.size > videoMaxBytes)) {
+            message.warning(grokMode ? "已忽略超过 100MB 的参考视频（Grok edits 上限）" : "已忽略超过 50MB 的参考视频");
+        }
         if (selectedFiles.some((file) => isSupportedAudioFile(file) && file.size > SEEDANCE_REFERENCE_LIMITS.audioMaxBytes)) message.warning("已忽略超过 15MB 的参考音频");
+        if (grokMode && selectedFiles.some((file) => file.type.startsWith("video/")) && videoReferences.length >= videoMax) {
+            message.warning("Grok 视频编辑只支持 1 条参考视频");
+        }
         const nextReferences = await Promise.all(
             imageFiles.map(async (file) => {
                 const image = await uploadImage(file);
@@ -209,9 +218,9 @@ export default function VideoPage() {
             ),
             message.warning,
         );
-        setReferences((value) => [...value, ...nextReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.images));
-        setVideoReferences((value) => [...value, ...nextVideoReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.videos));
-        setAudioReferences((value) => [...value, ...nextAudioReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.audios));
+        setReferences((value) => [...value, ...nextReferences].slice(0, imageMax));
+        setVideoReferences((value) => [...value, ...nextVideoReferences].slice(0, videoMax));
+        setAudioReferences((value) => [...value, ...nextAudioReferences].slice(0, audioMax));
     };
 
     const addReferencesFromClipboard = async () => {
@@ -366,8 +375,22 @@ export default function VideoPage() {
             message.error(agnesReferenceError);
             return null;
         }
-        if (!seedanceMode && !agnesMode && (videoReferences.length || audioReferences.length)) {
-            message.error("当前模型/渠道不是 Seedance 2.0 或火山 Agent Plan，不能使用参考视频或参考音频，请切换视频模型或移除这些参考素材");
+        if (grokMode && videoReferences.length) {
+            if (audioReferences.length) {
+                message.error("Grok 视频编辑暂不支持参考音频，请移除音频后重试");
+                return null;
+            }
+            if (references.length) {
+                message.error("Grok 不能同时使用参考图与参考视频：请只保留参考视频（edits）或只保留参考图（generation）");
+                return null;
+            }
+            const grokVideoError = grokEditVideoReferenceError(videoReferences);
+            if (grokVideoError) {
+                message.error(grokVideoError);
+                return null;
+            }
+        } else if (!seedanceMode && !agnesMode && (videoReferences.length || audioReferences.length)) {
+            message.error("当前模型/渠道不是 Seedance 2.0、火山 Agent Plan 或支持 edits 的 Grok 中转，不能使用参考视频或参考音频，请切换视频模型或移除这些参考素材");
             return null;
         }
         const videoReferenceError = seedanceMode ? seedanceVideoReferenceError(videoReferences) : "";
@@ -676,7 +699,7 @@ export default function VideoPage() {
                                             </button>
                                         </div>
                                     ))}
-                                    {!videoReferences.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">暂无参考视频，最多 3 个</div> : null}
+                                    {!videoReferences.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">暂无参考视频，最多 {grokMode ? 1 : 3} 个{grokMode ? "（Grok edits）" : ""}</div> : null}
                                 </div>
                             </div>
 

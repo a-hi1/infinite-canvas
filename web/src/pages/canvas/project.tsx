@@ -37,6 +37,7 @@ import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
+import { CanvasNodeListPanel } from "@/components/canvas/canvas-node-list-panel";
 import { InfiniteCanvas } from "@/components/canvas/infinite-canvas";
 import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNode } from "@/components/canvas/canvas-node";
@@ -50,6 +51,7 @@ import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { applyCanvasAgentOps, type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import { buildCanvasResourceReferences, buildNodeMentionReferences } from "@/lib/canvas/canvas-resource-references";
 import { shortGenerationTitle } from "@/lib/canvas/node-title";
+import { centerViewportOnNode } from "@/lib/canvas/canvas-node-list";
 import type { CanvasAgentMode } from "@/components/canvas/canvas-agent-chat-ui";
 import {
     CanvasNodeType,
@@ -2664,6 +2666,18 @@ function InfiniteCanvasPage() {
             setAssistantClosing(false);
         }, CANVAS_AGENT_PANEL_MOTION_MS);
     };
+    const focusNodeFromList = useCallback((node: CanvasNodeData, panelRight?: number) => {
+        setSelectedNodeIds(new Set([node.id]));
+        setSelectedConnectionId(null);
+        setContextMenu(null);
+        setNodeCreatePosition(null);
+        setPendingConnectionCreate(null);
+        setConnecting(null);
+        setSelectionBox(null);
+        const canvasLeft = containerRef.current?.getBoundingClientRect().left;
+        const leftInset = typeof panelRight === "number" && typeof canvasLeft === "number" ? panelRight - canvasLeft + 16 : undefined;
+        setViewport((current) => centerViewportOnNode(node, current, size, { left: leftInset }));
+    }, [setConnecting, size]);
 
     if (!projectLoaded) return <CanvasRefreshShell />;
 
@@ -2693,6 +2707,12 @@ function InfiniteCanvasPage() {
                     agentOpen={assistantOpen}
                     compactAgentStatus={codexCompactAgent ? { connected: localAgentConnected, enabled: localAgentEnabled, activity: localAgentActivity } : undefined}
                     onToggleAgent={() => (assistantOpen ? closeAgent() : openAgent())}
+                />
+
+                <CanvasNodeListPanel
+                    nodes={nodes}
+                    selectedNodeIds={selectedNodeIds}
+                    onFocusNode={focusNodeFromList}
                 />
 
                 <InfiniteCanvas

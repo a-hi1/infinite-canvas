@@ -10,6 +10,7 @@ import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { resolveImageReferenceLimit } from "@/lib/image-reference-limits";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { describeImageRequestMode, IMAGE_EDIT_DEGRADED_DEFAULT } from "@/lib/image-request-mode";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
@@ -76,7 +77,6 @@ type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => 
 
 const LOG_STORE_KEY = "infinite-canvas:image_generation_logs";
 const PLATFORM_IMAGE_PREF_KEY = "infinite-canvas:prefer_platform_image";
-const MAX_IMAGE_REFERENCES = 3;
 const RESULT_ACTION_BUTTON_CLASS = "min-w-0 px-1.5 [&_.ant-btn-icon]:shrink-0 [&>span:last-child]:min-w-0 [&>span:last-child]:truncate";
 const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
 
@@ -192,9 +192,11 @@ export default function ImagePage() {
         })();
     }, [effectiveConfig, isAiConfigReady, message, openConfigDialog, searchParams, setSearchParams, textModel]);
 
+    const imageReferenceLimit = resolveImageReferenceLimit({ platform: usePlatformImage, script: selectedImageUsesCustomScript });
+
     const appendReferences = (nextReferences: ReferenceImage[]) => {
         setReferences((value) => {
-            const maxReferences = usePlatformImage || selectedImageUsesCustomScript ? 4 : MAX_IMAGE_REFERENCES;
+            const maxReferences = imageReferenceLimit;
             const available = Math.max(0, maxReferences - value.length);
             if (nextReferences.length > available) message.warning(`当前请求模式最多使用 ${maxReferences} 张参考图，超出的图片未加入`);
             return [...value, ...nextReferences.slice(0, available)];
@@ -265,8 +267,8 @@ export default function ImagePage() {
             return;
         }
         if (usePlatformImage) {
-            if (references.length > 4) {
-                message.warning("平台图生图最多 4 张参考图，请删减后再试");
+            if (references.length > imageReferenceLimit) {
+                message.warning(`平台图生图最多 ${imageReferenceLimit} 张参考图，请删减后再试`);
                 return;
             }
             if (!hasEnoughCredits(credits?.balance_cents, imagePriceCents, generationCount)) {
@@ -804,7 +806,7 @@ export default function ImagePage() {
 
                             <div className="min-w-0">
                                 <div className="mb-2 flex items-center justify-between gap-3">
-                                    <span className="text-base font-semibold">参考图（当前最多 {usePlatformImage || selectedImageUsesCustomScript ? 4 : MAX_IMAGE_REFERENCES} 张）</span>
+                                    <span className="text-base font-semibold">参考图（当前最多 {imageReferenceLimit} 张）</span>
                                     <div className="flex gap-2">
                                         <Button size="small" icon={<ClipboardPaste className="size-3.5" />} onClick={() => void addReferencesFromClipboard()}>
                                             剪切板

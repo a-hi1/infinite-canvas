@@ -100,7 +100,7 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
     const menu = mention && candidates.length && textareaRef.current ? <MentionMenu textarea={textareaRef.current} references={candidates} activeIndex={Math.min(activeIndex, candidates.length - 1)} theme={theme} onSelect={insertReference} /> : null;
 
     return (
-        <div className={`relative h-full w-full ${containerClassName || ""}`}>
+        <div className={`relative w-full ${containerClassName || "h-full"}`}>
             {showOverlay ? (
                 <div ref={overlayRef} className={`${className || ""} pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words`} style={{ ...style, color: theme.node.text, caretColor: "transparent" }}>
                     <MentionHighlightText value={value || props.placeholder?.toString() || ""} labels={activeLabels} placeholder={!value} />
@@ -170,6 +170,23 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                         return;
                     }
                     onKeyDown?.(event);
+                }}
+                onWheel={(event) => {
+                    // 画布容器会 preventDefault 滚轮；在文本框内需先停冒泡，并在必要时手动滚
+                    event.stopPropagation();
+                    const el = event.currentTarget;
+                    const canScroll = el.scrollHeight > el.clientHeight + 1;
+                    if (canScroll) {
+                        const atTop = el.scrollTop <= 0 && event.deltaY < 0;
+                        const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1 && event.deltaY > 0;
+                        if (!atTop && !atBottom) {
+                            // 部分环境下祖先 preventDefault 会吞掉默认滚动，手动补上
+                            el.scrollTop += event.deltaY;
+                            event.preventDefault();
+                            syncOverlayScroll();
+                        }
+                    }
+                    props.onWheel?.(event);
                 }}
                 onScroll={(event) => {
                     syncOverlayScroll();

@@ -158,6 +158,7 @@ function GrokVideoSettingsPanel({ config, onConfigChange, theme, showTitle, clas
                             </OptionPill>
                         ))}
                     </div>
+                    <div className="text-[11px] leading-4 opacity-55">参考图生视频时，codex2api 等中转在 1080p 常会忽略参考图；本地会优先用 720p 保证图生一致。纯文生 1080p 仍按所选发送。</div>
                 </SettingGroup>
                 <SettingGroup title="比例" color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
