@@ -73,7 +73,8 @@ function assetSignature(asset: Asset) {
             : asset.kind === "text"
               ? String(asset.data.content || "")
               : "";
-    return `${asset.updatedAt}|${asset.kind}|${asset.title}|${mediaKey}`;
+    const category = String(asset.category || "").trim();
+    return `${asset.updatedAt}|${asset.kind}|${asset.title}|${category}|${mediaKey}`;
 }
 
 function buildSnapshot(assets: Asset[], updatedAt: string): AssetSyncSnapshot {
@@ -126,10 +127,10 @@ export function getAssetLibraryCloudSummary(assets: Asset[], options?: { loggedI
         return { label: "仅本机", detail: "登录后可同步到云端", tone: "local" as const, synced: 0, pending: assets.length, failed: 0 };
     }
     if (options?.syncing) {
-        return { label: "同步中", detail: "正在上传/拉取素材清单与媒体", tone: "pending" as const, synced: 0, pending: assets.length, failed: 0 };
+        return { label: "同步中", detail: "正在上传/拉取资产清单与媒体", tone: "pending" as const, synced: 0, pending: assets.length, failed: 0 };
     }
     if (lastSyncFailed) {
-        return { label: "上云失败", detail: "可点击「同步云端」重试，本机素材不受影响", tone: "failed" as const, synced: 0, pending: 0, failed: assets.length };
+        return { label: "上云失败", detail: "可点击「同步云端」重试，本机资产不受影响", tone: "failed" as const, synced: 0, pending: 0, failed: assets.length };
     }
     let synced = 0;
     let pending = 0;
@@ -138,10 +139,10 @@ export function getAssetLibraryCloudSummary(assets: Asset[], options?: { loggedI
         else pending += 1;
     }
     if (!assets.length) {
-        return { label: lastSyncedSnapshot ? "已上云" : "待同步", detail: lastSyncedSnapshot ? "云端清单为空" : "新增素材后会自动同步", tone: lastSyncedSnapshot ? ("synced" as const) : ("pending" as const), synced: 0, pending: 0, failed: 0 };
+        return { label: lastSyncedSnapshot ? "已上云" : "待同步", detail: lastSyncedSnapshot ? "云端清单为空" : "新增资产后会自动同步", tone: lastSyncedSnapshot ? ("synced" as const) : ("pending" as const), synced: 0, pending: 0, failed: 0 };
     }
     if (pending === 0) {
-        return { label: "已上云", detail: `${synced} 条素材已与云端对齐`, tone: "synced" as const, synced, pending: 0, failed: 0 };
+        return { label: "已上云", detail: `${synced} 条资产已与云端对齐`, tone: "synced" as const, synced, pending: 0, failed: 0 };
     }
     if (synced === 0) {
         return { label: "待同步", detail: `${pending} 条素材尚未确认上云`, tone: "pending" as const, synced: 0, pending, failed: 0 };

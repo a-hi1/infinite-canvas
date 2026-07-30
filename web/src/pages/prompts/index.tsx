@@ -8,6 +8,7 @@ import { usePromptList, type PromptLibraryScope } from "@/components/prompts/use
 import { PromptDetailDialog } from "./components/prompt-detail-dialog";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
+import { suggestAssetCategory } from "@/lib/asset-category";
 import { generatePromptCover } from "@/lib/prompt-cover-generate";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
 import { cn } from "@/lib/utils";
@@ -97,6 +98,14 @@ export default function PromptsPage() {
             kind: "text",
             title: item.title,
             coverUrl: item.coverUrl,
+            category: suggestAssetCategory({
+                title: item.title,
+                tags: item.tags,
+                source: item.category,
+                content: item.prompt,
+                prompt: item.prompt,
+                kind: "text",
+            }),
             tags: item.tags,
             source: item.category,
             data: { content: item.prompt },
@@ -105,7 +114,7 @@ export default function PromptsPage() {
         message.success({
             content: (
                 <span className="inline-flex items-center gap-2">
-                    <span>已加入我的素材</span>
+                    <span>已加入我的资产</span>
                     <button type="button" className="underline underline-offset-2" onClick={() => navigate("/assets")}>
                         去查看
                     </button>
@@ -391,7 +400,7 @@ export default function PromptsPage() {
                     <div className="mx-auto mb-8 max-w-7xl">
                         <div className="mb-2">
                             <div className="text-sm font-semibold text-stone-700 dark:text-stone-200">最近使用</div>
-                            <div className="mt-0.5 text-xs text-stone-500 dark:text-stone-400">横向快捷入口；收藏请点星标，长期资源请进我的素材</div>
+                            <div className="mt-0.5 text-xs text-stone-500 dark:text-stone-400">横向快捷入口；收藏请点星标，长期资源请进我的资产</div>
                         </div>
                         <div className="hover-scrollbar flex gap-3 overflow-x-auto pb-2">
                             {recentItems.slice(0, 8).map((item) => (

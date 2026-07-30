@@ -146,6 +146,8 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
             const optimized = await optimizeGenerationPrompt(globalConfig, text, optimizeMode, {
                 signal: controller.signal,
                 onDelta: (value) => updatePrompt(value),
+                // 把已连接/可 @ 的素材摘要塞进润色约束，不改变生成请求本身
+                contextNotes: buildOptimizeContextNotes(mentionReferences, mode, hasImageContent),
             });
             updatePrompt(optimized);
             message.success("提示词已优化");
@@ -335,10 +337,35 @@ function modeLabel(mode: CanvasNodeGenerationMode) {
 }
 
 function optimizeTooltip(mode: PromptOptimizeMode) {
-    if (mode === "video") return "使用文本模型优化视频提示词（动作、运镜、节奏）";
-    if (mode === "audio") return "使用文本模型优化音频提示词（语气、节奏、旁白）";
-    if (mode === "text") return "使用文本模型优化文本提示词（目标、结构、语气）";
-    return "使用文本模型优化图片提示词（主体、构图、风格）";
+    if (mode === "video") return "AI 优化：动作/运镜/节奏，并按人物·场景·道具·分镜手册增强（保留原意与已连接参考）";
+    if (mode === "audio") return "AI 优化：语气/节奏/旁白，适合 TTS 朗读";
+    if (mode === "text") return "AI 优化：目标/结构/语气，不改成画面镜头词";
+    return "AI 优化：自动识别人物/场景/道具，补全可执行画面维度（保留原意与已连接参考）";
+}
+
+/** 润色附加上下文：仅文本摘要，不改生成链路、不上传额外媒体 */
+function buildOptimizeContextNotes(references: CanvasResourceReference[], mode: CanvasNodeGenerationMode, hasImageContent: boolean) {
+    const notes: string[] = [];
+    if (hasImageContent && mode === "image") notes.push("当前节点已有图片内容，按图生图/编辑意图优化，保持原图主体可辨认。");
+    if (hasImageContent && mode === "video") notes.push("当前节点或上游可能带参考图，优化时强调主体与服装一致，只补运动与镜头。");
+
+    const active = references.filter((item) => item.active).slice(0, 8);
+    const pool = active.length ? active : references.filter((item) => item.kind === "image" || item.kind === "text").slice(0, 6);
+    for (const ref of pool) {
+        if (ref.kind === "image") {
+            notes.push(`已连接图片参考「${ref.label || ref.title}」：提示词需与该参考主体一致，不要换成另一个人/物。`);
+            continue;
+        }
+        if (ref.kind === "video") {
+            notes.push(`已连接视频参考「${ref.label || ref.title}」：可借鉴运动与镜头，勿丢掉用户原文主体。`);
+            continue;
+        }
+        if (ref.kind === "text" && ref.text?.trim()) {
+            const snippet = ref.text.trim().replace(/\s+/g, " ").slice(0, 80);
+            notes.push(`已连接文本「${ref.label || ref.title}」：${snippet}`);
+        }
+    }
+    return notes;
 }
 
 function promptPlaceholder(mode: CanvasNodeGenerationMode, hasImageContent: boolean, hasTextContent: boolean) {

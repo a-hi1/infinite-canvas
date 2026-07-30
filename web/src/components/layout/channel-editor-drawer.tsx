@@ -2,6 +2,7 @@ import { App, Button, Drawer, Input, Select, Space } from "antd";
 import { RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { withSoraRelayModelAliases } from "@/lib/openai-compatible-video";
 import { fetchChannelModels } from "@/services/api/image";
 import {
     CHANNEL_COMPAT_OPTIONS,
@@ -41,7 +42,10 @@ export function ChannelEditorDrawer({
     const [loadingModels, setLoadingModels] = useState(false);
 
     useEffect(() => {
-        if (open && channel) setDraft({ ...channel, models: uniqueModels(channel.models) });
+        if (open && channel) {
+            // 打开已有渠道时也补 azure-sora，避免必须再点拉取/保存才看到别名
+            setDraft({ ...channel, models: uniqueModels(withSoraRelayModelAliases(channel.models)) });
+        }
     }, [open, channel]);
 
     if (!draft) return null;
@@ -63,9 +67,15 @@ export function ChannelEditorDrawer({
         }
         setLoadingModels(true);
         try {
-            const models = uniqueModels(await fetchChannelModels(draft));
+            // fetchChannelModels 已补 azure-sora 别名；此处再 normalize 一次
+            const models = uniqueModels(withSoraRelayModelAliases(await fetchChannelModels(draft)));
             patch({ models });
-            message.success(`已拉取 ${models.length} 个模型`);
+            const injectedAzure = models.includes("azure-sora") || models.includes("azure-sora-pro");
+            message.success(
+                injectedAzure && models.some((item) => /^sora([-_.]|$)|sora-2/i.test(item))
+                    ? `已拉取 ${models.length} 个模型（含本地补全的 azure-sora，供 VIDEO 端点使用）`
+                    : `已拉取 ${models.length} 个模型`,
+            );
         } catch (error) {
             message.error(error instanceof Error ? error.message : "读取模型失败");
         } finally {
@@ -79,7 +89,8 @@ export function ChannelEditorDrawer({
             name: draft.name.trim() || "未命名渠道",
             baseUrl: draft.baseUrl.trim(),
             apiKey: draft.apiKey.trim(),
-            models: uniqueModels(draft.models),
+            // 保存时也补 azure-sora：用户已有 sora-2 列表但未再点拉取时也能勾选
+            models: uniqueModels(withSoraRelayModelAliases(draft.models)),
             compatProfile: normalizeCompatProfile(draft.compatProfile),
         });
         onClose();
@@ -151,7 +162,14 @@ export function ChannelEditorDrawer({
             <div className="mt-6 mb-3 flex flex-wrap items-center justify-between gap-2">
                 <div>
                     <div className="text-sm font-semibold">模型列表</div>
-                    <div className="mt-0.5 text-xs text-stone-500">已保存 {draft.models.length} 个；拉取或手动输入后仍需到「模型」Tab 勾选可选项才会出现在下拉框。</div>
+                    <div className="mt-0.5 text-xs text-stone-500">
+                        已保存 {draft.models.length} 个；拉取或手动输入后仍需到「模型」Tab 勾选可选项才会出现在下拉框。
+                        {draft.models.some((item) => /^sora([-_.]|$)|sora-2/i.test(item)) ? (
+                            <span className="block text-amber-700 dark:text-amber-300">
+                                提示：部分中转 VIDEO 端点只认 azure-sora。列表有 sora-2 时会本地补 azure-sora 供勾选；请求默认先发你选的 sora-2，422/无渠道时再回退 azure-sora。
+                            </span>
+                        ) : null}
+                    </div>
                 </div>
                 <Button icon={<RefreshCw className="size-4" />} loading={loadingModels} onClick={() => void refreshModels()}>
                     拉取模型
@@ -164,9 +182,9 @@ export function ChannelEditorDrawer({
                 showSearch
                 allowClear
                 maxTagCount="responsive"
-                placeholder="输入模型名，或点击拉取模型"
+                placeholder="输入模型名，或点击拉取模型（可手填 azure-sora）"
                 value={draft.models}
-                onChange={(models) => patch({ models: uniqueModels(models) })}
+                onChange={(models) => patch({ models: uniqueModels(withSoraRelayModelAliases(models)) })}
             />
         </Drawer>
     );

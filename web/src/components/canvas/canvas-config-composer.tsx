@@ -148,6 +148,8 @@ export function CanvasConfigComposer({ value, inputs, mode = "image", onChange, 
             const optimized = await optimizeGenerationPrompt(globalConfig, optimizeSource, optimizeMode, {
                 signal: controller.signal,
                 onDelta: (text) => onChange(restore(text)),
+                // 组装面板：把已连接素材类型与标题作为约束，引用 token 仍由 restore 回填
+                contextNotes: buildComposerOptimizeContextNotes(inputs),
             });
             onChange(restore(optimized));
             message.success("提示词已优化");
@@ -175,7 +177,7 @@ export function CanvasConfigComposer({ value, inputs, mode = "image", onChange, 
                     <div className="truncate text-[11px] opacity-55">@ 引用已连接素材，发送前按当前连接重新编号</div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
-                    <Tooltip title="使用文本模型优化组装提示词，并尽量保留已引用素材">
+                    <Tooltip title="AI 优化组装提示词：自动按人物/场景/道具/分镜增强，并尽量保留 @ 引用素材">
                         <Button
                             type="default"
                             size="small"
@@ -259,6 +261,28 @@ function composerOptimizeMode(mode: CanvasGenerationMode): PromptOptimizeMode {
     if (mode === "audio") return "audio";
     if (mode === "text") return "text";
     return "image";
+}
+
+function buildComposerOptimizeContextNotes(inputs: NodeGenerationInput[]) {
+    const notes: string[] = ["组装提示词中的 [[REFn]] 是素材引用占位符，必须原样保留，不要翻译或删除。"];
+    inputs.slice(0, 10).forEach((input, index) => {
+        const label = resourceLabel(input, inputs);
+        if (input.type === "image") {
+            notes.push(`连接素材 ${label}（图片${index + 1}「${input.title || "未命名"}」）：优化后仍应对齐该参考主体。`);
+            return;
+        }
+        if (input.type === "video") {
+            notes.push(`连接素材 ${label}（视频「${input.title || "未命名"}」）：可借鉴运动，保留原文主体。`);
+            return;
+        }
+        if (input.type === "audio") {
+            notes.push(`连接素材 ${label}（音频「${input.title || "未命名"}」）。`);
+            return;
+        }
+        const snippet = (input.text || "").trim().replace(/\s+/g, " ").slice(0, 80);
+        notes.push(snippet ? `连接素材 ${label}（文本）：${snippet}` : `连接素材 ${label}（文本「${input.title || "未命名"}」）。`);
+    });
+    return notes;
 }
 
 function prepareComposerPromptForOptimize(value: string) {

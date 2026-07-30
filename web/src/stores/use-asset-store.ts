@@ -33,6 +33,8 @@ type AssetBase<T extends AssetKind> = {
     kind: T;
     title: string;
     coverUrl: string;
+    /** 用户自定义分类名；空/缺省 = 未分类。与 kind 正交，仅用于管理筛选。 */
+    category?: string;
     tags: string[];
     source?: string;
     note?: string;
@@ -145,10 +147,25 @@ export const useAssetStore = create<AssetStore>()(
             },
             replaceAssets: (assets) => set({ assets }),
             cleanupImages: (extra) => {
+                // 等 canvas persist 完成，避免「projects 还是 []」时 GC 把画布图当孤儿删掉。
+                // 生图/视频历史 storageKey 由 cleanupUnused* 内部额外扫描，不依赖 extra。
                 window.setTimeout(async () => {
                     const { useCanvasStore } = await import("@/stores/canvas/use-canvas-store");
-                    await cleanupUnusedImages({ assets: get().assets, projects: useCanvasStore.getState().projects, extra });
-                    await cleanupUnusedMedia({ assets: get().assets, projects: useCanvasStore.getState().projects, extra });
+                    const canvas = useCanvasStore.getState();
+                    if (!canvas.hydrated) {
+                        await new Promise<void>((resolve) => {
+                            const started = Date.now();
+                            const timer = window.setInterval(() => {
+                                if (useCanvasStore.getState().hydrated || Date.now() - started > 5000) {
+                                    window.clearInterval(timer);
+                                    resolve();
+                                }
+                            }, 50);
+                        });
+                    }
+                    const projects = useCanvasStore.getState().projects;
+                    await cleanupUnusedImages({ assets: get().assets, projects, extra });
+                    await cleanupUnusedMedia({ assets: get().assets, projects, extra });
                 }, 0);
             },
         }),

@@ -16,15 +16,25 @@ export async function uploadMediaFile(input: string | Blob, prefix = "file"): Pr
     return { url, storageKey, bytes: blob.size, mimeType: blob.type || "application/octet-stream", ...meta };
 }
 
+/**
+ * 把 storageKey 还原成可播放的 blob: URL。
+ * 本地 blob 缺失时不要回退会话级 blob:（刷新后失效 → 白框/无画面）。
+ */
 export async function resolveMediaUrl(storageKey?: string, fallback = "") {
-    if (!storageKey) return fallback;
+    if (!storageKey) return isUsableMediaSrc(fallback) ? fallback : "";
     const cached = objectUrls.get(storageKey);
     if (cached) return cached;
     const blob = await store.getItem<Blob>(storageKey);
-    if (!blob) return fallback;
+    if (!blob) return isUsableMediaSrc(fallback) ? fallback : "";
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     return url;
+}
+
+export function isUsableMediaSrc(value = "") {
+    if (!value) return false;
+    if (value.startsWith("blob:")) return false;
+    return true;
 }
 
 export async function getMediaBlob(storageKey: string) {
@@ -49,13 +59,17 @@ export async function deleteStoredMedia(keys: Iterable<string>) {
     );
 }
 
+/**
+ * 清理未被引用的本地媒体。始终把视频工作台历史里的 storageKey 算作在用。
+ */
 export async function cleanupUnusedMedia(usedData: unknown) {
     const usedKeys = collectMediaStorageKeys(usedData);
+    await collectGenerationLogMediaKeys(usedKeys);
     const unused: string[] = [];
     await store.iterate((_value, key) => {
         if (!usedKeys.has(key)) unused.push(key);
     });
-    await Promise.all(unused.map((key) => store.removeItem(key)));
+    await deleteStoredMedia(unused);
 }
 
 export function collectMediaStorageKeys(value: unknown, keys = new Set<string>()) {
@@ -63,6 +77,17 @@ export function collectMediaStorageKeys(value: unknown, keys = new Set<string>()
     if ("storageKey" in value && typeof value.storageKey === "string" && value.storageKey.includes(":")) keys.add(value.storageKey);
     Object.values(value).forEach((item) => (Array.isArray(item) ? item.forEach((child) => collectMediaStorageKeys(child, keys)) : collectMediaStorageKeys(item, keys)));
     return keys;
+}
+
+async function collectGenerationLogMediaKeys(keys: Set<string>) {
+    try {
+        const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" });
+        await logStore.iterate((value) => {
+            collectMediaStorageKeys(value, keys);
+        });
+    } catch {
+        // 历史库不可读时宁可少删
+    }
 }
 
 function readVideoMeta(url: string) {

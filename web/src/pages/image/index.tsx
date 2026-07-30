@@ -9,6 +9,7 @@ import { ImageSettingsPanel } from "@/components/image-settings-panel";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
+import { suggestAssetCategory } from "@/lib/asset-category";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { resolveImageReferenceLimit } from "@/lib/image-reference-limits";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
@@ -418,13 +419,16 @@ export default function ImagePage() {
 
     const saveResultToAssets = async (image: GeneratedImage, index: number) => {
         try {
-            // 1) 已有本地副本：直接进本机素材，与是否上云无关
+            const title = `生成结果 ${index + 1}`;
+            const category = suggestAssetCategory({ title, source: "生图工作台", prompt, kind: "image" });
+            // 1) 已有本地副本：直接进本机资产，与是否上云无关
             if (image.storageKey) {
                 const localUrl = await resolveImageUrl(image.storageKey, image.dataUrl);
                 addAsset({
                     kind: "image",
-                    title: `生成结果 ${index + 1}`,
+                    title,
                     coverUrl: localUrl || image.dataUrl,
+                    category,
                     tags: [],
                     source: "生图工作台",
                     data: {
@@ -437,28 +441,29 @@ export default function ImagePage() {
                     },
                     metadata: { source: "image-page", prompt },
                 });
-                message.success("已加入我的素材（本机）");
+                message.success("已加入我的资产（本机）");
                 return;
             }
 
             // 2) 远程 imgen 等：uploadImage 会尝试 CORS → ai-proxy → 登录后服务端拉取
             const stored = await uploadImage(image.dataUrl);
             if (!stored.storageKey && stored.remote) {
-                message.error("这张生成图还不能进素材：远程临时地址浏览器读不到。请先登录后重试（服务端可代拉），或下载后本地导入");
+                message.error("这张生成图还不能进资产：远程临时地址浏览器读不到。请先登录后重试（服务端可代拉），或下载后本地导入");
                 return;
             }
             addAsset({
                 kind: "image",
-                title: `生成结果 ${index + 1}`,
+                title,
                 coverUrl: stored.url,
+                category,
                 tags: [],
                 source: "生图工作台",
                 data: { dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType },
                 metadata: { source: "image-page", prompt },
             });
-            message.success("已加入我的素材（本机）");
+            message.success("已加入我的资产（本机）");
         } catch (error) {
-            message.error(error instanceof Error ? error.message : "加入素材失败");
+            message.error(error instanceof Error ? error.message : "加入资产失败");
         }
     };
 
@@ -469,7 +474,7 @@ export default function ImagePage() {
             const stored = await uploadImage(payload.dataUrl);
             appendReferences([{ id: nanoid(), name: payload.title, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }]);
         } else {
-            message.warning("生图工作台只能使用文本或图片素材");
+            message.warning("生图工作台只能使用文本或图片资产");
         }
         setAssetPickerOpen(false);
     };
@@ -796,12 +801,12 @@ export default function ImagePage() {
                                             查看提示词库
                                         </Button>
                                         <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => setAssetPickerOpen(true)}>
-                                            查看我的素材
+                                            查看我的资产
                                         </Button>
                                     </div>
                                 </div>
                                 <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder="描述画面主体、风格、构图、光线和用途" disabled={optimizingPrompt} />
-                                <div className="mt-1.5 text-xs text-stone-500 dark:text-stone-400">AI 优化会使用当前文本模型，把简短描述扩写成更准确、美观的生图提示词。</div>
+                                <div className="mt-1.5 text-xs text-stone-500 dark:text-stone-400">AI 优化会使用当前文本模型，自动识别人物/场景/道具等，把简短描述扩写成更准确、可执行的生图提示词。</div>
                             </div>
 
                             <div className="min-w-0">
@@ -1031,9 +1036,9 @@ function ResultImageCard({
                     <span>{formatDuration(image.durationMs)}</span>
                 </div>
                 <div className="grid min-w-0 grid-cols-3 gap-2">
-                    <Tooltip title="添加到素材">
+                    <Tooltip title="添加到资产">
                         <Button className={RESULT_ACTION_BUTTON_CLASS} size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => void onSaveAsset(image, index)}>
-                            添加到素材
+                            添加到资产
                         </Button>
                     </Tooltip>
                     <Tooltip title="加入参考图">
@@ -1265,6 +1270,7 @@ async function readStoredLogs() {
 }
 
 async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog> {
+    // resolveImageUrl 已拒绝过期 blob: fallback；远程 https 仍可作兜底展示
     const references = await Promise.all(
         (log.references || []).map(async (item) => ({
             ...item,

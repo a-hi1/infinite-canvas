@@ -4,6 +4,21 @@ import { Switch } from "antd";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import { AGNES_VIDEO_HEIGHT, AGNES_VIDEO_SIZE, AGNES_VIDEO_WIDTH, agnesDurationOptions, agnesVideoModeHint, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
 import { isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
+import {
+    isSoraOrVeoVideoConfig,
+    isSoraVideoConfig,
+    isVeoVideoConfig,
+    normalizeSoraSeconds,
+    normalizeSoraSize,
+    normalizeVeoSeconds,
+    normalizeVeoSize,
+    soraSizeOptionsForModel,
+    soraVideoModeHint,
+    veoVideoModeHint,
+    SORA_SECONDS_OPTIONS,
+    VEO_SECONDS_OPTIONS,
+    VEO_SIZE_OPTIONS,
+} from "@/lib/openai-compatible-video";
 import { boolConfig, isSeedanceFastModel, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceDurationOptions, seedancePixelLabel, seedanceRatioOptions, seedanceResolutionOptions } from "@/lib/seedance-video";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
@@ -41,6 +56,9 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     }
     if (isGrokVideoConfig(config)) {
         return <GrokVideoSettingsPanel config={config} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} className={className} />;
+    }
+    if (isSoraOrVeoVideoConfig(config)) {
+        return <SoraVeoVideoSettingsPanel config={config} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} className={className} />;
     }
 
     const seconds = config.videoSeconds || "6";
@@ -101,6 +119,63 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                             </OptionPill>
                         ))}
                         <NumberInput value={seconds} min={1} max={20} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} />
+                    </div>
+                </SettingGroup>
+            </div>
+        </ImageSettingsTheme>
+    );
+}
+
+function SoraVeoVideoSettingsPanel({ config, onConfigChange, theme, showTitle, className }: VideoSettingsPanelProps) {
+    const sora = isSoraVideoConfig(config);
+    const veo = isVeoVideoConfig(config);
+    const modelName = modelOptionName(config.model || config.videoModel || "");
+    const sizeOptionsForModel = sora ? soraSizeOptionsForModel(modelName) : VEO_SIZE_OPTIONS;
+    const secondOptionsForModel = sora ? SORA_SECONDS_OPTIONS : VEO_SECONDS_OPTIONS;
+    const size = sora ? normalizeSoraSize(config.size, modelName) : normalizeVeoSize(config.size);
+    const seconds = sora ? normalizeSoraSeconds(config.videoSeconds) : normalizeVeoSeconds(config.videoSeconds);
+    const title = sora ? "Sora 视频设置" : veo ? "Veo 视频设置" : "Sora / Veo 视频设置";
+    const hint = sora
+        ? `${soraVideoModeHint} 文生优先 JSON（model/prompt/seconds/size）；图生 multipart input_reference 或 JSON images（仅 1 张首帧）。创建路径自动试 /videos → /video/generations → /videos/generations。部分中转 VIDEO 端点只认 azure-sora：请求先发你选的 sora-2，再回退 azure-sora。不发送 resolution_name / preset。`
+        : `${veoVideoModeHint} 文生 JSON 优先；图生优先 JSON images/reference_images（最多 3 张），有参考时自动切 veo-*-i2v。不发送 resolution_name / preset。`;
+
+    return (
+        <ImageSettingsTheme theme={theme}>
+            <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
+                {showTitle ? <div className="text-lg font-semibold">{title}</div> : null}
+                <SettingGroup title="说明" color={theme.node.muted}>
+                    <div className="rounded-xl border p-3 text-xs leading-5" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                        {hint}
+                    </div>
+                </SettingGroup>
+                <SettingGroup title="尺寸" color={theme.node.muted}>
+                    <div className="grid grid-cols-2 gap-2.5">
+                        {sizeOptionsForModel.map((item) => {
+                            const [width, height] = item.value.split("x").map(Number);
+                            return (
+                                <button
+                                    key={item.value}
+                                    type="button"
+                                    className="flex h-[72px] cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border bg-transparent text-sm transition hover:opacity-80"
+                                    style={{ borderColor: size === item.value ? theme.node.text : theme.node.stroke, color: theme.node.text }}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onClick={() => onConfigChange("size", item.value)}
+                                >
+                                    <SizePreview width={width} height={height} color={theme.node.text} />
+                                    <span>{item.label}</span>
+                                    <span className="text-[11px] leading-none opacity-55">{item.value}</span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                </SettingGroup>
+                <SettingGroup title="秒数" color={theme.node.muted}>
+                    <div className="grid grid-cols-3 gap-2.5">
+                        {secondOptionsForModel.map((value) => (
+                            <OptionPill key={value} selected={seconds === String(value)} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
+                                {value}s
+                            </OptionPill>
+                        ))}
                     </div>
                 </SettingGroup>
             </div>
@@ -252,6 +327,11 @@ function SeedanceVideoSettingsPanel({ config, onConfigChange, theme, showTitle, 
 export function videoSettingsSummary(config: Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "baseUrl">) {
     if (isAgnesVideoConfig(config)) return `Agnes · ${AGNES_VIDEO_SIZE} · ${normalizeAgnesDuration(config.videoSeconds)}s`;
     if (isGrokVideoConfig(config)) return `Grok · ${normalizeGrokResolution(config.vquality)} · ${normalizeGrokAspectRatio(config.size)} · ${normalizeGrokDuration(config.videoSeconds)}s`;
+    if (isSoraVideoConfig(config)) {
+        const modelName = modelOptionName(config.model || config.videoModel || "");
+        return `Sora · ${normalizeSoraSize(config.size, modelName)} · ${normalizeSoraSeconds(config.videoSeconds)}s`;
+    }
+    if (isVeoVideoConfig(config)) return `Veo · ${normalizeVeoSize(config.size)} · ${normalizeVeoSeconds(config.videoSeconds)}s`;
     return `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
 }
 

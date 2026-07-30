@@ -57,15 +57,26 @@ function isBrowserFetchBlockedHost(url: string) {
     }
 }
 
+/**
+ * 把 storageKey 还原成可显示的 blob:/data: URL。
+ * 若本地 blob 已丢，**不要**回退到会话级 blob:（刷新后必失效，会表现为白框但元数据还在）。
+ */
 export async function resolveImageUrl(storageKey?: string, fallback = "") {
-    if (!storageKey) return fallback;
+    if (!storageKey) return isUsableImageSrc(fallback) ? fallback : "";
     const cached = objectUrls.get(storageKey);
     if (cached) return cached;
     const blob = await store.getItem<Blob>(storageKey);
-    if (!blob) return fallback;
+    if (!blob) return isUsableImageSrc(fallback) ? fallback : "";
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     return url;
+}
+
+/** blob: 仅当前文档会话有效；刷新/重开后一律视为不可用。 */
+export function isUsableImageSrc(value = "") {
+    if (!value) return false;
+    if (value.startsWith("blob:")) return false;
+    return true;
 }
 
 export async function getImageBlob(storageKey: string) {
@@ -255,8 +266,14 @@ export async function deleteStoredImages(keys: Iterable<string>) {
     );
 }
 
+/**
+ * 清理未被引用的本地图 blob。
+ * 除传入的 assets/projects 外，**始终**把生图工作台历史 log 里的 storageKey 算作在用，
+ * 避免删素材/画布时把工作台历史图误删（表现为：尺寸/体积还在，预览白框）。
+ */
 export async function cleanupUnusedImages(usedData: unknown) {
     const usedKeys = collectImageStorageKeys(usedData);
+    await collectGenerationLogImageKeys(usedKeys);
     const unused: string[] = [];
     await store.iterate((_value, key) => {
         if (!usedKeys.has(key)) unused.push(key);
@@ -269,6 +286,18 @@ export function collectImageStorageKeys(value: unknown, keys = new Set<string>()
     if ("storageKey" in value && typeof value.storageKey === "string" && value.storageKey.startsWith("image:")) keys.add(value.storageKey);
     Object.values(value).forEach((item) => (Array.isArray(item) ? item.forEach((child) => collectImageStorageKeys(child, keys)) : collectImageStorageKeys(item, keys)));
     return keys;
+}
+
+/** 扫描生图历史 IndexedDB，防止 GC 误删仍在历史里的图。 */
+async function collectGenerationLogImageKeys(keys: Set<string>) {
+    try {
+        const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
+        await logStore.iterate((value) => {
+            collectImageStorageKeys(value, keys);
+        });
+    } catch {
+        // 历史库不可读时宁可少删，不扩大 GC
+    }
 }
 
 function blobToDataUrl(blob: Blob) {

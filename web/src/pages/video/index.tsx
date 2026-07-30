@@ -11,9 +11,22 @@ import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSettingsSummary } from "@/components/video-settings-panel";
 import { AGNES_VIDEO_SIZE, agnesVideoModeHint, agnesVideoRequestError, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
+import { suggestAssetCategory } from "@/lib/asset-category";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS, grokVideoModeHint, isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
+import {
+    isSoraOrVeoVideoConfig,
+    isSoraVideoConfig,
+    isVeoVideoConfig,
+    normalizeSoraSeconds,
+    normalizeSoraSize,
+    normalizeVeoSeconds,
+    normalizeVeoSize,
+    soraVeoModeHint,
+    soraVeoReferenceImageLimit,
+    soraVeoReferenceImageMaxBytes,
+} from "@/lib/openai-compatible-video";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
 import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
@@ -161,10 +174,33 @@ export default function VideoPage() {
     const agnesMode = isAgnesVideoConfig(videoRequestConfig);
     const seedanceMode = isSeedanceVideoConfig(videoRequestConfig);
     const grokMode = isGrokVideoConfig(videoRequestConfig);
-    const videoProviderLabel = agnesMode ? "Agnes Video" : seedanceMode ? "Seedance / Agent Plan" : grokMode ? "Grok Imagine" : "OpenAI /videos";
+    const soraMode = isSoraVideoConfig(videoRequestConfig);
+    const veoMode = isVeoVideoConfig(videoRequestConfig);
+    const soraVeoMode = isSoraOrVeoVideoConfig(videoRequestConfig);
+    const soraVeoImageMax = soraVeoMode ? soraVeoReferenceImageLimit(model) : SEEDANCE_REFERENCE_LIMITS.images;
+    const soraVeoImageMaxBytes = soraVeoMode ? soraVeoReferenceImageMaxBytes(model) : SEEDANCE_REFERENCE_LIMITS.imageMaxBytes;
+    const videoProviderLabel = agnesMode
+        ? "Agnes Video"
+        : seedanceMode
+          ? "Seedance / Agent Plan"
+          : grokMode
+            ? "Grok Imagine"
+            : soraMode
+              ? "Sora /videos"
+              : veoMode
+                ? "Veo /videos"
+                : "OpenAI /videos";
     const videoUsesCustomScript = Boolean(resolveModelScript(effectiveConfig, model));
     const videoReadinessWarning = getVideoReadinessWarning(videoRequestConfig, model);
-    const referenceModeHint = agnesMode ? agnesVideoModeHint : seedanceMode ? "当前模型支持参考图、参考视频和参考音频" : grokMode ? grokVideoModeHint : "当前 OpenAI 格式视频接口仅支持参考图；参考视频/音频需要 Seedance 2.0 / 火山 Agent Plan";
+    const referenceModeHint = agnesMode
+        ? agnesVideoModeHint
+        : seedanceMode
+          ? "当前模型支持参考图、参考视频和参考音频"
+          : grokMode
+            ? grokVideoModeHint
+            : soraVeoMode
+              ? soraVeoModeHint
+              : "当前 OpenAI 格式视频接口仅支持参考图；参考视频/音频需要 Seedance 2.0 / 火山 Agent Plan";
     const canGenerate = Boolean(prompt.trim());
 
     useEffect(() => {
@@ -181,14 +217,20 @@ export default function VideoPage() {
         const selectedFiles = Array.from(files || []);
         const unsupported = selectedFiles.filter((file) => !file.type.startsWith("image/") && !file.type.startsWith("video/") && !isSupportedAudioFile(file));
         if (unsupported.length) message.warning("已忽略不支持的参考素材，请使用图片、mp4/mov 视频或 mp3/wav 音频");
-        const imageMax = SEEDANCE_REFERENCE_LIMITS.images;
+        const imageMax = soraVeoMode ? soraVeoImageMax : SEEDANCE_REFERENCE_LIMITS.images;
+        const imageMaxBytes = soraVeoMode ? soraVeoImageMaxBytes : SEEDANCE_REFERENCE_LIMITS.imageMaxBytes;
         const videoMax = grokMode ? GROK_EDIT_REFERENCE_LIMITS.videos : SEEDANCE_REFERENCE_LIMITS.videos;
         const videoMaxBytes = grokMode ? GROK_EDIT_REFERENCE_LIMITS.videoMaxBytes : SEEDANCE_REFERENCE_LIMITS.videoMaxBytes;
         const audioMax = SEEDANCE_REFERENCE_LIMITS.audios;
-        const imageFiles = selectedFiles.filter((file) => file.type.startsWith("image/") && file.size <= SEEDANCE_REFERENCE_LIMITS.imageMaxBytes).slice(0, imageMax - references.length);
+        const imageFiles = selectedFiles.filter((file) => file.type.startsWith("image/") && file.size <= imageMaxBytes).slice(0, Math.max(0, imageMax - references.length));
         const videoFiles = selectedFiles.filter((file) => file.type.startsWith("video/") && file.size <= videoMaxBytes).slice(0, Math.max(0, videoMax - videoReferences.length));
         const audioFiles = selectedFiles.filter((file) => isSupportedAudioFile(file) && file.size <= SEEDANCE_REFERENCE_LIMITS.audioMaxBytes).slice(0, audioMax - audioReferences.length);
-        if (selectedFiles.some((file) => file.type.startsWith("image/") && file.size > SEEDANCE_REFERENCE_LIMITS.imageMaxBytes)) message.warning("已忽略超过 30MB 的参考图");
+        if (selectedFiles.some((file) => file.type.startsWith("image/") && file.size > imageMaxBytes)) {
+            message.warning(soraVeoMode ? "已忽略超过 20MB 的参考图（Sora/Veo 上限）" : "已忽略超过 30MB 的参考图");
+        }
+        if (soraVeoMode && selectedFiles.some((file) => file.type.startsWith("image/")) && references.length >= imageMax) {
+            message.warning(veoMode ? `Veo 图生视频最多 ${imageMax} 张参考图` : "Sora 图生视频只使用 1 张首帧参考图");
+        }
         if (selectedFiles.some((file) => file.type.startsWith("video/") && file.size > videoMaxBytes)) {
             message.warning(grokMode ? "已忽略超过 100MB 的参考视频（Grok edits 上限）" : "已忽略超过 50MB 的参考视频");
         }
@@ -231,13 +273,14 @@ export default function VideoPage() {
                 message.error("剪切板里没有可读取的图片");
                 return;
             }
+            const imageMax = soraVeoMode ? soraVeoImageMax : SEEDANCE_REFERENCE_LIMITS.images;
             const nextReferences = await Promise.all(
-                blobs.slice(0, SEEDANCE_REFERENCE_LIMITS.images - references.length).map(async (blob, index) => {
+                blobs.slice(0, Math.max(0, imageMax - references.length)).map(async (blob, index) => {
                     const image = await uploadImage(blob);
                     return { id: nanoid(), name: `clipboard-${index + 1}.png`, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
                 }),
             );
-            setReferences((value) => [...value, ...nextReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.images));
+            setReferences((value) => [...value, ...nextReferences].slice(0, imageMax));
             message.success(`已读取 ${nextReferences.length} 张参考图`);
         } catch {
             message.error("剪切板里没有可读取的图片");
@@ -410,16 +453,18 @@ export default function VideoPage() {
     };
 
     const saveResultToAssets = (video: GeneratedVideo) => {
+        const title = "生成视频";
         addAsset({
             kind: "video",
-            title: "生成视频",
+            title,
             coverUrl: "",
+            category: suggestAssetCategory({ title, source: "视频创作台", prompt, kind: "video" }),
             tags: [],
             source: "视频创作台",
             data: { url: video.url, storageKey: video.storageKey, width: video.width, height: video.height, bytes: video.bytes, mimeType: video.mimeType },
             metadata: { source: "video-page", prompt },
         });
-        message.success("已加入我的素材");
+        message.success("已加入我的资产");
     };
 
     const insertPickedAsset = async (payload: InsertAssetPayload) => {
@@ -427,7 +472,12 @@ export default function VideoPage() {
             setPrompt(payload.content);
         } else if (payload.kind === "image") {
             const stored = await uploadImage(payload.dataUrl);
-            setReferences((value) => [...value, { id: nanoid(), name: payload.title, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }].slice(0, SEEDANCE_REFERENCE_LIMITS.images));
+            setReferences((value) =>
+                [...value, { id: nanoid(), name: payload.title, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }].slice(
+                    0,
+                    soraVeoMode ? soraVeoImageMax : SEEDANCE_REFERENCE_LIMITS.images,
+                ),
+            );
         } else if (payload.kind === "video") {
             setVideoReferences((value) => [...value, { id: nanoid(), name: payload.title, type: "video/mp4", url: payload.url, storageKey: payload.storageKey, width: payload.width, height: payload.height }].slice(0, SEEDANCE_REFERENCE_LIMITS.videos));
         }
@@ -634,12 +684,12 @@ export default function VideoPage() {
                                             查看提示词库
                                         </Button>
                                         <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => setAssetPickerOpen(true)}>
-                                            查看我的素材
+                                            查看我的资产
                                         </Button>
                                     </div>
                                 </div>
                                 <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder="描述镜头运动、主体动作、场景氛围和画面风格" disabled={optimizingPrompt} />
-                                <div className="mt-1.5 text-xs text-stone-500 dark:text-stone-400">AI 优化会使用当前文本模型，补全镜头运动、动作节奏与画面风格，便于生成更合理的视频。</div>
+                                <div className="mt-1.5 text-xs text-stone-500 dark:text-stone-400">AI 优化会使用当前文本模型，补全镜头运动、动作节奏与画面风格；若描述像人物/场景/分镜，会按对应生产维度增强。</div>
                             </div>
 
                             <div className="min-w-0">
@@ -671,7 +721,15 @@ export default function VideoPage() {
                                             </button>
                                         </div>
                                     ))}
-                                    {!references.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">暂无参考图，最多 9 张</div> : null}
+                                    {!references.length ? (
+                                        <div className="flex min-w-full items-center justify-center text-sm text-stone-500">
+                                            {soraVeoMode
+                                                ? veoMode
+                                                    ? `暂无参考图；Veo 图生最多 ${soraVeoImageMax} 张`
+                                                    : "暂无参考图；Sora 图生仅 1 张首帧"
+                                                : "暂无参考图，最多 9 张"}
+                                        </div>
+                                    ) : null}
                                 </div>
                             </div>
 
@@ -900,7 +958,7 @@ function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedV
                 </div>
                 <div className="flex shrink-0 gap-1">
                     <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => onSaveAsset(video)}>
-                        添加到素材
+                        添加到资产
                     </Button>
                     <Button size="small" icon={<Download className="size-3.5" />} onClick={() => onDownload(video)}>
                         下载
@@ -1305,12 +1363,29 @@ function buildVideoConfig(config: AiConfig, model: string): AiConfig {
     }
     const seedance = isSeedanceVideoConfig(partial);
     const grok = isGrokVideoConfig(partial);
+    const sora = isSoraVideoConfig(partial);
+    const veo = isVeoVideoConfig(partial);
+    const modelName = modelOptionName(model);
     return {
         ...config,
         model,
         videoModel: model,
-        size: seedance ? normalizeSeedanceRatio(config.size) : grok ? normalizeGrokAspectRatio(config.size) : normalizeVideoSize(config.size),
-        videoSeconds: grok ? String(normalizeGrokDuration(config.videoSeconds)) : normalizeVideoSeconds(config.videoSeconds),
+        size: seedance
+            ? normalizeSeedanceRatio(config.size)
+            : grok
+              ? normalizeGrokAspectRatio(config.size)
+              : sora
+                ? normalizeSoraSize(config.size, modelName)
+                : veo
+                  ? normalizeVeoSize(config.size)
+                  : normalizeVideoSize(config.size),
+        videoSeconds: grok
+            ? String(normalizeGrokDuration(config.videoSeconds))
+            : sora
+              ? normalizeSoraSeconds(config.videoSeconds)
+              : veo
+                ? normalizeVeoSeconds(config.videoSeconds)
+                : normalizeVideoSeconds(config.videoSeconds),
         vquality: grok ? normalizeGrokResolution(config.vquality) : normalizeResolution(config.vquality),
         videoGenerateAudio: String(boolConfig(config.videoGenerateAudio, true)),
         videoWatermark: String(boolConfig(config.videoWatermark, false)),

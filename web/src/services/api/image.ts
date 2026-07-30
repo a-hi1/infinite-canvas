@@ -18,6 +18,7 @@ import { compressImageDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { BYOK_IMAGE_REFERENCE_LIMIT, SCRIPT_IMAGE_REFERENCE_LIMIT } from "@/lib/image-reference-limits";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { enhanceImageUpstreamError } from "@/lib/image-request-mode";
+import { withSoraRelayModelAliases } from "@/lib/openai-compatible-video";
 import { ensureLocalImageDataUrl, imageToDataUrl } from "@/services/image-storage";
 import { normalizePluginImages, runModelPlugin } from "@/services/api/model-plugin";
 import type { ReferenceImage } from "@/types/image";
@@ -1631,7 +1632,9 @@ export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKe
 }
 
 export async function fetchChannelModels(channel: ModelChannel) {
-    return fetchImageModels({ baseUrl: channel.baseUrl, apiKey: channel.apiKey, apiFormat: channel.apiFormat });
+    const models = await fetchImageModels({ baseUrl: channel.baseUrl, apiKey: channel.apiKey, apiFormat: channel.apiFormat });
+    // openai2api 等：/models 常只有 sora-2，VIDEO 端点却要 azure-sora → 本地补可选别名
+    return withSoraRelayModelAliases(models);
 }
 
 const defaultGeminiConfig: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat" | "model" | "systemPrompt"> = {

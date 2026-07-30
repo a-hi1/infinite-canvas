@@ -167,7 +167,7 @@ export function PromptDetailDialog({
                                 </Button>
                                 {onSaveAsset ? (
                                     <Button icon={<FolderPlus className="size-4" />} onClick={() => onSaveAsset(prompt)}>
-                                        加入我的素材
+                                        加入我的资产
                                     </Button>
                                 ) : null}
                             </Space>

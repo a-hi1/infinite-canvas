@@ -31,7 +31,7 @@ function withChannels(channels: ModelChannel[], videoModel: string): AiConfig {
 }
 
 describe("Grok video model routing", () => {
-    it("keeps channel qualification when auto-switching to a real I2V model", () => {
+    it("keeps channel qualification when auto-switching from image model to base video (not 1.5 first)", () => {
         const channel: ModelChannel = {
             id: "home",
             name: "Home Grok",
@@ -46,9 +46,10 @@ describe("Grok video model routing", () => {
         const resolved = resolveVideoModelForReferences(config, config.videoModel);
 
         expect(resolved.switched).toBe(true);
-        expect(resolved.modelValue).toBe("home::grok-imagine-video-1.5");
+        // 从图片模型切视频：基础 video 优先，1.5 不抢位
+        expect(resolved.modelValue).toBe("home::grok-imagine-video");
         expect(resolved.from).toBe("grok-imagine-image-quality");
-        expect(resolved.to).toBe("grok-imagine-video-1.5");
+        expect(resolved.to).toBe("grok-imagine-video");
     });
 
     it("uses only the selected channel inventory when duplicate video model names exist", () => {
@@ -98,7 +99,43 @@ describe("Grok video model routing", () => {
         expect(resolved.modelValue).toBe("relay::grok-imagine-image-quality");
     });
 
-    it("builds only full multi-reference candidates and covers fallback models fairly", async () => {
+    it("auto-switches Veo to same-channel i2v when references are present", () => {
+        const channel: ModelChannel = {
+            id: "sora",
+            name: "Sora Relay",
+            baseUrl: "https://relay.example/v1",
+            apiKey: "test-only",
+            apiFormat: "openai",
+            compatProfile: "auto",
+            models: ["sora-2", "veo-3.1", "veo-3.1-i2v", "veo-3.1-fast"],
+        };
+        const config = withChannels([channel], "sora::veo-3.1");
+        const resolved = resolveVideoModelForReferences(config, config.videoModel);
+        expect(resolved.switched).toBe(true);
+        expect(resolved.modelValue).toBe("sora::veo-3.1-i2v");
+        expect(resolved.to).toBe("veo-3.1-i2v");
+    });
+
+    it("keeps Veo i2v and Sora model selection unchanged", () => {
+        const channel: ModelChannel = {
+            id: "sora",
+            name: "Sora Relay",
+            baseUrl: "https://relay.example/v1",
+            apiKey: "test-only",
+            apiFormat: "openai",
+            compatProfile: "auto",
+            models: ["sora-2", "veo-3.1", "veo-3.1-i2v"],
+        };
+        const i2v = resolveVideoModelForReferences(withChannels([channel], "sora::veo-3.1-i2v"), "sora::veo-3.1-i2v");
+        expect(i2v.switched).toBe(false);
+        expect(i2v.modelValue).toBe("sora::veo-3.1-i2v");
+
+        const sora = resolveVideoModelForReferences(withChannels([channel], "sora::sora-2"), "sora::sora-2");
+        expect(sora.switched).toBe(false);
+        expect(sora.modelValue).toBe("sora::sora-2");
+    });
+
+    it("builds only full multi-reference candidates and puts user selection before 1.5 fallback", async () => {
         const channel: ModelChannel = {
             id: "home",
             name: "Home Grok",
@@ -121,8 +158,15 @@ describe("Grok video model routing", () => {
         expect(candidates.length).toBeLessThanOrEqual(18);
         expect(candidates.every((payload) => payloadKeepsAllGrokVideoReferences(payload, references.length))).toBe(true);
         expect(new Set(candidates.map((payload) => payload.model))).toEqual(new Set(["grok-imagine-video-1.5", "grok-imagine-video"]));
-        for (const model of ["grok-imagine-video-1.5", "grok-imagine-video"]) {
+        // 用户选 video：第一个 payload 必须是 video，1.5 仅兜底
+        expect(candidates[0]?.model).toBe("grok-imagine-video");
+        const first15 = candidates.findIndex((payload) => payload.model === "grok-imagine-video-1.5");
+        const firstUser = candidates.findIndex((payload) => payload.model === "grok-imagine-video");
+        expect(firstUser).toBe(0);
+        if (first15 >= 0) expect(first15).toBeGreaterThan(firstUser);
+        for (const model of ["grok-imagine-video", "grok-imagine-video-1.5"]) {
             const modelPayloads = candidates.filter((payload) => payload.model === model);
+            if (!modelPayloads.length) continue;
             expect(modelPayloads.some((payload) => Array.isArray(payload.reference_images))).toBe(true);
             expect(modelPayloads.some((payload) => Array.isArray(payload.images))).toBe(true);
             expect(modelPayloads.some((payload) => Array.isArray(payload.image_urls))).toBe(true);

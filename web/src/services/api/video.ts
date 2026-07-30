@@ -16,6 +16,27 @@ import {
     normalizeGrokResolution,
 } from "@/lib/grok-video";
 import { boolConfig, buildSeedancePromptText, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
+import {
+    buildSoraVeoFormFieldCandidates,
+    isInvalidVideoRequestBodyError,
+    isMissingSoraVeoCreatePathError,
+    isMultiImageSoraVeoReferenceField,
+    isSoraOrVeoVideoModel,
+    isSoraVideoModel,
+    isUnavailableVideoChannelError,
+    isUnsupportedVideoModelError,
+    isVeoI2vModel,
+    isVeoVideoModel,
+    parseSupportedVideoModelsFromError,
+    shouldSkipToNextVideoModelName,
+    shouldTryNextSoraVeoCreatePath,
+    preferSoraRelayModelName,
+    preferVeoI2vModelName,
+    soraRequestModelCandidates,
+    soraVeoCreatePathCandidates,
+    soraVeoReferenceImageLimit,
+    type SoraVeoReferenceField,
+} from "@/lib/openai-compatible-video";
 import { runModelPlugin } from "@/services/api/model-plugin";
 import { AI_PROXY_BASE_URL, buildApiUrl, encodeChannelModel, isAiProxyBaseUrl, isLanAiBaseUrl, isSameOriginRelayBaseUrl, LAN_AI_BASE_URL, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
@@ -69,7 +90,15 @@ type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: strin
 type RequestOptions = { signal?: AbortSignal };
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
-export type VideoGenerationTask = { id: string; provider: "openai" | "seedance" | "agnes" | "grok" | "script"; model: string; requestModel?: string; readyResult?: VideoGenerationResult };
+export type VideoGenerationTask = {
+    id: string;
+    provider: "openai" | "seedance" | "agnes" | "grok" | "script";
+    model: string;
+    requestModel?: string;
+    /** Sora/Veo 实际打通的创建路径，如 /videos 或 /video/generations；轮询优先对齐 */
+    createPath?: string;
+    readyResult?: VideoGenerationResult;
+};
 export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "failed"; error: string };
 
 /** One-shot scripted video results (script does its own create+poll). */
@@ -101,26 +130,41 @@ export async function requestVideoGeneration(config: AiConfig, prompt: string, r
 }
 
 /**
- * 有参考图时：在同渠道视频模型列表中自动选用更适合 I2V 的 Grok 模型（不硬塞不存在的 1.5）。
+ * 有参考图时：
+ * 1) Grok 图片模型 → 同渠道视频模型（1.5/i2v 仅兜底）
+ * 2) Veo 非 i2v → 同渠道 veo-*-i2v（若有）
+ * Sora 别名映射（sora-2 → azure-sora）在创建任务时处理（文生/图生都需要），此处不改。
+ * Grok/Seedance/Agnes 其它路径不变。
  */
 export function resolveVideoModelForReferences(config: AiConfig, selectedModelValue: string): { modelValue: string; switched: boolean; from: string; to: string } {
     const selected = (selectedModelValue || config.videoModel || config.model || "").trim();
     const channel = resolveModelChannel(config, selected);
     const fromName = modelOptionName(selected);
     const fromLower = fromName.toLowerCase();
+    const raw = (channel.models || []).map((m) => modelOptionName(m).trim()).filter(Boolean);
+
+    // Veo：有参考图时优先同渠道 i2v 变体（不碰 Grok/Sora）
+    if (isVeoVideoModel(fromName) && !isVeoI2vModel(fromName)) {
+        const preferred = preferVeoI2vModelName(fromName, raw);
+        if (preferred && preferred.toLowerCase() !== fromLower) {
+            return { modelValue: encodeChannelModel(channel.id, preferred), switched: true, from: fromName, to: preferred };
+        }
+        return { modelValue: selected, switched: false, from: fromName, to: fromName };
+    }
+
     const isGrok =
         isGrokVideoConfig({ ...config, model: selected, videoModel: selected, baseUrl: channel.baseUrl }) ||
         (fromLower.includes("grok") && (fromLower.includes("video") || fromLower.includes("imagine")));
     if (!isGrok) return { modelValue: selected, switched: false, from: fromName, to: fromName };
 
-    const raw = (channel.models || []).map((m) => modelOptionName(m).trim()).filter(Boolean);
     const pick = (pred: (n: string) => boolean) => raw.find((m) => pred(m.toLowerCase())) || "";
-    // 已是明确视频模型则保留
+    // 已是明确视频模型则保留（含用户选的 1.5 / 基础 video）
     if (fromLower.includes("video") || fromLower.includes("imagine-video")) {
         return { modelValue: selected, switched: false, from: fromName, to: fromName };
     }
+    // 从图片模型切视频：基础 video 优先，1.5/i2v 仅兜底（避免多参考图先撞「仅 1 张首图」）
     const preferred =
-        pick((n) => n.includes("grok") && n.includes("video") && (n.includes("1.5") || n.includes("i2v"))) ||
+        pick((n) => n.includes("grok") && n.includes("video") && !n.includes("1.5") && !n.includes("i2v") && !n.includes("image-to-video")) ||
         pick((n) => n.includes("grok") && n.includes("video")) ||
         pick((n) => n.includes("grok") && n.includes("imagine") && !n.includes("image-quality"));
     if (!preferred || preferred.toLowerCase() === fromLower) {
@@ -330,13 +374,13 @@ function looksLikeLanVideoService(parsed: URL) {
 }
 
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
-    const body = new FormData();
-    body.append("model", modelOptionName(model));
-    body.append("prompt", prompt);
-    body.append("seconds", normalizeVideoSeconds(config.videoSeconds));
-    if (normalizeVideoSize(config.size)) body.append("size", normalizeVideoSize(config.size)!);
-    body.append("resolution_name", normalizeVideoResolution(config.vquality));
-    body.append("preset", "normal");
+    const modelName = modelOptionName(model);
+    // Sora / Veo（New API 等）：禁止 resolution_name / preset，秒数与尺寸夹到上游枚举；invalid body 时换精简候选。
+    // 其它 OpenAI 兼容模型保持原 multipart（含 resolution_name + preset），避免影响已有渠道。
+    if (isSoraOrVeoVideoModel(modelName)) {
+        return createSoraVeoOpenAiVideoTask(config, model, prompt, references, options);
+    }
+
     // OpenAI / 多数中转站使用单数 input_reference 作为首帧/参考图；同名字段多次 append 兼容多图中转。
     // 远程 CORS 图拿不到二进制时不要强行 append，否则 dataUrlToFile 会失败或发出空字段请求。
     const files = (
@@ -351,6 +395,14 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     if (references.length && !files.length) {
         throw new Error("参考图是远程地址且浏览器无法读取（常见于 imgen.x.ai CORS）。请改用本地上传的参考图，或使用支持公网图片 URL 的 Grok /videos/generations 渠道");
     }
+
+    const body = new FormData();
+    body.append("model", modelName);
+    body.append("prompt", prompt);
+    body.append("seconds", normalizeVideoSeconds(config.videoSeconds));
+    if (normalizeVideoSize(config.size)) body.append("size", normalizeVideoSize(config.size)!);
+    body.append("resolution_name", normalizeVideoResolution(config.vquality));
+    body.append("preset", "normal");
     files.forEach((file) => body.append("input_reference", file));
     try {
         const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), body, { headers: aiHeaders(config), signal: options?.signal })).data);
@@ -361,33 +413,512 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     }
 }
 
+/**
+ * Sora / Veo 经 OpenAI 兼容中转（含 New API / Azure 视频网关）创建任务。
+ * 文生优先 JSON；图生只试带参考的候选（multipart 文件 + JSON images/input_reference/URL 字段），
+ * **禁止**无参考文生成功（避免“任务成功但不跟图”）。
+ * Sora：若渠道 VIDEO 端点不认 `sora-2`，会按清单/常见别名改试 `azure-sora`；图生仅 1 张首帧。
+ * Veo：图生最多 3 张，优先 JSON `images` / `reference_images` 全量发送。
+ * 不碰 Grok/Seedance/Agnes。
+ */
+async function createSoraVeoOpenAiVideoTask(
+    config: AiConfig,
+    model: string,
+    prompt: string,
+    references: ReferenceImage[],
+    options?: RequestOptions,
+): Promise<VideoGenerationTask> {
+    const selectedName = modelOptionName(model);
+    const imageLimit = soraVeoReferenceImageLimit(selectedName);
+    // Sora 只取首帧；Veo 最多 3 张。禁止静默多图只发第一张（Veo 多图路径用数组字段）。
+    const primaryRefs = references.slice(0, imageLimit);
+    const hasUserReferences = primaryRefs.length > 0;
+    const preparedList = hasUserReferences
+        ? (await Promise.all(primaryRefs.map((item) => prepareSoraVeoReferenceAssets(item)))).filter((item) => item.file || item.dataUrl || item.publicUrl)
+        : [];
+    const prepared = preparedList[0] || { file: null as File | null, dataUrl: "", publicUrl: "" };
+    const hasBinary = preparedList.some((item) => Boolean(item.file || item.dataUrl));
+    const hasUrl = preparedList.some((item) => Boolean(item.publicUrl));
+    if (hasUserReferences && !preparedList.length) {
+        throw new Error("参考图是远程地址且浏览器无法读取（常见于 imgen.x.ai CORS）。Sora/Veo 图生请改用本地上传的参考图，或换可公网拉取的 https 图片 URL");
+    }
+
+    const channelModels = (config.channels || []).flatMap((channel) => channel.models || []).map((item) => modelOptionName(item));
+    // 也合并当前 resolve 后的渠道 models（resolveModelRequestConfig 可能只带 baseUrl/key）
+    const requestChannelModels = (() => {
+        try {
+            return (resolveModelChannel(config, model).models || []).map((item) => modelOptionName(item));
+        } catch {
+            return [] as string[];
+        }
+    })();
+    const inventory = Array.from(new Set([...requestChannelModels, ...channelModels].filter(Boolean)));
+
+    // 用可变队列：首包用用户选择（如 sora-2）；422/503 再换 azure-sora 等别名
+    // 不强制先发 azure-sora，避免上游实际就叫 sora-2 时误伤
+    const modelNames = isSoraVideoModel(selectedName)
+        ? [...soraRequestModelCandidates(selectedName, inventory)]
+        : [preferVeoI2vModelName(selectedName, inventory) || selectedName].filter(Boolean);
+
+    // 路径候选：官方 /videos；部分中转视频在 /video/generations 或 /videos/generations
+    // 成功路径按 host 记忆，下次优先（不碰 Grok 路径表）
+    const createPaths = orderSoraVeoCreatePaths(config);
+
+    let lastError: unknown;
+    const triedModels: string[] = [];
+    const triedPaths: string[] = [];
+    const multipartFiles = preparedList.map((item) => item.file).filter((file): file is File => Boolean(file));
+
+    for (const createPath of createPaths) {
+        if (!triedPaths.includes(createPath)) triedPaths.push(createPath);
+        const triedLower = new Set<string>();
+        let pathDead = false; // 路径不存在 / 应立刻换路径
+
+        for (let i = 0; i < modelNames.length; i += 1) {
+            const requestModel = modelNames[i];
+            const requestLower = requestModel.toLowerCase();
+            if (triedLower.has(requestLower)) continue;
+            triedLower.add(requestLower);
+            if (!triedModels.includes(requestModel)) triedModels.push(requestModel);
+            const candidates = buildSoraVeoFormFieldCandidates({
+                model: requestModel,
+                prompt,
+                size: config.size,
+                videoSeconds: config.videoSeconds,
+                hasReferences: hasUserReferences,
+                hasBinaryReference: hasBinary,
+                hasUrlReference: hasUrl,
+                referenceCount: preparedList.length,
+            });
+            // 有参考时：只允许 withReferences 候选，绝不落到纯文生成功
+            const runnable = hasUserReferences ? candidates.filter((item) => item.withReferences) : candidates.filter((item) => !item.withReferences);
+
+            let skipToNextModel = false;
+            let bodyExhaustedInvalid = false;
+            for (const fields of runnable) {
+                if (fields.withReferences && !hasBinary && !hasUrl) continue;
+                if (fields.encoding === "multipart" && !multipartFiles.length) continue;
+                try {
+                    const created =
+                        fields.encoding === "json"
+                            ? await postSoraVeoJsonCreate(config, createPath, fields, preparedList, options)
+                            : await postSoraVeoMultipartCreate(config, createPath, fields, multipartFiles, options);
+                    if (!created.id) throw new Error("视频接口没有返回任务 ID");
+                    rememberSoraVeoCreatePath(config, createPath);
+                    // 返回原始 UI 模型选择；上游实际 requestModel + 打通路径 createPath
+                    return { id: created.id, provider: "openai", model, requestModel, createPath };
+                } catch (error) {
+                    lastError = error;
+                    if (options?.signal?.aborted) throw new Error(readAxiosError(error, "视频任务创建失败"));
+                    const message = readAxiosError(error, "");
+
+                    // 路径不存在：立刻换下一条 create path，不继续刷 body/model
+                    if (isMissingSoraVeoCreatePathError(error) || isMissingSoraVeoCreatePathError(message)) {
+                        rememberSoraVeoCreatePathMissing(config, createPath);
+                        pathDead = true;
+                        break;
+                    }
+
+                    // 422 模型不被 VIDEO 端点支持，或 503 当前分组无可用上游：换下一个 model 名
+                    if (shouldSkipToNextVideoModelName(error) || shouldSkipToNextVideoModelName(message)) {
+                        skipToNextModel = true;
+                        if (isSoraVideoModel(selectedName)) {
+                            if (isUnsupportedVideoModelError(error) || isUnsupportedVideoModelError(message)) {
+                                for (const name of parseSupportedVideoModelsFromError(message)) {
+                                    const trimmed = modelOptionName(name).trim();
+                                    if (!trimmed) continue;
+                                    if (!isSoraVideoModel(trimmed) && !/azure[-_]?sora/i.test(trimmed)) continue;
+                                    if (triedLower.has(trimmed.toLowerCase())) continue;
+                                    if (modelNames.some((item) => item.toLowerCase() === trimmed.toLowerCase())) continue;
+                                    modelNames.push(trimmed);
+                                }
+                                if (!triedLower.has("azure-sora") && !modelNames.some((item) => item.toLowerCase() === "azure-sora")) {
+                                    modelNames.push("azure-sora");
+                                }
+                            }
+                            if (isUnavailableVideoChannelError(error) || isUnavailableVideoChannelError(message)) {
+                                for (const alias of ["sora-2", "azure_sora", "sora-2-pro", "azure-sora-pro"]) {
+                                    if (triedLower.has(alias.toLowerCase())) continue;
+                                    if (modelNames.some((item) => item.toLowerCase() === alias.toLowerCase())) continue;
+                                    if (!isSoraVideoModel(alias) && !/azure[-_]?sora/i.test(alias)) continue;
+                                    modelNames.push(alias);
+                                }
+                            }
+                        }
+                        break;
+                    }
+
+                    // body/上游兼容类：换 body 候选
+                    if (isInvalidVideoRequestBodyError(error) || isInvalidVideoRequestBodyError(message)) {
+                        bodyExhaustedInvalid = true;
+                        continue;
+                    }
+
+                    // 鉴权/额度/限流等直接结束
+                    throw new Error(readAxiosError(error, "视频任务创建失败"));
+                }
+            }
+            if (pathDead) break;
+            if (skipToNextModel) continue;
+            // 本路径上 body 穷举仍 invalid：换下一条创建路径（常见：/videos 拒 body，/video/generations 能通）
+            if (bodyExhaustedInvalid && shouldTryNextSoraVeoCreatePath(lastError)) {
+                pathDead = true;
+                break;
+            }
+        }
+        if (pathDead) continue;
+    }
+
+    throw new Error(
+        enhanceSoraVeoCreateError(readAxiosError(lastError, "视频任务创建失败"), selectedName, hasUserReferences, triedModels, triedPaths),
+    );
+}
+
+/** 按 host 记住 Sora/Veo 创建成功路径 / 不存在路径（与 Grok 缓存隔离） */
+const soraVeoCreatePathMemory = new Map<string, { good?: string; missing: Set<string> }>();
+
+function soraVeoPathMemoryKey(config: AiConfig) {
+    return (config.baseUrl || "").trim().replace(/\/+$/, "").toLowerCase() || "default";
+}
+
+function orderSoraVeoCreatePaths(config: AiConfig): string[] {
+    const key = soraVeoPathMemoryKey(config);
+    const mem = soraVeoCreatePathMemory.get(key);
+    const base = soraVeoCreatePathCandidates().filter((path) => !mem?.missing.has(path));
+    if (mem?.good && base.includes(mem.good)) {
+        return [mem.good, ...base.filter((path) => path !== mem.good)];
+    }
+    return base.length ? base : soraVeoCreatePathCandidates();
+}
+
+function rememberSoraVeoCreatePath(config: AiConfig, path: string) {
+    const key = soraVeoPathMemoryKey(config);
+    const mem = soraVeoCreatePathMemory.get(key) || { missing: new Set<string>() };
+    mem.good = path;
+    mem.missing.delete(path);
+    soraVeoCreatePathMemory.set(key, mem);
+}
+
+function rememberSoraVeoCreatePathMissing(config: AiConfig, path: string) {
+    const key = soraVeoPathMemoryKey(config);
+    const mem = soraVeoCreatePathMemory.get(key) || { missing: new Set<string>() };
+    mem.missing.add(path);
+    if (mem.good === path) mem.good = undefined;
+    soraVeoCreatePathMemory.set(key, mem);
+}
+
+type SoraVeoPreparedReference = {
+    file: File | null;
+    dataUrl: string;
+    publicUrl: string;
+};
+
+/**
+ * 准备 Sora/Veo 图生参考图：本地 blob/data 优先压缩为 File+dataURI；
+ * 公网 https 保留为 URL 候选（上游服务端拉取，绕过浏览器 CORS）。
+ */
+async function prepareSoraVeoReferenceAssets(image: ReferenceImage): Promise<SoraVeoPreparedReference> {
+    const direct = (image.url || image.dataUrl || "").trim();
+    const publicUrl = isPublicMediaUrl(direct) ? direct : "";
+
+    // 1) 本地 / data URI → 压缩后 File
+    let dataUrl = "";
+    try {
+        const binary = await resolveReferenceBinaryDataUrl(image);
+        if (binary?.startsWith("data:")) {
+            // 压到 ~1.5MB / 1280 边，降低中转 multipart/JSON 拒收（多图时尤其重要）
+            dataUrl = await compressImageDataUrl(binary, 1280, 0.84, 1.5 * 1024 * 1024);
+        }
+    } catch {
+        dataUrl = "";
+    }
+
+    let file: File | null = null;
+    if (dataUrl.startsWith("data:")) {
+        try {
+            file = dataUrlToFile({ ...image, dataUrl, name: image.name || "reference.jpg", type: dataUrl.match(/^data:([^;]+)/)?.[1] || image.type || "image/jpeg" });
+        } catch {
+            file = null;
+        }
+    }
+
+    return { file, dataUrl: dataUrl.startsWith("data:") ? dataUrl : "", publicUrl };
+}
+
+function resolveSoraVeoJsonReferenceValue(prepared: SoraVeoPreparedReference, source?: "binary" | "url" | "either") {
+    const mode = source || "either";
+    if (mode === "binary") return prepared.dataUrl || "";
+    if (mode === "url") return prepared.publicUrl || "";
+    return prepared.dataUrl || prepared.publicUrl || "";
+}
+
+function resolveSoraVeoJsonReferenceValues(preparedList: SoraVeoPreparedReference[], source?: "binary" | "url" | "either") {
+    return preparedList.map((item) => resolveSoraVeoJsonReferenceValue(item, source)).filter(Boolean);
+}
+
+function applySoraVeoJsonReferenceField(payload: Record<string, unknown>, field: SoraVeoReferenceField | undefined, values: string[]) {
+    const key = field || "images";
+    const first = values[0] || "";
+    if (!first) return;
+    if (key === "file") {
+        // file 仅 multipart；JSON 误配时回退 images
+        payload.images = values;
+        return;
+    }
+    if (isMultiImageSoraVeoReferenceField(key)) {
+        // 多图数组字段：全量发送，禁止静默只发第一张
+        payload[key] = values;
+        return;
+    }
+    // 单值字段（input_reference / image / first_frame 等）只能塞首帧
+    payload[key] = first;
+}
+
+async function postSoraVeoJsonCreate(
+    config: AiConfig,
+    createPath: string,
+    fields: {
+        model: string;
+        prompt: string;
+        seconds: string;
+        secondsAsNumber?: boolean;
+        durationField?: "seconds" | "duration";
+        size?: string;
+        withReferences?: boolean;
+        referenceField?: SoraVeoReferenceField;
+        referenceSource?: "binary" | "url" | "either";
+    },
+    preparedList: SoraVeoPreparedReference[],
+    options?: RequestOptions,
+) {
+    // 默认 seconds 字符串（OpenAI / New API）；secondsAsNumber 时发 number（部分中转）
+    // durationField=duration 时用 duration 键代替 seconds
+    const payload: Record<string, unknown> = {
+        model: fields.model,
+        prompt: fields.prompt,
+    };
+    const timeKey = fields.durationField === "duration" ? "duration" : "seconds";
+    if (fields.seconds !== "" && fields.seconds != null) {
+        payload[timeKey] = fields.secondsAsNumber ? Number(fields.seconds) : String(fields.seconds);
+    }
+    if (fields.size) payload.size = fields.size;
+
+    if (fields.withReferences) {
+        const values = resolveSoraVeoJsonReferenceValues(preparedList, fields.referenceSource);
+        if (!values.length) throw new Error("参考图不可用");
+        applySoraVeoJsonReferenceField(payload, fields.referenceField, values);
+    }
+
+    return unwrapVideoResponse(
+        (
+            await axios.post<ApiVideoResponse>(aiApiUrl(config, createPath || "/videos"), payload, {
+                headers: aiHeaders(config, "application/json"),
+                signal: options?.signal,
+                timeout: 180000,
+            })
+        ).data,
+    );
+}
+
+async function postSoraVeoMultipartCreate(
+    config: AiConfig,
+    createPath: string,
+    fields: {
+        model: string;
+        prompt: string;
+        seconds: string;
+        size?: string;
+        withReferences: boolean;
+        referenceField?: SoraVeoReferenceField;
+        multipartFileField?: "input_reference" | "image" | "file" | "first_frame";
+    },
+    files: File[],
+    options?: RequestOptions,
+) {
+    const body = new FormData();
+    body.append("model", fields.model);
+    body.append("prompt", fields.prompt);
+    if (fields.seconds !== "" && fields.seconds != null) body.append("seconds", String(fields.seconds));
+    if (fields.size) body.append("size", fields.size);
+    if (fields.withReferences && files.length) {
+        // multipart 首帧：默认 input_reference；兼容 image / file / first_frame 字段名
+        // New API parseMultipartFormData 只映射文本字段，文件由 ExtractMultipartImage / Sora 重建读取。
+        const fileField = fields.multipartFileField || "input_reference";
+        body.append(fileField, files[0], files[0].name || "reference.jpg");
+    }
+    return unwrapVideoResponse(
+        (
+            await axios.post<ApiVideoResponse>(aiApiUrl(config, createPath || "/videos"), body, {
+                headers: aiHeaders(config),
+                signal: options?.signal,
+                timeout: 180000,
+                maxBodyLength: Infinity,
+                maxContentLength: Infinity,
+            })
+        ).data,
+    );
+}
+
+function enhanceSoraVeoCreateError(upstream: string, model: string, hasReferences: boolean, triedModels: string[] = [], triedPaths: string[] = []) {
+    const text = (upstream || "视频任务创建失败").trim();
+    const hints: string[] = [];
+    const supported = parseSupportedVideoModelsFromError(text);
+    const triedAzure = triedModels.some((item) => /azure[-_]?sora/i.test(item));
+    const triedClassicSora = triedModels.some((item) => /^sora([-_.]|$)/i.test(item) || /^sora-2/i.test(item));
+
+    if (isUnsupportedVideoModelError(text) || supported.length) {
+        hints.push(
+            `当前中转的 VIDEO 端点不接受模型「${model}」` +
+                (triedModels.length ? `（已尝试：${triedModels.join(" → ")}）` : ""),
+        );
+        if (supported.length) {
+            hints.push(`网关声明支持：${supported.join(", ")}`);
+        }
+        if (isSoraVideoModel(model) || triedClassicSora || supported.some((item) => /azure[-_]?sora/i.test(item))) {
+            // 用户常误解：模型列表有 sora-2 ≠ VIDEO 端点可用；列表没有 azure-sora 也不代表不能用 body 名试
+            hints.push(
+                "说明：`sora-2` 是 OpenAI 原名；openai2api 一类网关的 VIDEO 模态只认 `azure-sora`。" +
+                    "渠道「模型列表」里有没有 azure-sora 不重要——请求体会自动改试 azure-sora。" +
+                    "若 azure-sora 也 422/无渠道，需要在中转后台开通 Azure Sora / 绑定对应上游，或换支持 Sora 的 New API 渠道；不能只靠手填 sora-2。",
+            );
+            if (triedAzure) {
+                hints.push("已自动试过 azure-sora 仍失败：当前 Key/分组多半未开通 azure-sora，请到中转站开通或换渠道");
+            } else {
+                hints.push("也可在视频模型框手填 azure-sora 再生成（无需列表里已有该名）");
+            }
+            if (supported.some((item) => /kling|firefly/i.test(item)) && !supported.some((item) => /sora/i.test(item))) {
+                hints.push("该中转 VIDEO 通道目前主要是 Kling/Firefly，并非 Sora");
+            }
+        }
+    }
+
+    if (triedPaths.length) {
+        hints.push(`已尝试创建路径：${triedPaths.map((path) => `/v1${path}`).join(" → ")}`);
+    }
+    if (/invalid request body|invalid_request_error|fail_to_fetch_task|invalid_size|unsupported media type|415/i.test(text)) {
+        hints.push("本站已按 New API 精简字段（model/prompt/seconds/size，图生另加 input_reference），不发 resolution_name/preset");
+        if (isSoraVideoModel(model) && !/pro/i.test(model)) {
+            hints.push("sora-2 尺寸通常仅 1280x720 / 720x1280；秒数 4/8/12；已自动试字符串/数字 seconds、duration、仅 model+prompt、multipart 字段名，并切换 /videos、/video/generations、/videos/generations");
+        } else {
+            hints.push("秒数用 4/8/12（Sora）或 4/6/8（Veo）；尺寸用面板枚举");
+        }
+        hints.push(
+            "fail_to_fetch_task + invalid request body 表示中转已把请求转到上游，但上游拒收 body，或创建路径与上游协议不匹配。" +
+                "请先确认：① 纯文生是否成功；② 图生用本地 jpg/png 首帧；③ 尺寸别选高清 pro 档；④ Network 里是否出现了 /video/generations 等其它路径；⑤ 中转后台该 request id 的上游日志。",
+        );
+    }
+    if (hasReferences) {
+        hints.push("已禁止无参考文生回退：图生失败会直接报错，不会假装成功");
+        hints.push("图生请优先本地可读参考图；仅公网 https 图可尝试 URL 字段。远程 imgen.x.ai 常因 CORS 读不到");
+        if (isVeoVideoModel(model)) {
+            hints.push("Veo 图生最多 3 张参考图，优先 JSON images/reference_images 全量发送；有参考时会自动切同渠道 veo-*-i2v；渠道类型应为 Gemini");
+        }
+        if (isSoraVideoModel(model)) {
+            hints.push("Sora 图生仅 1 张首帧（multipart input_reference 或 JSON images）；Azure 网关请用 azure-sora");
+        }
+    }
+    if (isUnavailableVideoChannelError(text) || /no available channel|无可用渠道|channel not found|invalid api platform|distributor/i.test(text)) {
+        hints.push(
+            "这是中转后台「渠道/分组」问题，不是本站请求字段写错：" +
+                "当前令牌所属分组（如 veo-sora）下，该模型（如 azure-sora）没有启用的上游 distributor。" +
+                (triedModels.length ? ` 已尝试模型名：${triedModels.join(" → ")}。` : " "),
+        );
+        hints.push(
+            "请到中转管理后台：① 为 azure-sora（或你实际要用的 Sora 模型）绑定并启用上游渠道；" +
+                "② 确认令牌分组能访问该模型（分组权限 / 模型映射）；" +
+                "③ 或换已开通 Sora 的分组/Key；Veo 模型需 Gemini 类渠道，Sora 需 Azure/Sora 类渠道，不要混绑。",
+        );
+        if (triedAzure && /azure-sora/i.test(text)) {
+            hints.push("azure-sora 已被 VIDEO 端点接受，但分组未配上游——开通/绑定后无需再改前端模型名");
+        }
+    }
+    if (!hints.length) return text.includes(model) ? text : `${text}（模型 ${model}）`;
+    return `${text}。${hints.join("；")}`;
+}
+
+/** 供单测：Sora/Veo 表单字段候选（不发网） */
+export {
+    buildSoraVeoFormFieldCandidates,
+    isInvalidVideoRequestBodyError,
+    isMissingSoraVeoCreatePathError,
+    isMultiImageSoraVeoReferenceField,
+    isSoraOrVeoVideoModel,
+    isSoraVideoModel,
+    isUnavailableVideoChannelError,
+    isUnsupportedVideoModelError,
+    isVeoI2vModel,
+    isVeoVideoModel,
+    parseSupportedVideoModelsFromError,
+    shouldSkipToNextVideoModelName,
+    shouldTryNextSoraVeoCreatePath,
+    preferSoraRelayModelName,
+    preferVeoI2vModelName,
+    soraRequestModelCandidates,
+    soraVeoCreatePathCandidates,
+    soraVeoReferenceImageLimit,
+} from "@/lib/openai-compatible-video";
+
+function openAiVideoPollPaths(task: VideoGenerationTask): string[] {
+    const id = encodeURIComponent(task.id);
+    const preferred: string[] = [];
+    if (task.createPath === "/video/generations") {
+        preferred.push(`/video/generations/${id}`, `/video/generations?request_id=${id}`, `/video/generations?id=${id}`);
+    } else if (task.createPath === "/videos/generations") {
+        preferred.push(`/videos/generations/${id}`, `/videos/generations?request_id=${id}`, `/videos/generations?id=${id}`);
+    }
+    // 官方 OpenAI Videos + 通用兜底
+    preferred.push(`/videos/${id}`, `/videos?request_id=${id}`, `/videos/generations?request_id=${id}`, `/video/generations?request_id=${id}`);
+    return Array.from(new Set(preferred));
+}
+
+function openAiVideoContentPaths(task: VideoGenerationTask): string[] {
+    const id = encodeURIComponent(task.id);
+    return Array.from(new Set([`/videos/${id}/content`, `/videos/${id}/download`, `/video/generations/${id}/content`, `/videos/generations/${id}/content`]));
+}
+
 async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
-        const video = unwrapVideoResponse((await axios.get<ApiVideoResponse>(aiApiUrl(config, `/videos/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data);
+        let video: VideoResponse | null = null;
+        let lastPollError: unknown;
+        for (const path of openAiVideoPollPaths(task)) {
+            try {
+                video = unwrapVideoResponse((await axios.get<ApiVideoResponse>(aiApiUrl(config, path), { headers: aiHeaders(config), signal: options?.signal })).data);
+                break;
+            } catch (error) {
+                lastPollError = error;
+                const message = readAxiosError(error, "");
+                // 路径不存在再试下一条；任务暂未落库的 404 也继续试其它查询形态
+                if (isMissingSoraVeoCreatePathError(error) || isMissingSoraVeoCreatePathError(message) || (axios.isAxiosError(error) && (error.response?.status === 404 || error.response?.status === 405))) {
+                    continue;
+                }
+                throw error;
+            }
+        }
+        if (!video) throw lastPollError || new Error("视频状态查询失败");
+
         // 部分中转在 status 未完成或没有 /content 时直接返回可播 URL
         const directUrl = openAiCompatibleVideoUrl(video);
         if (directUrl) return { status: "completed", result: await videoResultFromUrl(directUrl, options, config) };
         if (video.status === "completed") {
             try {
                 // 优先走渠道 Base（/lan-ai）+ Authorization 拉 content，避免返回 127.0.0.1 给浏览器
-                const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal, timeout: 120000 });
-                await assertVideoBlob(content.data);
-                return { status: "completed", result: { blob: content.data } };
-            } catch (contentError) {
+                let contentError: unknown;
+                for (const contentPath of openAiVideoContentPaths(task)) {
+                    try {
+                        const content = await axios.get<Blob>(aiApiUrl(config, contentPath), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal, timeout: 120000 });
+                        await assertVideoBlob(content.data);
+                        return { status: "completed", result: { blob: content.data } };
+                    } catch (error) {
+                        contentError = error;
+                    }
+                }
                 // /content 不存在时，再尝试从任务体里抠 URL（内网 URL 会再经 /lan-ai + Key 下载）
                 const fallbackUrl = openAiCompatibleVideoUrl(video);
                 if (fallbackUrl) return { status: "completed", result: await videoResultFromUrl(fallbackUrl, options, config) };
-                // 任务已完成但 content 暂不可用时，用任务 id 拼 content 路径再试一次（同源渠道）
-                if (isSameOriginRelayBaseUrl(config.baseUrl) || task.id) {
-                    try {
-                        const contentUrl = aiApiUrl(config, `/videos/${task.id}/content`);
-                        const content = await axios.get<Blob>(contentUrl, { headers: aiHeaders(config), responseType: "blob", signal: options?.signal, timeout: 120000 });
-                        await assertVideoBlob(content.data);
-                        return { status: "completed", result: { blob: content.data } };
-                    } catch {
-                        // fall through
-                    }
-                }
+                throw contentError || new Error("视频已完成但无法下载内容");
+            } catch (contentError) {
+                const fallbackUrl = openAiCompatibleVideoUrl(video);
+                if (fallbackUrl) return { status: "completed", result: await videoResultFromUrl(fallbackUrl, options, config) };
                 throw contentError;
             }
         }
@@ -1517,7 +2048,10 @@ export async function buildGrokPayloadCandidates(config: AiConfig, model: string
 }
 
 /**
- * Grok 模型候选：优先用渠道列表里真实存在的名字，避免硬塞 grok-imagine-video-1.5 导致 model_not_found。
+ * Grok 模型候选：
+ * - 用户当前选择永远第一（界面选 video 就不会先打 1.5）
+ * - 1.5 / i2v 仅作渠道列表内的可选兜底，绝不插队
+ * - 不硬塞列表里不存在的模型名（避免 model_not_found）
  * knownModels 来自当前渠道 models[]（拉取模型后的列表）。
  */
 function grokModelCandidates(modelName: string, imageCount: number, baseUrl = "", knownModels: string[] = []) {
@@ -1542,20 +2076,23 @@ function grokModelCandidates(modelName: string, imageCount: number, baseUrl = ""
         if (!models.some((x) => x.toLowerCase() === n.toLowerCase())) models.push(n);
     };
 
+    const isI2vSpecial = (n: string) => n.includes("1.5") || n.includes("i2v") || n.includes("image-to-video");
+    const isGrokVideoLike = (n: string) => n.includes("grok") && (n.includes("video") || n.includes("imagine")) && !n.includes("image-quality") && !n.endsWith("-image");
+
     if (imageCount > 0) {
-        // 图生视频：同渠道内自动选更合适的 I2V 模型（不必用户手动切换）
-        // 1) 列表里带 1.5 / i2v / image-to-video 的
-        push(pickKnown((n) => n.includes("grok") && n.includes("video") && (n.includes("1.5") || n.includes("i2v") || n.includes("image-to-video"))));
-        // 2) 任意 grok*video / grok*imagine（非纯 image 文生图模型）
-        push(pickKnown((n) => n.includes("grok") && (n.includes("video") || n.includes("imagine")) && !n.includes("image-quality") && !n.endsWith("-image")));
-        // 3) 用户当前选择
+        // 1) 用户当前选择永远第一
         push(modelName);
-        // 4) 仅当列表为空或用户已选 1.5 时，才尝试通用名（避免 Grok2API 上硬塞不存在的 1.5）
+        // 2) 同渠道其它基础 Grok 视频模型（不含 1.5/i2v）
+        push(pickKnown((n) => isGrokVideoLike(n) && !isI2vSpecial(n)));
+        // 3) 1.5 / i2v 仅作可选兜底（列表里有才加，绝不插到用户选择之前）
+        push(pickKnown((n) => n.includes("grok") && n.includes("video") && isI2vSpecial(n)));
+        // 4) 列表为空时才猜通用名；1.5 仅 relay 末位可选，仍不硬塞到第一
         if (!known.length) {
             push("grok-imagine-video");
             if (relay) push("grok-imagine-video-1.5");
-        } else if (lower.includes("1.5")) {
-            push(resolveKnown("grok-imagine-video") || pickKnown((n) => n.includes("grok-imagine-video") && !n.includes("1.5")));
+        } else if (isI2vSpecial(lower)) {
+            // 用户已选 1.5 时，基础 video 作失败回退
+            push(resolveKnown("grok-imagine-video") || pickKnown((n) => n.includes("grok-imagine-video") && !isI2vSpecial(n)));
         }
     } else {
         // 文生视频：只用用户当前选择。中转 Invalid URL 时自动换 1.5 只会掩盖问题、制造误导请求。
@@ -1702,7 +2239,7 @@ function formatGrokCreateError(error: unknown, references: ReferenceImage[], att
         multiReference && vagueUpstream && !rateLimited
             ? "若上游不支持多参考图，请减到 1 张本地小图，或换支持 multi-reference 的 Grok 视频模型/渠道"
             : "",
-        modelMissing ? "模型名在上游不存在：请在渠道里「拉取模型」，选用列表中真实的视频模型；图生视频会自动优先用渠道内已有模型，不再硬塞 grok-imagine-video-1.5" : "",
+        modelMissing ? "模型名在上游不存在：请在渠道里「拉取模型」，选用列表中真实的视频模型；请求以你当前选择为先，1.5/i2v 仅作渠道内可选兜底，不会硬塞不存在的名字" : "",
         hasRemoteOnlyReference ? "当前参考图是远程地址（如 imgen.x.ai）。请改用本地上传的小图" : "",
         hasLocalReference && vagueUpstream && !multiReference && !invalidUrl && !platformMismatch && !rateLimited
             ? "本地参考图仍 400：长提示词会自动压小参考图并改试更精简字段（不截断提示词）；仍失败请换更小 jpg/png、分辨率 720p，或略缩短提示词；确认渠道模型列表含可用的 grok 视频模型"
@@ -2183,7 +2720,12 @@ function readAxiosError(error: unknown, fallback: string) {
     if (axios.isAxiosError(error)) {
         const responseData = error.response?.data as unknown;
         const detail = readErrorPayload(responseData);
-        if (detail) return detail;
+        const status = error.response?.status;
+        // 保留 422 原文（含 Supported models），便于 Sora 模型别名诊断
+        if (detail) {
+            if (status && status >= 400 && !/\(status=\d+\)/i.test(detail)) return `${detail} (status=${status})`;
+            return detail;
+        }
         if (!error.response) return readNetworkError(error.code, fallback);
         return statusMessage(error.response?.status, fallback);
     }

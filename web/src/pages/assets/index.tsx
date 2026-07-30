@@ -9,6 +9,17 @@ import { cloudSyncColor } from "@/lib/cloud-sync";
 import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
 import { uploadMediaFile } from "@/services/file-storage";
 import { uploadImage } from "@/services/image-storage";
+import {
+    ALL_CATEGORIES_VALUE,
+    assetCategoryLabel,
+    buildAssetCategoryFilterOptions,
+    collectAssetCategories,
+    isUncategorizedAsset,
+    matchesAssetCategoryFilter,
+    resolveAssetCategoryForSave,
+    standardAssetCategoryOptions,
+    suggestAssetCategory,
+} from "@/lib/asset-category";
 import { cn } from "@/lib/utils";
 import {
     getAssetCloudBadge,
@@ -27,6 +38,7 @@ type AssetFormValues = {
     kind: AssetKind;
     title: string;
     coverUrl: string;
+    category?: string | string[];
     tags: string[];
     source?: string;
     note?: string;
@@ -63,6 +75,7 @@ export default function AssetsPage() {
     const cloudStatusVersion = useSyncExternalStore(subscribeAssetCloudStatus, getAssetCloudStatusVersion, () => 0);
     const [keyword, setKeyword] = useState("");
     const [kindFilter, setKindFilter] = useState<AssetKind | "all">("all");
+    const [categoryFilter, setCategoryFilter] = useState(ALL_CATEGORIES_VALUE);
     const [page, setPage] = useState(1);
     const [pageSize, setPageSize] = useState(10);
     const [editingAsset, setEditingAsset] = useState<Asset | null>(null);
@@ -78,14 +91,18 @@ export default function AssetsPage() {
     const content = Form.useWatch("content", form) || "";
     const validAssets = useMemo(() => assets.filter((asset) => asset.kind === "text" || asset.kind === "image" || asset.kind === "video"), [assets]);
 
+    // 固定展示 人物/场景/道具…，并合并资产里出现的自定义分类
+    const categoryOptions = useMemo(() => buildAssetCategoryFilterOptions(validAssets), [validAssets]);
+
     const filteredAssets = useMemo(() => {
         const query = keyword.trim().toLowerCase();
         return validAssets.filter((asset) => {
             if (kindFilter !== "all" && asset.kind !== kindFilter) return false;
+            if (!matchesAssetCategoryFilter(asset.category, categoryFilter)) return false;
             if (!query) return true;
             return assetSearchText(asset).includes(query);
         });
-    }, [validAssets, keyword, kindFilter]);
+    }, [validAssets, keyword, kindFilter, categoryFilter]);
 
     const visibleAssets = useMemo(() => {
         const start = (page - 1) * pageSize;
@@ -110,7 +127,7 @@ export default function AssetsPage() {
             .then((result) => {
                 if (!result.ok) return;
                 const changes = result.merged + result.deleted + result.mediaDownloaded;
-                if (changes > 0) message.success(`素材云同步完成（更新 ${changes} 项）`);
+                if (changes > 0) message.success(`资产云同步完成（更新 ${changes} 项）`);
             })
             .finally(() => setCloudSyncing(false));
     }, [cloudUser, hydrated, message]);
@@ -124,18 +141,18 @@ export default function AssetsPage() {
 
     const syncCloudAssets = async () => {
         if (!cloudUser) {
-            message.info("登录后可同步素材清单与本地媒体，云失败不影响本机素材");
+            message.info("登录后可同步资产清单与本地媒体，云失败不影响本机资产");
             return;
         }
         setCloudSyncing(true);
         try {
             const result = await syncAssetManifestNow({ pull: true });
             if (!result.ok) {
-                message.warning("云端素材暂不可用，本机素材已保留");
+                message.warning("云端资产暂不可用，本机资产已保留");
                 return;
             }
             const changed = result.merged + result.deleted + result.mediaDownloaded + result.mediaUploaded;
-            message.success(changed > 0 ? `素材同步完成（处理 ${changed} 项）` : "素材已与云端对齐（无更新）");
+            message.success(changed > 0 ? `资产同步完成（处理 ${changed} 项）` : "资产已与云端对齐（无更新）");
         } finally {
             setCloudSyncing(false);
         }
@@ -146,7 +163,7 @@ export default function AssetsPage() {
         setImageDraft(null);
         setVideoDraft(null);
         setFormKind("text");
-        form.setFieldsValue({ kind: "text", title: "", coverUrl: "", tags: [], source: "手动添加", note: "", content: "" });
+        form.setFieldsValue({ kind: "text", title: "", coverUrl: "", category: [], tags: [], source: "手动添加", note: "", content: "" });
         setIsAssetOpen(true);
     };
 
@@ -159,6 +176,7 @@ export default function AssetsPage() {
             kind: asset.kind,
             title: asset.title,
             coverUrl: asset.coverUrl,
+            category: asset.category ? [asset.category] : [],
             tags: asset.tags || [],
             source: asset.source,
             note: asset.note,
@@ -169,17 +187,26 @@ export default function AssetsPage() {
 
     const saveAsset = async () => {
         const values = await form.validateFields();
+        const title = values.title.trim();
+        const tags = values.tags || [];
+        const source = values.source?.trim();
+        const note = values.note?.trim();
+        const content = (values.content || "").trim();
+        const category =
+            resolveAssetCategoryForSave(values.category) ||
+            suggestAssetCategory({ title, tags, source, note, content, kind: values.kind });
         const base = {
-            title: values.title.trim(),
+            title,
             coverUrl: values.coverUrl?.trim() || (values.kind === "image" && imageDraft ? imageDraft.dataUrl : ""),
-            tags: values.tags || [],
-            source: values.source?.trim(),
-            note: values.note?.trim(),
+            category,
+            tags,
+            source,
+            note,
             metadata: editingAsset?.metadata || { source: "manual" },
         };
 
         if (values.kind === "text") {
-            const asset = { ...base, kind: "text" as const, data: { content: (values.content || "").trim() } };
+            const asset = { ...base, kind: "text" as const, data: { content } };
             editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
         } else if (values.kind === "video") {
             if (!videoDraft) {
@@ -197,7 +224,7 @@ export default function AssetsPage() {
             editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
         }
 
-        message.success(editingAsset ? "素材已更新" : "素材已保存");
+        message.success(editingAsset ? "资产已更新" : "资产已保存");
         setIsAssetOpen(false);
     };
 
@@ -262,7 +289,7 @@ export default function AssetsPage() {
 
     const exportAllAssets = async () => {
         if (!validAssets.length) {
-            message.warning("暂无素材可导出");
+            message.warning("暂无资产可导出");
             return;
         }
         await exportAssets(validAssets);
@@ -293,10 +320,12 @@ export default function AssetsPage() {
 
                 if (file.type.startsWith("image/") || isLikelyImageFile(file)) {
                     const image = await uploadImage(file);
+                    const title = fileNameWithoutExtension(file.name) || "本地图片";
                     addAsset({
                         kind: "image",
-                        title: fileNameWithoutExtension(file.name) || "本地图片",
+                        title,
                         coverUrl: image.url,
+                        category: suggestAssetCategory({ title, source: "本地导入", fileName: file.name, kind: "image" }),
                         tags: [],
                         source: "本地导入",
                         data: {
@@ -315,10 +344,12 @@ export default function AssetsPage() {
 
                 if (file.type.startsWith("video/") || isLikelyVideoFile(file)) {
                     const video = await uploadMediaFile(file, "video-asset");
+                    const title = fileNameWithoutExtension(file.name) || "本地视频";
                     addAsset({
                         kind: "video",
-                        title: fileNameWithoutExtension(file.name) || "本地视频",
+                        title,
                         coverUrl: "",
+                        category: suggestAssetCategory({ title, source: "本地导入", fileName: file.name, kind: "video" }),
                         tags: [],
                         source: "本地导入",
                         data: {
@@ -345,16 +376,59 @@ export default function AssetsPage() {
             const packageHint = packageCount ? `（含压缩包内 ${packageCount} 项）` : "";
             message.success(`已导入 ${importedCount} 个文件${packageHint}`);
         }
-        if (failedCount) message.warning(`有 ${failedCount} 个文件未能识别，请选择图片、视频或素材压缩包`);
+        if (failedCount) message.warning(`有 ${failedCount} 个文件未能识别，请选择图片、视频或资产压缩包`);
         if (assetInputRef.current) assetInputRef.current.value = "";
     };
 
     const confirmDelete = () => {
         if (!deletingAsset) return;
         removeAsset(deletingAsset.id);
-        message.success("素材已删除");
+        message.success("资产已删除");
         setDeletingAsset(null);
     };
+
+    const changeAssetCategory = (asset: Asset, next?: string | null) => {
+        updateAsset(asset.id, { category: resolveAssetCategoryForSave(next) });
+        message.success(next ? `已设为「${assetCategoryLabel(next)}」` : "已清除分类");
+    };
+
+    const autoClassifyUncategorized = () => {
+        const targets = validAssets.filter((asset) => isUncategorizedAsset(asset.category));
+        if (!targets.length) {
+            message.info("当前没有未分类资产");
+            return;
+        }
+        let classified = 0;
+        let skipped = 0;
+        for (const asset of targets) {
+            const content = asset.kind === "text" ? asset.data.content : "";
+            const prompt = typeof asset.metadata?.prompt === "string" ? asset.metadata.prompt : "";
+            const fileName = typeof asset.metadata?.fileName === "string" ? asset.metadata.fileName : "";
+            const suggested = suggestAssetCategory({
+                title: asset.title,
+                tags: asset.tags,
+                source: asset.source,
+                note: asset.note,
+                content,
+                prompt,
+                fileName,
+                kind: asset.kind,
+            });
+            if (!suggested) {
+                skipped += 1;
+                continue;
+            }
+            updateAsset(asset.id, { category: suggested });
+            classified += 1;
+        }
+        if (classified) {
+            message.success(`已智能归类 ${classified} 项${skipped ? `，另有 ${skipped} 项证据不足仍保持未分类` : ""}`);
+            return;
+        }
+        message.info("暂无法从标题/标签/提示词判断分类，可在卡片上直接选择");
+    };
+
+    const uncategorizedCount = useMemo(() => validAssets.filter((asset) => isUncategorizedAsset(asset.category)).length, [validAssets]);
 
     const useAssetInWorkbench = (asset: Asset, target: "image" | "video") => {
         if (asset.kind === "text") {
@@ -363,17 +437,17 @@ export default function AssetsPage() {
             return;
         }
         if (asset.kind === "image" && target === "image") {
-            message.info("图片素材可在生图工作台通过“查看我的素材”插入为参考图");
+            message.info("图片资产可在生图工作台通过“查看我的资产”插入为参考图");
             navigate("/image");
             return;
         }
         if (asset.kind === "image" && target === "video") {
-            message.info("图片素材可在视频工作台通过“查看我的素材”插入为参考图");
+            message.info("图片资产可在视频工作台通过“查看我的资产”插入为参考图");
             navigate("/video");
             return;
         }
         if (asset.kind === "video") {
-            message.info("视频素材可在视频工作台通过“查看我的素材”插入");
+            message.info("视频资产可在视频工作台通过“查看我的资产”插入");
             navigate("/video");
         }
     };
@@ -383,8 +457,8 @@ export default function AssetsPage() {
             <main className="min-h-0 flex-1 overflow-y-auto bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] px-6 py-8 [background-size:16px_16px] dark:bg-[radial-gradient(rgba(245,245,244,.14)_1px,transparent_1px)]">
                 <div className="pb-8">
                     <div className="mx-auto max-w-5xl text-center">
-                        <h1 className="text-4xl font-semibold tracking-tight text-stone-950 dark:text-stone-100">我的素材</h1>
-                        <p className="mt-3 text-sm text-stone-500 dark:text-stone-400">长期保存文本、图片、视频；默认保存在本机，登录后可同步清单与 storageKey 媒体到云端。</p>
+                        <h1 className="text-4xl font-semibold tracking-tight text-stone-950 dark:text-stone-100">我的资产</h1>
+                        <p className="mt-3 text-sm text-stone-500 dark:text-stone-400">长期保存文本、图片、视频资产，可按分类管理；默认本机，登录后可同步清单与 storageKey 媒体到云端。</p>
                         <div className="mt-4 flex justify-center">
                             <Tag
                                 className="m-0 inline-flex h-7 items-center rounded-full px-3 text-xs"
@@ -412,7 +486,7 @@ export default function AssetsPage() {
                             disabled={!hydrated}
                             prefix={<Search className="size-4 text-stone-400" />}
                             value={keyword}
-                            placeholder={hydrated ? "搜索标题、内容、标签或来源" : "正在加载我的素材..."}
+                            placeholder={hydrated ? "搜索标题、内容、标签、分类或来源" : "正在加载我的资产..."}
                             onChange={(event) => {
                                 setPage(1);
                                 setKeyword(event.target.value);
@@ -426,23 +500,44 @@ export default function AssetsPage() {
 
                     <div className="mx-auto mt-6 grid max-w-6xl gap-3 text-left">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                            <div className="grid gap-2 sm:grid-cols-[56px_minmax(0,1fr)] sm:items-center">
-                                <div className="text-xs font-medium text-stone-500 dark:text-stone-400">类型</div>
-                                <div className="flex flex-wrap gap-2">
-                                    {kindOptions.map((option) => (
-                                        <Tag.CheckableTag
-                                            key={option.value}
-                                            checked={kindFilter === option.value}
-                                            className={cn("prompt-filter-tag", kindFilter === option.value && "is-active")}
-                                            onChange={() => {
-                                                if (!hydrated) return;
-                                                setPage(1);
-                                                setKindFilter(option.value as AssetKind | "all");
-                                            }}
-                                        >
-                                            {option.label}
-                                        </Tag.CheckableTag>
-                                    ))}
+                            <div className="flex min-w-0 flex-1 flex-col gap-2">
+                                <div className="grid gap-2 sm:grid-cols-[56px_minmax(0,1fr)] sm:items-center">
+                                    <div className="text-xs font-medium text-stone-500 dark:text-stone-400">类型</div>
+                                    <div className="flex flex-wrap gap-2">
+                                        {kindOptions.map((option) => (
+                                            <Tag.CheckableTag
+                                                key={option.value}
+                                                checked={kindFilter === option.value}
+                                                className={cn("prompt-filter-tag", kindFilter === option.value && "is-active")}
+                                                onChange={() => {
+                                                    if (!hydrated) return;
+                                                    setPage(1);
+                                                    setKindFilter(option.value as AssetKind | "all");
+                                                }}
+                                            >
+                                                {option.label}
+                                            </Tag.CheckableTag>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="grid gap-2 sm:grid-cols-[56px_minmax(0,1fr)] sm:items-center">
+                                    <div className="text-xs font-medium text-stone-500 dark:text-stone-400">分类</div>
+                                    <div className="flex flex-wrap gap-2">
+                                        {categoryOptions.map((option) => (
+                                            <Tag.CheckableTag
+                                                key={option.value}
+                                                checked={categoryFilter === option.value}
+                                                className={cn("prompt-filter-tag", categoryFilter === option.value && "is-active")}
+                                                onChange={() => {
+                                                    if (!hydrated) return;
+                                                    setPage(1);
+                                                    setCategoryFilter(option.value);
+                                                }}
+                                            >
+                                                {option.label}
+                                            </Tag.CheckableTag>
+                                        ))}
+                                    </div>
                                 </div>
                             </div>
                             <div className="flex flex-wrap gap-4">
@@ -461,7 +556,15 @@ export default function AssetsPage() {
                                     className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-stone-300"
                                     onClick={() => void exportAllAssets()}
                                 >
-                                    导出素材
+                                    导出资产
+                                </button>
+                                <button
+                                    type="button"
+                                    disabled={!hydrated || !uncategorizedCount}
+                                    className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-stone-300"
+                                    onClick={autoClassifyUncategorized}
+                                >
+                                    智能归类未分类{uncategorizedCount ? `（${uncategorizedCount}）` : ""}
                                 </button>
                                 <button
                                     type="button"
@@ -477,7 +580,7 @@ export default function AssetsPage() {
                                     className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-stone-300"
                                     onClick={openCreate}
                                 >
-                                    新增素材
+                                    新增资产
                                 </button>
                             </div>
                         </div>
@@ -488,7 +591,7 @@ export default function AssetsPage() {
                     {!hydrated ? (
                         <section className="flex min-h-[360px] flex-col items-center justify-center gap-3 border-y border-stone-200 text-sm text-stone-500 dark:border-stone-800">
                             <Spin />
-                            <span>正在加载我的素材...</span>
+                            <span>正在加载我的资产...</span>
                         </section>
                     ) : (
                         <>
@@ -498,8 +601,10 @@ export default function AssetsPage() {
                                         key={asset.id}
                                         asset={asset}
                                         cloudBadge={getAssetCloudBadge(asset, { loggedIn: Boolean(cloudUser), syncing: cloudSyncing })}
+                                        categoryOptions={collectAssetCategories(validAssets).map((name) => ({ label: name, value: name }))}
                                         onOpen={() => setPreviewAsset(asset)}
                                         onEdit={() => openEdit(asset)}
+                                        onCategoryChange={(next) => changeAssetCategory(asset, next)}
                                         onCopy={copyAssetText}
                                         onDownload={downloadImage}
                                         onUseImage={() => useAssetInWorkbench(asset, "image")}
@@ -509,7 +614,7 @@ export default function AssetsPage() {
                                 ))}
                             </div>
 
-                            {!visibleAssets.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={validAssets.length ? "没有找到素材" : "还没有素材"} className="py-20" /> : null}
+                            {!visibleAssets.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={validAssets.length ? "没有找到资产" : "还没有资产"} className="py-20" /> : null}
 
                             <div className="flex justify-center">
                                 <Pagination
@@ -529,9 +634,9 @@ export default function AssetsPage() {
                 </div>
             </main>
 
-            <Modal title={editingAsset ? "编辑素材" : "新增素材"} open={isAssetOpen} width={980} onCancel={() => setIsAssetOpen(false)} onOk={() => void saveAsset()} okText="保存" cancelText="取消" destroyOnHidden>
+            <Modal title={editingAsset ? "编辑资产" : "新增资产"} open={isAssetOpen} width={980} onCancel={() => setIsAssetOpen(false)} onOk={() => void saveAsset()} okText="保存" cancelText="取消" destroyOnHidden>
                 <div className="grid gap-6 pt-1 lg:grid-cols-[minmax(0,1fr)_320px]">
-                    <Form form={form} layout="vertical" requiredMark={false} initialValues={{ kind: "text", tags: [] }}>
+                    <Form form={form} layout="vertical" requiredMark={false} initialValues={{ kind: "text", tags: [], category: [] }}>
                         <Form.Item name="kind" label="类型">
                             <Select
                                 options={[
@@ -553,7 +658,18 @@ export default function AssetsPage() {
                             />
                         </Form.Item>
                         <Form.Item name="title" label="标题" rules={[{ required: true, message: "请输入标题" }]}>
-                            <Input size="large" placeholder="给素材起一个容易检索的名字" />
+                            <Input size="large" placeholder="给资产起一个容易检索的名字" />
+                        </Form.Item>
+                        <Form.Item name="category" label="分类" extra="按用途区分：人物 / 场景 / 道具等；也可输入自定义分类。留空为未分类。">
+                            <Select
+                                allowClear
+                                showSearch
+                                mode="tags"
+                                maxCount={1}
+                                tokenSeparators={[",", "，"]}
+                                placeholder="人物 / 场景 / 道具 / 风格参考 / 分镜 / 其他"
+                                options={collectAssetCategories(validAssets).map((name) => ({ label: name, value: name }))}
+                            />
                         </Form.Item>
                         <Form.Item name="coverUrl" label="封面 URL">
                             <Space.Compact className="w-full">
@@ -576,7 +692,7 @@ export default function AssetsPage() {
                         </div>
                         {formKind === "text" ? (
                             <Form.Item name="content" label="文本内容" rules={[{ required: true, message: "请输入文本内容" }]}>
-                                <Input.TextArea rows={8} placeholder="保存提示词、说明文案、参考描述等文本素材" />
+                                <Input.TextArea rows={8} placeholder="保存提示词、说明文案、参考描述等文本资产" />
                             </Form.Item>
                         ) : formKind === "video" ? (
                             <Form.Item label="视频内容" required>
@@ -626,7 +742,7 @@ export default function AssetsPage() {
                             )}
                             <div className="p-4">
                                 <Typography.Text strong ellipsis className="block">
-                                    {title || "未命名素材"}
+                                    {title || "未命名资产"}
                                 </Typography.Text>
                                 <div className="mt-2 flex flex-wrap gap-1.5">
                                     {tags.length ? (
@@ -678,8 +794,8 @@ export default function AssetsPage() {
                 onChange={(event) => void importAssetFiles(event.target.files)}
             />
 
-            <Modal title="删除素材" open={Boolean(deletingAsset)} onCancel={() => setDeletingAsset(null)} onOk={confirmDelete} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
-                确定删除「{deletingAsset?.title}」吗？删除后会从我的素材中移除。
+            <Modal title="删除资产" open={Boolean(deletingAsset)} onCancel={() => setDeletingAsset(null)} onOk={confirmDelete} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
+                确定删除「{deletingAsset?.title}」吗？删除后会从我的资产中移除。
             </Modal>
         </div>
     );
@@ -702,8 +818,10 @@ function assetCloudBadgeColor(badge: AssetCloudBadge) {
 function AssetCard({
     asset,
     cloudBadge,
+    categoryOptions,
     onOpen,
     onEdit,
+    onCategoryChange,
     onCopy,
     onDownload,
     onUseImage,
@@ -712,8 +830,10 @@ function AssetCard({
 }: {
     asset: Asset;
     cloudBadge: AssetCloudBadge;
+    categoryOptions: Array<{ label: string; value: string }>;
     onOpen: () => void;
     onEdit: () => void;
+    onCategoryChange: (next?: string) => void;
     onCopy: (asset: Asset) => void;
     onDownload: (asset: Asset) => void;
     onUseImage: () => void;
@@ -722,6 +842,8 @@ function AssetCard({
 }) {
     const cover = asset.coverUrl || (asset.kind === "image" ? asset.data.dataUrl : "");
     const summary = assetSummary(asset);
+    const categoryValue = resolveAssetCategoryForSave(asset.category);
+    const selectOptions = categoryOptions.length ? categoryOptions : standardAssetCategoryOptions();
     return (
         <Card
             hoverable
@@ -743,7 +865,7 @@ function AssetCard({
             }
         >
             <button type="button" className="block w-full text-left" onClick={onOpen}>
-                <div className="p-4">
+                <div className="p-4 pb-2">
                     <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                             <h2 className="line-clamp-1 text-sm font-semibold text-stone-950 dark:text-stone-100">{asset.title}</h2>
@@ -762,6 +884,9 @@ function AssetCard({
                         {summary}
                     </Typography.Paragraph>
                     <div className="mt-3 flex flex-wrap gap-1.5">
+                        <Tag className="m-0 text-[11px]" color="blue">
+                            {assetCategoryLabel(asset.category)}
+                        </Tag>
                         {(asset.tags || []).slice(0, 3).map((tag) => (
                             <Tag key={tag} className="m-0 text-[11px]">
                                 {tag}
@@ -771,6 +896,18 @@ function AssetCard({
                     </div>
                 </div>
             </button>
+            <div className="px-4 pb-2" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
+                <Select
+                    size="small"
+                    allowClear
+                    showSearch
+                    className="w-full"
+                    placeholder="快速设分类"
+                    value={categoryValue}
+                    options={selectOptions}
+                    onChange={(value) => onCategoryChange(typeof value === "string" ? value : undefined)}
+                />
+            </div>
             <div className="flex flex-wrap items-center gap-2 px-4 pb-4">
                 {asset.kind === "text" ? (
                     <>
@@ -808,7 +945,7 @@ function AssetCard({
 function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | null; onClose: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void }) {
     const cover = asset ? asset.coverUrl || (asset.kind === "image" ? asset.data.dataUrl : "") : "";
     return (
-        <Drawer title="素材详情" open={Boolean(asset)} size="large" onClose={onClose}>
+        <Drawer title="资产详情" open={Boolean(asset)} size="large" onClose={onClose}>
             {asset ? (
                 <div className="space-y-5">
                     {asset.kind === "video" && asset.data.url ? (
@@ -820,6 +957,9 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                     )}
                     <div className="flex flex-wrap gap-2">
                         <Tag className="m-0">{asset.kind === "image" ? "图片" : asset.kind === "video" ? "视频" : "文本"}</Tag>
+                        <Tag className="m-0" color="blue">
+                            {assetCategoryLabel(asset.category)}
+                        </Tag>
                         <Tag className="m-0" color={assetCloudBadgeColor(getAssetCloudBadge(asset))}>
                             {assetCloudBadgeLabel(getAssetCloudBadge(asset))}
                         </Tag>
@@ -879,7 +1019,7 @@ function assetSummary(asset: Asset) {
 }
 
 function assetSearchText(asset: Asset) {
-    return [asset.title, asset.source || "", asset.note || "", (asset.tags || []).join(" "), asset.kind === "text" ? asset.data.content : asset.data.mimeType].join(" ").toLowerCase();
+    return [asset.title, asset.category || "", asset.source || "", asset.note || "", (asset.tags || []).join(" "), asset.kind === "text" ? asset.data.content : asset.data.mimeType].join(" ").toLowerCase();
 }
 
 function fileNameWithoutExtension(name: string) {

@@ -14,9 +14,11 @@ import { resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { agnesVideoRequestError, isAgnesVideoConfig } from "@/lib/agnes-video";
+import { suggestAssetCategory } from "@/lib/asset-category";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { useAssetStore } from "@/stores/use-asset-store";
+import { useAuthStore } from "@/stores/use-auth-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { exportCanvasNodes, exportCanvasProjects } from "@/lib/canvas/canvas-export";
@@ -450,6 +452,15 @@ function InfiniteCanvasPage() {
             let restoreWarning = false;
 
             try {
+                // 登录态：先尽量从云端补齐本地缺失 blob，再 hydrate 成可显示 URL
+                if (useAuthStore.getState().user) {
+                    try {
+                        const { downloadMissingCloudBlobs } = await import("@/services/cloud-blob-sync");
+                        await downloadMissingCloudBlobs({ nodes: baseNodes, chatSessions: project.chatSessions || [] });
+                    } catch {
+                        // 云补齐失败不阻断打开画布
+                    }
+                }
                 [restoredNodes, restoredSessions] = await Promise.all([hydrateCanvasImages(baseNodes), hydrateAssistantImages(project.chatSessions || [])]);
             } catch {
                 restoreWarning = true;
@@ -1716,22 +1727,44 @@ function InfiniteCanvasPage() {
             if (node.type === CanvasNodeType.Text) {
                 const content = node.metadata?.content?.trim();
                 if (!content) return message.error("没有可保存的文本");
-                addAsset({ kind: "text", title: node.metadata?.prompt?.slice(0, 24) || "画布文本", coverUrl: "", tags: [], source: "Canvas", data: { content }, metadata: { source: "canvas", nodeId: node.id } });
-                message.success("已加入我的素材");
+                const title = node.metadata?.prompt?.slice(0, 24) || "画布文本";
+                addAsset({
+                    kind: "text",
+                    title,
+                    coverUrl: "",
+                    category: suggestAssetCategory({ title, source: "Canvas", content, prompt: node.metadata?.prompt, kind: "text" }),
+                    tags: [],
+                    source: "Canvas",
+                    data: { content },
+                    metadata: { source: "canvas", nodeId: node.id },
+                });
+                message.success("已加入我的资产");
                 return;
             }
             if (node.type === CanvasNodeType.Video) {
                 if (!node.metadata?.content) return message.error("没有可保存的视频");
-                addAsset({ kind: "video", title: node.metadata?.prompt?.slice(0, 24) || "画布视频", coverUrl: "", tags: [], source: "Canvas", data: { url: node.metadata.content, storageKey: node.metadata.storageKey, width: node.width, height: node.height, bytes: node.metadata.bytes || 0, mimeType: node.metadata.mimeType || "video/mp4" }, metadata: { source: "canvas", nodeId: node.id, prompt: node.metadata?.prompt } });
-                message.success("已加入我的素材");
+                const title = node.metadata?.prompt?.slice(0, 24) || "画布视频";
+                addAsset({
+                    kind: "video",
+                    title,
+                    coverUrl: "",
+                    category: suggestAssetCategory({ title, source: "Canvas", prompt: node.metadata?.prompt, kind: "video" }),
+                    tags: [],
+                    source: "Canvas",
+                    data: { url: node.metadata.content, storageKey: node.metadata.storageKey, width: node.width, height: node.height, bytes: node.metadata.bytes || 0, mimeType: node.metadata.mimeType || "video/mp4" },
+                    metadata: { source: "canvas", nodeId: node.id, prompt: node.metadata?.prompt },
+                });
+                message.success("已加入我的资产");
                 return;
             }
             if (!node.metadata?.content) return message.error("没有可保存的图片");
             const dataUrl = node.metadata.storageKey ? "" : node.metadata.content;
+            const title = node.metadata?.prompt?.slice(0, 24) || "画布图片";
             addAsset({
                 kind: "image",
-                title: node.metadata?.prompt?.slice(0, 24) || "画布图片",
+                title,
                 coverUrl: node.metadata.content,
+                category: suggestAssetCategory({ title, source: "Canvas", prompt: node.metadata?.prompt, kind: "image" }),
                 tags: [],
                 source: "Canvas",
                 data: {
@@ -1744,7 +1777,7 @@ function InfiniteCanvasPage() {
                 },
                 metadata: { source: "canvas", nodeId: node.id, prompt: node.metadata?.prompt },
             });
-            message.success("已加入我的素材");
+            message.success("已加入我的资产");
         },
         [addAsset, message],
     );
@@ -3345,15 +3378,40 @@ async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
 
 async function hydrateCanvasNodeMedia(node: CanvasNodeData) {
     try {
-        const content = node.metadata?.content;
+        const content = node.metadata?.content || "";
         if ((node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) && node.metadata?.storageKey) {
-            return { ...node, metadata: { ...node.metadata, content: await withCanvasHydrationTimeout(resolveMediaUrl(node.metadata.storageKey, content)) } };
+            // 不要把过期 blob: 当 fallback；丢本地 blob 时 content 置空，避免「有节点无画面」
+            const restored = await withCanvasHydrationTimeout(resolveMediaUrl(node.metadata.storageKey, ""));
+            const nextContent = restored || (content.startsWith("blob:") ? "" : content);
+            return { ...node, metadata: { ...node.metadata, content: nextContent } };
         }
-        if (node.type !== CanvasNodeType.Image || !content) return node;
-        if (node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await withCanvasHydrationTimeout(resolveImageUrl(node.metadata.storageKey, content)) } };
-        if (!content.startsWith("data:image/")) return node;
-        return { ...node, metadata: { ...node.metadata, ...imageMetadata(await withCanvasHydrationTimeout(uploadImage(content))) } };
+        if (node.type !== CanvasNodeType.Image) {
+            // 非图片：若 content 是失效 blob: 则清掉
+            if (content.startsWith("blob:") && !node.metadata?.storageKey) {
+                return { ...node, metadata: { ...node.metadata, content: "" } };
+            }
+            return node;
+        }
+        if (!content && !node.metadata?.storageKey) return node;
+        if (node.metadata?.storageKey) {
+            const restored = await withCanvasHydrationTimeout(resolveImageUrl(node.metadata.storageKey, ""));
+            const nextContent = restored || (content.startsWith("blob:") ? "" : content);
+            return { ...node, metadata: { ...node.metadata, content: nextContent } };
+        }
+        // 无 storageKey 的 data URL：落盘；纯 blob: 无 key 无法恢复
+        if (content.startsWith("data:image/")) {
+            return { ...node, metadata: { ...node.metadata, ...imageMetadata(await withCanvasHydrationTimeout(uploadImage(content))) } };
+        }
+        if (content.startsWith("blob:")) {
+            return { ...node, metadata: { ...node.metadata, content: "" } };
+        }
+        return node;
     } catch {
+        // 恢复失败时清掉失效 blob:，避免白屏假图
+        const content = node.metadata?.content || "";
+        if (content.startsWith("blob:")) {
+            return { ...node, metadata: { ...node.metadata, content: "" } };
+        }
         return node;
     }
 }
