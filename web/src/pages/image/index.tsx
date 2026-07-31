@@ -860,7 +860,14 @@ export default function ImagePage() {
                                     {references.map((item, index) => (
                                         <div key={item.id} className="group relative size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
                                             {item.dataUrl ? (
-                                                <Image src={item.dataUrl} alt={item.name} className="size-full object-cover" preview={{ mask: "预览" }} />
+                                                <Image
+                                                    src={item.dataUrl}
+                                                    alt={item.name}
+                                                    className="size-full object-cover"
+                                                    classNames={{ root: "block size-full", image: "size-full object-cover" }}
+                                                    styles={{ root: { width: "100%", height: "100%", display: "block" }, image: { width: "100%", height: "100%", objectFit: "cover" } }}
+                                                    preview={{ mask: "预览" }}
+                                                />
                                             ) : (
                                                 <div className="flex size-full items-center justify-center bg-stone-100 text-xs text-stone-400 dark:bg-stone-900 dark:text-stone-500">无预览</div>
                                             )}
