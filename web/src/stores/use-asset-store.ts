@@ -49,6 +49,8 @@ type AssetStore = {
     addAsset: (asset: Omit<Asset, "id" | "createdAt" | "updatedAt">) => string;
     updateAsset: (id: string, patch: Partial<Omit<Asset, "id" | "createdAt">>) => void;
     removeAsset: (id: string) => void;
+    /** Batch delete: one cleanup pass + per-id cloud tombstone. */
+    removeAssets: (ids: string[]) => void;
     replaceAssets: (assets: Asset[]) => void;
     cleanupImages: (extra?: unknown) => void;
 };
@@ -144,6 +146,16 @@ export const useAssetStore = create<AssetStore>()(
                     return { assets };
                 });
                 recordAssetCloudDeletion(id);
+            },
+            removeAssets: (ids) => {
+                const idSet = new Set((ids || []).filter(Boolean));
+                if (!idSet.size) return;
+                set((state) => {
+                    const assets = state.assets.filter((asset) => !idSet.has(asset.id));
+                    get().cleanupImages({ assets });
+                    return { assets };
+                });
+                for (const id of idSet) recordAssetCloudDeletion(id);
             },
             replaceAssets: (assets) => set({ assets }),
             cleanupImages: (extra) => {

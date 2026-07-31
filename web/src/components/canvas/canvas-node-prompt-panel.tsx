@@ -14,6 +14,7 @@ import { CanvasPromptLibrary } from "./canvas-prompt-library";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
 import { CanvasPromptChipInput } from "./canvas-prompt-chip-input";
 import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
+import { CanvasTextSettingsPopover } from "./canvas-text-settings-popover";
 import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 
@@ -267,14 +268,17 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                             <CanvasAudioSettingsPopover config={config} buttonClassName="!h-8 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
                         </>
                     ) : (
-                        <ModelPicker
-                            className="!h-8 max-w-[190px]"
-                            config={config}
-                            value={config.model}
-                            onChange={(model) => onConfigChange(node.id, { model })}
-                            capability="text"
-                            onMissingConfig={() => openConfigDialog(true)}
-                        />
+                        <>
+                            <ModelPicker
+                                className="!h-8 max-w-[190px]"
+                                config={config}
+                                value={config.model}
+                                onChange={(model) => onConfigChange(node.id, { model })}
+                                capability="text"
+                                onMissingConfig={() => openConfigDialog(true)}
+                            />
+                            <CanvasTextSettingsPopover config={config} onConfigChange={(_, value) => onConfigChange(node.id, { reasoningEffort: value })} />
+                        </>
                     )}
                 </div>
                 <Button

@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, WandSparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Square, Trash2, Upload, WandSparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Segmented, Switch, Tag, Tooltip, Typography } from "antd";
@@ -65,7 +65,7 @@ type GenerationLog = {
     imageCount: number;
     size: string;
     quality: string;
-    status: "成功" | "失败";
+    status: "生成中" | "成功" | "失败";
     images: GeneratedImage[];
     thumbnails: string[];
     cloudSync?: CloudSyncStatus;
@@ -88,6 +88,12 @@ export default function ImagePage() {
     const [searchParams, setSearchParams] = useSearchParams();
     const fileInputRef = useRef<HTMLInputElement>(null);
     const dragDepthRef = useRef(0);
+    /** Concurrent workbench jobs: unlock Generate while previous batch is still running. */
+    const activeImageJobsRef = useRef(new Set<string>());
+    const latestImageJobIdRef = useRef("");
+    const imageJobControllersRef = useRef(new Map<string, AbortController>());
+    const [, setActiveJobTick] = useState(0);
+    const bumpActiveJobs = () => setActiveJobTick((value) => value + 1);
     const config = useConfigStore((state) => state.config);
     const effectiveConfig = useEffectiveConfig();
     const updateConfig = useConfigStore((state) => state.updateConfig);
@@ -289,26 +295,72 @@ export default function ImagePage() {
         const snapshot = buildRequestSnapshot();
         if (!snapshot) return;
 
+        // Snapshot current refs/prompt into a NEW left-side task immediately so changing refs
+        // and generating again never waits for the previous batch to finish.
+        const jobId = nanoid();
+        const batchStartedAt = performance.now();
+        const controller = new AbortController();
+        const pendingLog = buildLog({
+            id: jobId,
+            prompt: text,
+            model,
+            config: { ...snapshot.config, count: String(generationCount) },
+            references: snapshot.references,
+            durationMs: 0,
+            successCount: 0,
+            failCount: 0,
+            status: "生成中",
+            images: [],
+        });
+        activeImageJobsRef.current.add(jobId);
+        imageJobControllersRef.current.set(jobId, controller);
+        latestImageJobIdRef.current = jobId;
+        bumpActiveJobs();
         setElapsedMs(0);
         setRunning(true);
         setPreviewLog(null);
         setResults(Array.from({ length: generationCount }, () => ({ id: nanoid(), status: "pending" })));
-        const batchStartedAt = performance.now();
         setStartedAt(batchStartedAt);
-
-        const batchResult = await runGenerationBatch(snapshot, generationCount);
-        const successImages = batchResult.images;
-        const successCount = successImages.length;
-        const failCount = generationCount - successCount;
+        saveLog(pendingLog);
+        setLogs((value) => [pendingLog, ...value.filter((item) => item.id !== pendingLog.id)]);
 
         try {
+            const batchResult = await runGenerationBatch(snapshot, generationCount, jobId, controller.signal);
+            if (controller.signal.aborted) {
+                const cancelledLog: GenerationLog = {
+                    ...pendingLog,
+                    status: "失败",
+                    durationMs: performance.now() - batchStartedAt,
+                    failCount: generationCount,
+                    successCount: 0,
+                    images: batchResult.images,
+                    imageCount: batchResult.images.length,
+                    thumbnails: batchResult.images.map((image) => image.dataUrl).filter(Boolean).slice(0, 4),
+                };
+                saveLog(cancelledLog);
+                setLogs((value) => value.map((item) => (item.id === cancelledLog.id ? cancelledLog : item)));
+                if (isLatestImageJob(jobId)) {
+                    setResults((value) => value.map((item) => (item.status === "pending" ? { ...item, status: "failed", error: "已停止生成" } : item)));
+                }
+                message.info("已停止该任务");
+                return;
+            }
+            const successImages = batchResult.images;
+            const successCount = successImages.length;
+            const failCount = generationCount - successCount;
             const logImages = await Promise.all(
                 successImages.map(async (image) => {
-                    const stored = await uploadImage(image.dataUrl);
-                    return { ...image, dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
+                    if (image.storageKey) return image;
+                    try {
+                        const stored = await uploadImage(image.dataUrl);
+                        return { ...image, dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
+                    } catch {
+                        return image;
+                    }
                 }),
             );
             const log = buildLog({
+                id: jobId,
                 prompt: text,
                 model,
                 config: { ...snapshot.config, count: String(generationCount) },
@@ -318,6 +370,8 @@ export default function ImagePage() {
                 failCount,
                 status: successCount ? "成功" : "失败",
                 images: logImages,
+                createdAt: pendingLog.createdAt,
+                time: pendingLog.time,
             });
             const loggedIn = Boolean(useAuthStore.getState().user);
             const logWithSync: GenerationLog = { ...log, cloudSync: successCount ? (loggedIn ? "pending" : "skipped") : undefined };
@@ -351,8 +405,42 @@ export default function ImagePage() {
             } else {
                 message.error(batchResult.firstError || "生成失败");
             }
+        } catch (error) {
+            if (isAbortLikeError(error) || controller.signal.aborted) {
+                const cancelledLog: GenerationLog = {
+                    ...pendingLog,
+                    status: "失败",
+                    durationMs: performance.now() - batchStartedAt,
+                    failCount: generationCount,
+                    successCount: 0,
+                };
+                saveLog(cancelledLog);
+                setLogs((value) => value.map((item) => (item.id === cancelledLog.id ? cancelledLog : item)));
+                if (isLatestImageJob(jobId)) {
+                    setResults((value) => value.map((item) => (item.status === "pending" ? { ...item, status: "failed", error: "已停止生成" } : item)));
+                }
+                message.info("已停止该任务");
+            } else {
+                const errorMessage = error instanceof Error ? error.message : "生成失败";
+                const failedLog: GenerationLog = {
+                    ...pendingLog,
+                    status: "失败",
+                    durationMs: performance.now() - batchStartedAt,
+                    failCount: generationCount,
+                    successCount: 0,
+                };
+                saveLog(failedLog);
+                setLogs((value) => value.map((item) => (item.id === failedLog.id ? failedLog : item)));
+                message.error(errorMessage);
+            }
         } finally {
-            setRunning(false);
+            activeImageJobsRef.current.delete(jobId);
+            imageJobControllersRef.current.delete(jobId);
+            bumpActiveJobs();
+            if (!activeImageJobsRef.current.size) {
+                setRunning(false);
+                setStartedAt(0);
+            }
         }
     };
 
@@ -548,6 +636,27 @@ export default function ImagePage() {
         };
     };
 
+    const isLatestImageJob = (jobId?: string) => !jobId || latestImageJobIdRef.current === jobId;
+
+    const stopImageJob = (jobId: string) => {
+        const controller = imageJobControllersRef.current.get(jobId);
+        if (!controller) {
+            message.info("该任务已结束或不可停止");
+            return;
+        }
+        if (!controller.signal.aborted) controller.abort();
+        message.info("正在停止该任务…");
+    };
+
+    const stopLatestImageJob = () => {
+        const jobId = latestImageJobIdRef.current;
+        if (!jobId || !imageJobControllersRef.current.has(jobId)) {
+            message.info("当前没有可停止的生成任务");
+            return;
+        }
+        stopImageJob(jobId);
+    };
+
     const runGenerationBatch = async (
         snapshot: {
             text: string;
@@ -557,30 +666,37 @@ export default function ImagePage() {
             autoSwitchedModel?: { switched: boolean; from: string; to: string } | null;
         },
         count: number,
+        jobId?: string,
+        signal?: AbortSignal,
     ) => {
         const batchStartedAt = performance.now();
+        if (signal?.aborted) throw new DOMException("请求已取消", "AbortError");
         if (snapshot.autoSwitchedModel?.switched) {
             message.info(`图生图已自动使用 ${snapshot.autoSwitchedModel.to}（原选 ${snapshot.autoSwitchedModel.from}）`, 2.5);
         }
         if (snapshot.platform) {
             // 平台网关按张串行：每张独立 client_local_id，成功才扣费，避免并发双扣。
-            return runGenerationSlotsSerial(snapshot, 0, count);
+            return runGenerationSlotsSerial(snapshot, 0, count, 0, jobId, signal);
         }
         // codex2api 等脆弱中转：强制串行按张生成，避免 bulk n 或失败后连环重试触发 CONNECTION_CLOSED
         const channel = resolveModelChannel(snapshot.config, snapshot.config.model || snapshot.config.imageModel);
         const fragileRelay = getImageCompatStrategy(channel.baseUrl, channel.compatProfile).profile === "relay-fragile";
         if (fragileRelay || count > 1) {
             // 脆弱中转始终串行；多张也串行（与原先 bulk 失败回退一致，但 fragile 不先 bulk）
-            if (fragileRelay) return runGenerationSlotsSerial(snapshot, 0, count, 900);
+            if (fragileRelay) return runGenerationSlotsSerial(snapshot, 0, count, 900, jobId, signal);
         }
         // 优先一次请求拿齐 count；失败或数量不足时再串行补齐，避免并发触发 429。
         try {
-            const generated = snapshot.references.length ? await requestEdit({ ...snapshot.config, count: String(count) }, snapshot.text, snapshot.references) : await requestGeneration({ ...snapshot.config, count: String(count) }, snapshot.text);
+            const generated = snapshot.references.length
+                ? await requestEdit({ ...snapshot.config, count: String(count) }, snapshot.text, snapshot.references, undefined, { signal })
+                : await requestGeneration({ ...snapshot.config, count: String(count) }, snapshot.text, { signal });
+            if (signal?.aborted) throw new DOMException("请求已取消", "AbortError");
             if (generated.some((item) => item.degradedFromEdit)) {
                 message.warning(generated.find((item) => item.degradeReason)?.degradeReason || IMAGE_EDIT_DEGRADED_DEFAULT);
             }
             const images: GeneratedImage[] = [];
             for (let index = 0; index < Math.min(generated.length, count); index += 1) {
+                if (signal?.aborted) throw new DOMException("请求已取消", "AbortError");
                 const image = generated[index];
                 let dataUrl = image.dataUrl;
                 let storageKey: string | undefined;
@@ -605,17 +721,18 @@ export default function ImagePage() {
                     height = meta.height;
                 }
                 const nextImage: GeneratedImage = { id: image.id, dataUrl, storageKey, durationMs: performance.now() - batchStartedAt, width, height, bytes };
-                setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
+                if (isLatestImageJob(jobId)) setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
                 images.push(nextImage);
             }
             if (images.length < count) {
-                const { images: fallbackImages, firstError } = await runGenerationSlotsSerial(snapshot, images.length, count);
+                const { images: fallbackImages, firstError } = await runGenerationSlotsSerial(snapshot, images.length, count, 0, jobId, signal);
                 return { images: [...images, ...fallbackImages], firstError: images.length || fallbackImages.length ? "" : firstError || "接口返回图片数量不足" };
             }
             return { images, firstError: "" };
         } catch (error) {
+            if (isAbortLikeError(error) || signal?.aborted) throw error;
             const firstError = error instanceof Error ? error.message : "生成失败";
-            const serial = await runGenerationSlotsSerial(snapshot, 0, count);
+            const serial = await runGenerationSlotsSerial(snapshot, 0, count, 0, jobId, signal);
             return { images: serial.images, firstError: serial.images.length ? "" : serial.firstError || firstError };
         }
     };
@@ -625,25 +742,32 @@ export default function ImagePage() {
         startIndex: number,
         count: number,
         gapMs = 0,
+        jobId?: string,
+        signal?: AbortSignal,
     ) => {
         const images: GeneratedImage[] = [];
         let firstError = "";
         for (let index = startIndex; index < count; index += 1) {
+            if (signal?.aborted) break;
             if (gapMs > 0 && index > startIndex) {
-                await new Promise((resolve) => window.setTimeout(resolve, gapMs));
+                await sleepWithSignal(gapMs, signal);
+                if (signal?.aborted) break;
             }
             try {
-                images.push(await runGenerationSlot(index, snapshot));
+                images.push(await runGenerationSlot(index, snapshot, jobId, signal));
             } catch (error) {
+                if (isAbortLikeError(error) || signal?.aborted) break;
                 if (!firstError) firstError = error instanceof Error ? error.message : "生成失败";
             }
         }
+        if (signal?.aborted) throw new DOMException("请求已取消", "AbortError");
         return { images, firstError };
     };
 
-    const runGenerationSlot = async (index: number, snapshot: { text: string; config: AiConfig; references: ReferenceImage[]; platform?: boolean }) => {
+    const runGenerationSlot = async (index: number, snapshot: { text: string; config: AiConfig; references: ReferenceImage[]; platform?: boolean }, jobId?: string, signal?: AbortSignal) => {
         const itemStartedAt = performance.now();
         try {
+            if (signal?.aborted) throw new DOMException("请求已取消", "AbortError");
             if (snapshot.platform) {
                 const platformImages = [];
                 for (const ref of snapshot.references.slice(0, 4)) {
@@ -657,13 +781,16 @@ export default function ImagePage() {
                 if (snapshot.references.length && !platformImages.length) {
                     throw new Error("参考图无法读取为本地图片，请重新上传本地图后再用平台图生图");
                 }
-                const platform = await generatePlatformImage({
-                    prompt: snapshot.text,
-                    size: snapshot.config.size,
-                    quality: snapshot.config.quality,
-                    clientLocalId: nanoid(),
-                    images: platformImages,
-                });
+                const platform = await generatePlatformImage(
+                    {
+                        prompt: snapshot.text,
+                        size: snapshot.config.size,
+                        quality: snapshot.config.quality,
+                        clientLocalId: nanoid(),
+                        images: platformImages,
+                    },
+                    { signal },
+                );
                 let dataUrl = platform.dataUrl;
                 let storageKey: string | undefined;
                 let width = platform.width || 0;
@@ -689,11 +816,13 @@ export default function ImagePage() {
                     height = meta.height;
                 }
                 const nextImage: GeneratedImage = { id: platform.job.id || nanoid(), dataUrl, storageKey, durationMs: performance.now() - itemStartedAt, width, height, bytes, mimeType: platform.mimeType };
-                setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
+                if (isLatestImageJob(jobId)) setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
                 void refreshUsage();
                 return nextImage;
             }
-            const result = snapshot.references.length ? await requestEdit(snapshot.config, snapshot.text, snapshot.references) : await requestGeneration(snapshot.config, snapshot.text);
+            const result = snapshot.references.length
+                ? await requestEdit(snapshot.config, snapshot.text, snapshot.references, undefined, { signal })
+                : await requestGeneration(snapshot.config, snapshot.text, { signal });
             const image = result[0];
             if (!image) throw new Error("接口没有返回图片");
             if (image.degradedFromEdit) {
@@ -722,10 +851,11 @@ export default function ImagePage() {
                 height = meta.height;
             }
             const nextImage: GeneratedImage = { id: image.id, dataUrl, storageKey, durationMs: performance.now() - itemStartedAt, width, height, bytes };
-            setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
+            if (isLatestImageJob(jobId)) setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
             return nextImage;
         } catch (error) {
-            setResults((value) => updateResultAt(value, index, { status: "failed", error: error instanceof Error ? error.message : "生成失败" }));
+            if (isAbortLikeError(error) || signal?.aborted) throw error;
+            if (isLatestImageJob(jobId)) setResults((value) => updateResultAt(value, index, { status: "failed", error: error instanceof Error ? error.message : "生成失败" }));
             throw error;
         }
     };
@@ -775,6 +905,8 @@ export default function ImagePage() {
                         onDeleteSelected={() => setDeleteConfirmOpen(true)}
                         onPreviewLog={(log) => void previewGenerationLog(log)}
                         onRetryCloud={retryCloudSync}
+                        onStopLog={stopImageJob}
+                        stoppableLogIds={Array.from(activeImageJobsRef.current)}
                     />
                 </aside>
 
@@ -939,9 +1071,16 @@ export default function ImagePage() {
                                     {requestMode.tip} 兼容预设：{requestMode.compatLabel}。
                                 </div>
                             </div>
-                            <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
-                                开始生成
-                            </Button>
+                            <div className="flex gap-2">
+                                <Button type="primary" size="large" className="flex-1" icon={<Sparkles className="size-4" />} disabled={!canGenerate} onClick={() => void generate()}>
+                                    {running ? "再生成一条" : "开始生成"}
+                                </Button>
+                                {running ? (
+                                    <Button size="large" danger icon={<Square className="size-4" />} onClick={stopLatestImageJob}>
+                                        停止
+                                    </Button>
+                                ) : null}
+                            </div>
                         </div>
                     </div>
 
@@ -998,6 +1137,8 @@ export default function ImagePage() {
                     onDeleteSelected={() => setDeleteConfirmOpen(true)}
                     onPreviewLog={(log) => void previewGenerationLog(log)}
                     onRetryCloud={retryCloudSync}
+                    onStopLog={stopImageJob}
+                    stoppableLogIds={Array.from(activeImageJobsRef.current)}
                 />
             </Drawer>
             <Drawer title="参数" placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
@@ -1157,6 +1298,8 @@ function LogPanel({
     onDeleteSelected,
     onPreviewLog,
     onRetryCloud,
+    onStopLog,
+    stoppableLogIds = [],
 }: {
     logs: GenerationLog[];
     selectedLogIds: string[];
@@ -1170,10 +1313,13 @@ function LogPanel({
     onDeleteSelected: () => void;
     onPreviewLog: (log: GenerationLog) => void;
     onRetryCloud?: (log: GenerationLog) => void;
+    onStopLog?: (logId: string) => void;
+    stoppableLogIds?: string[];
 }) {
     const allSelected = Boolean(logs.length) && selectedLogIds.length === logs.length;
     const toggleAll = () => onSelectedLogIdsChange(allSelected ? [] : logs.map((log) => log.id));
     const showCloud = historySource === "cloud";
+    const stoppable = new Set(stoppableLogIds);
 
     return (
         <>
@@ -1220,9 +1366,11 @@ function LogPanel({
                                 log={log}
                                 selected={selectedLogIds.includes(log.id)}
                                 active={activeLogId === log.id}
+                                canStop={Boolean(onStopLog && stoppable.has(log.id) && log.status === "生成中")}
                                 onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))}
                                 onClick={() => onPreviewLog(log)}
                                 onRetryCloud={onRetryCloud}
+                                onStop={onStopLog ? () => onStopLog(log.id) : undefined}
                             />
                         ))}
                         {!logs.length ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">暂无生成记录</div> : null}
@@ -1233,7 +1381,25 @@ function LogPanel({
     );
 }
 
-function LogCard({ log, selected, active, onSelectedChange, onClick, onRetryCloud }: { log: GenerationLog; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void; onRetryCloud?: (log: GenerationLog) => void }) {
+function LogCard({
+    log,
+    selected,
+    active,
+    canStop,
+    onSelectedChange,
+    onClick,
+    onRetryCloud,
+    onStop,
+}: {
+    log: GenerationLog;
+    selected: boolean;
+    active: boolean;
+    canStop?: boolean;
+    onSelectedChange: (checked: boolean) => void;
+    onClick: () => void;
+    onRetryCloud?: (log: GenerationLog) => void;
+    onStop?: () => void;
+}) {
     const thumbnails = (log.thumbnails || []).filter(Boolean).slice(0, 4);
     const syncLabel = cloudSyncLabel(log.cloudSync);
 
@@ -1262,6 +1428,13 @@ function LogCard({ log, selected, active, onSelectedChange, onClick, onRetryClou
                                 ))}
                             </div>
                         ) : null}
+                        {canStop && onStop ? (
+                            <div className="mt-2" onClick={(event) => event.stopPropagation()}>
+                                <Button size="small" danger icon={<Square className="size-3.5" />} onClick={onStop}>
+                                    停止
+                                </Button>
+                            </div>
+                        ) : null}
                         {log.cloudSync === "failed" && onRetryCloud ? (
                             <div className="mt-2" onClick={(event) => event.stopPropagation()}>
                                 <Button size="small" onClick={() => onRetryCloud(log)}>
@@ -1273,10 +1446,16 @@ function LogCard({ log, selected, active, onSelectedChange, onClick, onRetryClou
                 </div>
                 <div className="grid justify-items-end gap-2">
                     <div className="flex gap-1">
-                        <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color="blue">
-                            成功 {log.successCount ?? log.imageCount}
-                        </Tag>
-                        {log.failCount ? (
+                        {log.status === "生成中" ? (
+                            <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color="processing">
+                                生成中
+                            </Tag>
+                        ) : (
+                            <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color="blue">
+                                成功 {log.successCount ?? log.imageCount}
+                            </Tag>
+                        )}
+                        {log.status !== "生成中" && log.failCount ? (
                             <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color="red">
                                 失败 {log.failCount}
                             </Tag>
@@ -1346,7 +1525,7 @@ async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog>
         imageCount: log.imageCount || log.successCount || 0,
         size: log.size || config.size || "",
         quality: log.quality || config.quality || "",
-        status: log.status || "成功",
+        status: log.status === "生成中" || log.status === "失败" || log.status === "成功" ? log.status : "成功",
         images,
         thumbnails: images.map((image) => image.dataUrl).filter(Boolean),
         cloudSync: normalizeCloudSyncStatus(log.cloudSync),
@@ -1424,6 +1603,7 @@ async function syncImageLogToCloud(log: GenerationLog): Promise<GenerationLog> {
 }
 
 function buildLog({
+    id,
     prompt,
     model,
     config,
@@ -1433,7 +1613,10 @@ function buildLog({
     failCount,
     status,
     images,
+    createdAt,
+    time,
 }: {
+    id?: string;
     prompt: string;
     model: string;
     config: GenerationLogConfig;
@@ -1443,6 +1626,8 @@ function buildLog({
     failCount: number;
     status: GenerationLog["status"];
     images: GeneratedImage[];
+    createdAt?: number;
+    time?: string;
 }): GenerationLog {
     const logConfig = {
         model: config.model,
@@ -1452,22 +1637,52 @@ function buildLog({
         count: config.count,
     };
     return {
-        id: nanoid(),
-        createdAt: Date.now(),
+        id: id || nanoid(),
+        createdAt: createdAt || Date.now(),
         title: prompt.slice(0, 12) || "未命名",
         prompt,
-        time: new Date().toLocaleString("zh-CN", { hour12: false }),
+        time: time || new Date().toLocaleString("zh-CN", { hour12: false }),
         model,
         config: logConfig,
         references,
         durationMs,
         successCount,
         failCount,
-        imageCount: Number(logConfig.count) || successCount,
+        imageCount: Number(logConfig.count) || successCount || images.length,
         size: logConfig.size,
         quality: logConfig.quality,
         status,
         images,
         thumbnails: images.map((image) => image.dataUrl).filter(Boolean),
     };
+}
+
+function isAbortLikeError(error: unknown) {
+    if (!error) return false;
+    if (typeof error === "object" && error !== null) {
+        const name = "name" in error ? String((error as { name?: unknown }).name || "") : "";
+        const message = "message" in error ? String((error as { message?: unknown }).message || "") : "";
+        if (name === "AbortError" || name === "CanceledError") return true;
+        if (message === "请求已取消" || message === "已停止生成" || /aborted|abort|canceled|cancelled/i.test(message)) return true;
+    }
+    return false;
+}
+
+function sleepWithSignal(ms: number, signal?: AbortSignal) {
+    return new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(new DOMException("请求已取消", "AbortError"));
+            return;
+        }
+        const timer = window.setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
+        const onAbort = () => {
+            window.clearTimeout(timer);
+            signal?.removeEventListener("abort", onAbort);
+            reject(new DOMException("请求已取消", "AbortError"));
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+    });
 }

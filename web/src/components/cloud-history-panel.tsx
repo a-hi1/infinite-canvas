@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
-import { App, Button, Empty, Spin, Tag, Typography } from "antd";
-import { Download, RefreshCw, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { App, Button, Checkbox, Empty, Image, Modal, Spin, Tag, Typography } from "antd";
+import { CheckSquare, Download, Expand, RefreshCw, Trash2 } from "lucide-react";
 import { saveAs } from "file-saver";
 
 import { cloudFileObjectUrl, deleteCloudJob, listCloudJobs, type CloudJob } from "@/services/cloud-api";
 import { useAuthStore } from "@/stores/use-auth-store";
+import { cn } from "@/lib/utils";
 
 type Props = {
     type: "image" | "video";
@@ -18,23 +19,35 @@ export function CloudHistoryPanel({ type, refreshKey = 0 }: Props) {
     const logout = useAuthStore((s) => s.logout);
     const refreshUsage = useAuthStore((s) => s.refreshUsage);
     const [loading, setLoading] = useState(false);
+    const [batchBusy, setBatchBusy] = useState(false);
     const [items, setItems] = useState<CloudJob[]>([]);
     const [total, setTotal] = useState(0);
     const [error, setError] = useState("");
+    const [videoPreview, setVideoPreview] = useState<{ url: string; title: string } | null>(null);
+    const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
     const load = useCallback(async () => {
         if (!user) {
             setItems([]);
             setTotal(0);
             setError("");
+            setSelectedIds([]);
             return;
         }
         setLoading(true);
         setError("");
         try {
             const data = await listCloudJobs({ type, page: 1, pageSize: 50 });
-            setItems(data.items || []);
+            const nextItems = data.items || [];
+            setItems(nextItems);
             setTotal(data.total || 0);
+            // Keep only selections that still exist after refresh/delete.
+            setSelectedIds((ids) => {
+                if (!ids.length) return ids;
+                const alive = new Set(nextItems.map((job) => job.id));
+                const next = ids.filter((id) => alive.has(id));
+                return next.length === ids.length ? ids : next;
+            });
         } catch (e) {
             const msg = e instanceof Error ? e.message : "加载云端历史失败";
             setError(msg);
@@ -50,6 +63,28 @@ export function CloudHistoryPanel({ type, refreshKey = 0 }: Props) {
         void load();
     }, [load, refreshKey]);
 
+    useEffect(() => {
+        // Close video lightbox when leaving cloud panel / switching type.
+        setVideoPreview(null);
+        setSelectedIds([]);
+    }, [type, refreshKey]);
+
+    const itemIds = useMemo(() => items.map((job) => job.id), [items]);
+    const selectedJobs = useMemo(() => {
+        if (!selectedIds.length) return [] as CloudJob[];
+        const idSet = new Set(selectedIds);
+        return items.filter((job) => idSet.has(job.id));
+    }, [items, selectedIds]);
+    const allSelected = Boolean(itemIds.length) && itemIds.every((id) => selectedIds.includes(id));
+    const someSelected = itemIds.some((id) => selectedIds.includes(id));
+
+    const toggleSelected = (id: string, checked: boolean) => {
+        setSelectedIds((ids) => (checked ? (ids.includes(id) ? ids : [...ids, id]) : ids.filter((item) => item !== id)));
+    };
+
+    const selectAll = () => setSelectedIds(itemIds);
+    const clearSelection = () => setSelectedIds([]);
+
     const handleDelete = (job: CloudJob) => {
         modal.confirm({
             title: "删除云端记录",
@@ -60,6 +95,7 @@ export function CloudHistoryPanel({ type, refreshKey = 0 }: Props) {
             onOk: async () => {
                 await deleteCloudJob(job.id);
                 message.success("已删除云端记录");
+                setSelectedIds((ids) => ids.filter((id) => id !== job.id));
                 await load();
                 void refreshUsage();
             },
@@ -78,7 +114,69 @@ export function CloudHistoryPanel({ type, refreshKey = 0 }: Props) {
             URL.revokeObjectURL(objectUrl);
         } catch (e) {
             message.error(e instanceof Error ? e.message : "下载失败");
+            throw e;
         }
+    };
+
+    const handleBatchDownload = async () => {
+        if (!selectedJobs.length) {
+            message.warning("请先勾选要下载的云端记录");
+            return;
+        }
+        setBatchBusy(true);
+        let ok = 0;
+        let failed = 0;
+        try {
+            for (const job of selectedJobs) {
+                try {
+                    await handleDownload(job);
+                    ok += 1;
+                } catch {
+                    failed += 1;
+                }
+            }
+            if (ok) message.success(`已下载 ${ok} 项${failed ? `，失败 ${failed} 项` : ""}`);
+            else message.error("批量下载失败");
+        } finally {
+            setBatchBusy(false);
+        }
+    };
+
+    const handleBatchDelete = () => {
+        if (!selectedJobs.length) {
+            message.warning("请先勾选要删除的云端记录");
+            return;
+        }
+        const count = selectedJobs.length;
+        modal.confirm({
+            title: "批量删除云端记录",
+            content: `将删除选中的 ${count} 条服务器记录与文件，且不可恢复。本机历史不受影响。`,
+            okText: "删除",
+            okButtonProps: { danger: true },
+            cancelText: "取消",
+            onOk: async () => {
+                setBatchBusy(true);
+                let ok = 0;
+                let failed = 0;
+                try {
+                    for (const job of selectedJobs) {
+                        try {
+                            await deleteCloudJob(job.id);
+                            ok += 1;
+                        } catch {
+                            failed += 1;
+                        }
+                    }
+                    if (ok) message.success(`已删除 ${ok} 条云端记录${failed ? `，失败 ${failed} 条` : ""}`);
+                    else message.error("批量删除失败");
+                    setSelectedIds([]);
+                    await load();
+                    void refreshUsage();
+                } finally {
+                    setBatchBusy(false);
+                }
+            },
+        });
     };
 
     if (!user) {
@@ -88,11 +186,45 @@ export function CloudHistoryPanel({ type, refreshKey = 0 }: Props) {
     return (
         <div className="space-y-3">
             <div className="flex items-center justify-between gap-2">
-                <div className="text-xs text-stone-500 dark:text-stone-400">共 {total} 条 · 仅当前账号</div>
+                <div className="text-xs text-stone-500 dark:text-stone-400">共 {total} 条 · 仅当前账号 · 点击缩略图可预览</div>
                 <Button size="small" icon={<RefreshCw className="size-3.5" />} loading={loading} onClick={() => void load()}>
                     刷新
                 </Button>
             </div>
+
+            {items.length ? (
+                <div className="flex flex-col gap-2 rounded-lg border border-stone-200 bg-card/70 p-2.5 dark:border-stone-800">
+                    <div className="flex flex-wrap items-center gap-2">
+                        <Checkbox
+                            checked={allSelected}
+                            indeterminate={!allSelected && someSelected}
+                            disabled={!itemIds.length || batchBusy}
+                            onChange={(event) => {
+                                if (event.target.checked) selectAll();
+                                else clearSelection();
+                            }}
+                        >
+                            全选当前列表（{items.length}）
+                        </Checkbox>
+                        <span className="text-[11px] text-stone-500 dark:text-stone-400">
+                            已选 {selectedIds.length} 项
+                            {selectedIds.length ? " · 单卡下载/删除仍可用" : " · 勾选后可批量下载/删除"}
+                        </span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                        <Button size="small" icon={<Download className="size-3.5" />} disabled={!selectedIds.length || batchBusy} loading={batchBusy} onClick={() => void handleBatchDownload()}>
+                            下载选中
+                        </Button>
+                        <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedIds.length || batchBusy} onClick={handleBatchDelete}>
+                            删除选中
+                        </Button>
+                        <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!selectedIds.length || batchBusy} onClick={clearSelection}>
+                            清空选择
+                        </Button>
+                    </div>
+                </div>
+            ) : null}
+
             {loading && !items.length ? (
                 <div className="flex min-h-48 items-center justify-center">
                     <Spin />
@@ -101,15 +233,53 @@ export function CloudHistoryPanel({ type, refreshKey = 0 }: Props) {
             {error ? <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">{error}</div> : null}
             <div className="space-y-3">
                 {items.map((job) => (
-                    <CloudJobCard key={job.id} job={job} type={type} onDelete={() => handleDelete(job)} onDownload={() => void handleDownload(job)} />
+                    <CloudJobCard
+                        key={job.id}
+                        job={job}
+                        type={type}
+                        selected={selectedIds.includes(job.id)}
+                        onSelectedChange={(checked) => toggleSelected(job.id, checked)}
+                        onDelete={() => handleDelete(job)}
+                        onDownload={() => void handleDownload(job)}
+                        onOpenVideoPreview={(url) => setVideoPreview({ url, title: job.prompt || "云端视频" })}
+                    />
                 ))}
                 {!loading && !items.length && !error ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无云端记录，生成成功后会自动同步" className="py-10" /> : null}
             </div>
+            <Modal
+                open={Boolean(videoPreview)}
+                title={videoPreview?.title || "视频预览"}
+                footer={null}
+                width={920}
+                destroyOnHidden
+                onCancel={() => setVideoPreview(null)}
+                styles={{ body: { paddingTop: 8 } }}
+            >
+                {videoPreview?.url ? (
+                    <video src={videoPreview.url} controls autoPlay playsInline className="max-h-[70vh] w-full rounded-lg bg-black object-contain" />
+                ) : null}
+            </Modal>
         </div>
     );
 }
 
-function CloudJobCard({ job, type, onDelete, onDownload }: { job: CloudJob; type: "image" | "video"; onDelete: () => void; onDownload: () => void }) {
+function CloudJobCard({
+    job,
+    type,
+    selected,
+    onSelectedChange,
+    onDelete,
+    onDownload,
+    onOpenVideoPreview,
+}: {
+    job: CloudJob;
+    type: "image" | "video";
+    selected: boolean;
+    onSelectedChange: (checked: boolean) => void;
+    onDelete: () => void;
+    onDownload: () => void;
+    onOpenVideoPreview: (url: string) => void;
+}) {
     const [previewUrl, setPreviewUrl] = useState("");
     const [previewError, setPreviewError] = useState(false);
 
@@ -140,13 +310,39 @@ function CloudJobCard({ job, type, onDelete, onDownload }: { job: CloudJob; type
     const time = job.created_at ? new Date(job.created_at).toLocaleString() : "";
 
     return (
-        <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-            <div className={`bg-stone-100 dark:bg-stone-900 ${type === "video" ? "aspect-video" : "aspect-square"}`}>
+        <div className={cn("overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800", selected && "ring-2 ring-stone-900 dark:ring-stone-100")}>
+            <div className={`relative bg-stone-100 dark:bg-stone-900 ${type === "video" ? "aspect-video" : "aspect-square"}`}>
+                <div className="absolute left-2 top-2 z-20" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
+                    <Checkbox
+                        checked={selected}
+                        className="rounded-md bg-white/90 px-1 shadow-sm dark:bg-stone-950/80"
+                        onChange={(event) => onSelectedChange(event.target.checked)}
+                    />
+                </div>
                 {previewUrl && !previewError ? (
                     type === "video" ? (
-                        <video src={previewUrl} controls playsInline preload="metadata" className="size-full object-contain" />
+                        <button
+                            type="button"
+                            className="group relative size-full cursor-zoom-in border-0 bg-transparent p-0"
+                            onClick={() => onOpenVideoPreview(previewUrl)}
+                            title="点击预览"
+                        >
+                            <video src={previewUrl} muted playsInline preload="metadata" className="pointer-events-none size-full object-contain" />
+                            <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 transition group-hover:bg-black/25">
+                                <span className="inline-flex items-center gap-1 rounded-full bg-black/65 px-2.5 py-1 text-xs text-white opacity-90">
+                                    <Expand className="size-3.5" />
+                                    预览
+                                </span>
+                            </span>
+                        </button>
                     ) : (
-                        <img src={previewUrl} alt="" className="size-full object-cover" />
+                        <Image
+                            src={previewUrl}
+                            alt={job.prompt || "云端图片"}
+                            className="!size-full !object-cover"
+                            rootClassName="!block size-full"
+                            preview={{ mask: "预览" }}
+                        />
                     )
                 ) : (
                     <div className="flex size-full items-center justify-center text-xs text-stone-500">{previewError ? "预览失败" : "加载中…"}</div>

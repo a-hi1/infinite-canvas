@@ -25,6 +25,7 @@ export function mergeCanvasNodeAiConfig(globalConfig: AiConfig, node: CanvasNode
     const merged: AiConfig = {
         ...globalConfig,
         model: resolveCanvasModeModel(globalConfig, metadata?.model, mode),
+        reasoningEffort: metadata?.reasoningEffort || globalConfig.reasoningEffort || defaultConfig.reasoningEffort,
         quality: metadata?.quality || globalConfig.quality || defaultConfig.quality,
         size: metadata?.size || globalConfig.size || defaultConfig.size,
         background: metadata?.background !== undefined ? metadata.background : globalConfig.background || defaultConfig.background || "",

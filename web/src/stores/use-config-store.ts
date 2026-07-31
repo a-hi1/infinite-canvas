@@ -4,6 +4,7 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 export type ApiCallFormat = "openai" | "gemini";
+export type ReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
 
 /**
  * 渠道生图/请求兼容预设。auto = 按 Base URL 推断（与历史硬编码行为一致）。
@@ -50,6 +51,8 @@ export type AiConfig = {
     videoGenerateAudio: string;
     videoWatermark: string;
     systemPrompt: string;
+    /** Text Responses API reasoning effort; "auto" means omit the field. */
+    reasoningEffort: ReasoningEffort;
     models: string[];
     imageModels: string[];
     videoModels: string[];
@@ -120,6 +123,7 @@ export const defaultConfig: AiConfig = {
     videoGenerateAudio: "true",
     videoWatermark: "false",
     systemPrompt: "",
+    reasoningEffort: "auto",
     models: [`${DEFAULT_CHANNEL_ID}::gpt-image-2`, `${DEFAULT_CHANNEL_ID}::grok-imagine-video`, `${DEFAULT_CHANNEL_ID}::gpt-5.5`, `${DEFAULT_CHANNEL_ID}::gpt-4o-mini-tts`],
     imageModels: [`${DEFAULT_CHANNEL_ID}::gpt-image-2`],
     videoModels: [`${DEFAULT_CHANNEL_ID}::grok-imagine-video`],
@@ -281,6 +285,7 @@ export const useConfigStore = create<ConfigStore>()(
                     audioFormat: config.audioFormat || defaultConfig.audioFormat,
                     audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
                     audioInstructions: config.audioInstructions || "",
+                    reasoningEffort: config.reasoningEffort || defaultConfig.reasoningEffort,
                     videoSeconds: config.videoSeconds || defaultConfig.videoSeconds,
                     vquality: config.vquality || "720",
                     videoGenerateAudio: config.videoGenerateAudio || "true",

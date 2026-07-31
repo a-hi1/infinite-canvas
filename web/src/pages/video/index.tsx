@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImageIcon, LoaderCircle, Music2, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon, WandSparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImageIcon, LoaderCircle, Music2, Plus, SlidersHorizontal, Sparkles, Square, Trash2, Upload, VideoIcon, WandSparkles } from "lucide-react";
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Segmented, Switch, Tag, Typography } from "antd";
@@ -99,6 +99,10 @@ export default function VideoPage() {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const dragDepthRef = useRef(0);
     const activeLogIdsRef = useRef<Set<string>>(new Set());
+    const latestVideoJobIdRef = useRef("");
+    const videoJobControllersRef = useRef(new Map<string, AbortController>());
+    const [, setActiveJobTick] = useState(0);
+    const bumpActiveJobs = () => setActiveJobTick((value) => value + 1);
     const effectiveConfig = useEffectiveConfig();
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
@@ -316,64 +320,142 @@ export default function VideoPage() {
         setStartedAt(batchStartedAt);
         try {
             if (snapshot.platform) {
-                const platform = await generatePlatformVideo({
-                    prompt: snapshot.text,
-                    seconds: snapshot.config.videoSeconds,
-                    size: snapshot.config.size,
-                    clientLocalId: nanoid(),
-                });
-                const stored = platform.blob
-                    ? await storeGeneratedVideo({ blob: platform.blob, mimeType: platform.mimeType }, snapshot.config)
-                    : await storeGeneratedVideo({ url: platform.url, mimeType: platform.mimeType }, snapshot.config);
-                const nextVideo: GeneratedVideo = {
-                    id: platform.job.id || nanoid(),
-                    url: stored.url || platform.url,
-                    storageKey: stored.storageKey || "",
-                    durationMs: performance.now() - batchStartedAt,
-                    width: platform.width || stored.width || 0,
-                    height: platform.height || stored.height || 0,
-                    bytes: platform.bytes || stored.bytes || 0,
-                    mimeType: platform.mimeType || stored.mimeType || "video/mp4",
-                };
-                setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
-                const loggedIn = Boolean(useAuthStore.getState().user);
-                const successLog = buildLog({
+                const platformJobId = nanoid();
+                const controller = new AbortController();
+                const platformPending = buildLog({
                     prompt: snapshot.text,
                     model: platformVideoModelLabel,
                     config: snapshot.config,
                     references: [],
                     videoReferences: [],
                     audioReferences: [],
-                    durationMs: performance.now() - batchStartedAt,
-                    status: "成功",
-                    video: nextVideo,
+                    durationMs: 0,
+                    status: "生成中",
                 });
-                const logWithSync: GenerationLog = {
-                    ...successLog,
-                    // Platform path already stored on server; mark local history as synced when logged in.
-                    cloudSync: loggedIn ? "synced" : "skipped",
-                    cloudJobIds: platform.job.id ? [platform.job.id] : undefined,
-                    cloudError: undefined,
-                    cloudErrorReason: undefined,
-                };
-                await saveLog(logWithSync);
-                setLogs((value) => [logWithSync, ...value.filter((item) => item.id !== logWithSync.id)]);
-                message.success(platform.chargedCents ? `视频已生成（已扣 ${platform.chargedCents} 分）` : "视频已生成");
-                void refreshUsage();
-                if (loggedIn) setCloudRefreshKey((value) => value + 1);
-                setRunning(false);
+                const platformLog: GenerationLog = { ...platformPending, id: platformJobId };
+                latestVideoJobIdRef.current = platformJobId;
+                activeLogIdsRef.current.add(platformJobId);
+                videoJobControllersRef.current.set(platformJobId, controller);
+                bumpActiveJobs();
+                await saveLog(platformLog);
+                setLogs((value) => [platformLog, ...value.filter((item) => item.id !== platformLog.id)]);
+                try {
+                    const platform = await generatePlatformVideo(
+                        {
+                            prompt: snapshot.text,
+                            seconds: snapshot.config.videoSeconds,
+                            size: snapshot.config.size,
+                            clientLocalId: platformJobId,
+                        },
+                        { signal: controller.signal },
+                    );
+                    if (controller.signal.aborted) throw new DOMException("请求已取消", "AbortError");
+                    const stored = platform.blob
+                        ? await storeGeneratedVideo({ blob: platform.blob, mimeType: platform.mimeType }, snapshot.config)
+                        : await storeGeneratedVideo({ url: platform.url, mimeType: platform.mimeType }, snapshot.config);
+                    const nextVideo: GeneratedVideo = {
+                        id: platform.job.id || nanoid(),
+                        url: stored.url || platform.url,
+                        storageKey: stored.storageKey || "",
+                        durationMs: performance.now() - batchStartedAt,
+                        width: platform.width || stored.width || 0,
+                        height: platform.height || stored.height || 0,
+                        bytes: platform.bytes || stored.bytes || 0,
+                        mimeType: platform.mimeType || stored.mimeType || "video/mp4",
+                    };
+                    const loggedIn = Boolean(useAuthStore.getState().user);
+                    const successLog: GenerationLog = {
+                        ...platformLog,
+                        status: "成功",
+                        durationMs: performance.now() - batchStartedAt,
+                        video: nextVideo,
+                        error: undefined,
+                        // Platform path already stored on server; mark local history as synced when logged in.
+                        cloudSync: loggedIn ? "synced" : "skipped",
+                        cloudJobIds: platform.job.id ? [platform.job.id] : undefined,
+                        cloudError: undefined,
+                        cloudErrorReason: undefined,
+                    };
+                    await saveLog(successLog);
+                    setLogs((value) => value.map((item) => (item.id === successLog.id ? successLog : item)));
+                    if (latestVideoJobIdRef.current === platformJobId) setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
+                    message.success(platform.chargedCents ? `视频已生成（已扣 ${platform.chargedCents} 分）` : "视频已生成");
+                    void refreshUsage();
+                    if (loggedIn) setCloudRefreshKey((value) => value + 1);
+                } catch (platformError) {
+                    if (isAbortLikeError(platformError) || controller.signal.aborted) {
+                        const cancelledLog: GenerationLog = {
+                            ...platformLog,
+                            status: "失败",
+                            durationMs: performance.now() - batchStartedAt,
+                            error: "已停止生成",
+                        };
+                        await saveLog(cancelledLog);
+                        setLogs((value) => value.map((item) => (item.id === cancelledLog.id ? cancelledLog : item)));
+                        if (latestVideoJobIdRef.current === platformJobId) setResults([{ id: platformJobId, status: "failed", error: "已停止生成" }]);
+                        message.info("已停止该任务");
+                    } else {
+                        const errorMessage = platformError instanceof Error ? platformError.message : "生成失败";
+                        const failedLog: GenerationLog = { ...platformLog, status: "失败", durationMs: performance.now() - batchStartedAt, error: errorMessage };
+                        await saveLog(failedLog);
+                        setLogs((value) => value.map((item) => (item.id === failedLog.id ? failedLog : item)));
+                        if (latestVideoJobIdRef.current === platformJobId) setResults([{ id: platformJobId, status: "failed", error: errorMessage }]);
+                        message.error(errorMessage);
+                    }
+                } finally {
+                    activeLogIdsRef.current.delete(platformJobId);
+                    videoJobControllersRef.current.delete(platformJobId);
+                    bumpActiveJobs();
+                    if (!activeLogIdsRef.current.size) {
+                        setRunning(false);
+                        setStartedAt(0);
+                    }
+                }
                 return;
             }
-            const task = await createVideoGenerationTask(snapshot.config, snapshot.text, snapshot.references, snapshot.videoReferences, snapshot.audioReferences);
-            const log = buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: 0, status: "生成中", task });
-            await saveLog(log);
-            void pollGenerationLog(log, snapshot.config);
+            const createController = new AbortController();
+            // Temporary key until log id exists; create request can still be stopped via latest placeholder.
+            const createJobKey = `create:${nanoid()}`;
+            videoJobControllersRef.current.set(createJobKey, createController);
+            bumpActiveJobs();
+            try {
+                const task = await createVideoGenerationTask(snapshot.config, snapshot.text, snapshot.references, snapshot.videoReferences, snapshot.audioReferences, { signal: createController.signal });
+                if (createController.signal.aborted) throw new DOMException("请求已取消", "AbortError");
+                const log = buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: 0, status: "生成中", task });
+                latestVideoJobIdRef.current = log.id;
+                // Move controller ownership from create key to real log id.
+                videoJobControllersRef.current.delete(createJobKey);
+                videoJobControllersRef.current.set(log.id, createController);
+                await saveLog(log);
+                // saveLog refreshes from storage; also prepend optimistically so left list updates even if storage is slow.
+                setLogs((value) => [log, ...value.filter((item) => item.id !== log.id)]);
+                void pollGenerationLog(log, snapshot.config, createController);
+            } catch (createError) {
+                videoJobControllersRef.current.delete(createJobKey);
+                bumpActiveJobs();
+                if (isAbortLikeError(createError) || createController.signal.aborted) {
+                    setResults([{ id: nanoid(), status: "failed", error: "已停止生成" }]);
+                    message.info("已停止该任务");
+                } else {
+                    const errorMessage = createError instanceof Error ? createError.message : "生成失败";
+                    setResults([{ id: nanoid(), status: "failed", error: errorMessage }]);
+                    await saveLog(buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: performance.now() - batchStartedAt, status: "失败", error: errorMessage }));
+                    message.error(errorMessage);
+                }
+                if (!activeLogIdsRef.current.size) {
+                    setRunning(false);
+                    setStartedAt(0);
+                }
+            }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "生成失败";
             setResults([{ id: nanoid(), status: "failed", error: errorMessage }]);
             await saveLog(buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: performance.now() - batchStartedAt, status: "失败", error: errorMessage }));
             message.error(errorMessage);
-            setRunning(false);
+            if (!activeLogIdsRef.current.size) {
+                setRunning(false);
+                setStartedAt(0);
+            }
         }
     };
 
@@ -548,9 +630,48 @@ export default function VideoPage() {
         }
     };
 
-    const pollGenerationLog = async (log: GenerationLog, configOverride?: AiConfig) => {
+    const stopVideoJob = (jobId: string) => {
+        const controller = videoJobControllersRef.current.get(jobId);
+        if (!controller) {
+            // Stale "生成中" after refresh: mark failed so UI is not stuck forever.
+            const pending = logs.find((item) => item.id === jobId && item.status === "生成中");
+            if (pending) {
+                void saveLog({ ...pending, status: "失败", error: "已停止生成", durationMs: Date.now() - pending.createdAt }).then(() => {
+                    setLogs((value) => value.map((item) => (item.id === jobId ? { ...item, status: "失败", error: "已停止生成" } : item)));
+                });
+                if (latestVideoJobIdRef.current === jobId) setResults([{ id: jobId, status: "failed", error: "已停止生成" }]);
+                message.info("已标记停止（当前会话无活跃请求）");
+                return;
+            }
+            message.info("该任务已结束或不可停止");
+            return;
+        }
+        if (!controller.signal.aborted) controller.abort();
+        message.info("正在停止该任务…");
+    };
+
+    const stopLatestVideoJob = () => {
+        const jobId = latestVideoJobIdRef.current;
+        if (jobId && videoJobControllersRef.current.has(jobId)) {
+            stopVideoJob(jobId);
+            return;
+        }
+        // Create phase: controller may still use create:* key.
+        const createEntry = Array.from(videoJobControllersRef.current.entries()).find(([id]) => id.startsWith("create:"));
+        if (createEntry) {
+            if (!createEntry[1].signal.aborted) createEntry[1].abort();
+            message.info("正在停止该任务…");
+            return;
+        }
+        message.info("当前没有可停止的生成任务");
+    };
+
+    const pollGenerationLog = async (log: GenerationLog, configOverride?: AiConfig, existingController?: AbortController) => {
         if (!log.task || activeLogIdsRef.current.has(log.id)) return;
         activeLogIdsRef.current.add(log.id);
+        const controller = existingController || videoJobControllersRef.current.get(log.id) || new AbortController();
+        videoJobControllersRef.current.set(log.id, controller);
+        bumpActiveJobs();
         setRunning(true);
         setStartedAt((value) => value || performance.now());
         setResults((value) => (value.length ? value : [{ id: log.id, status: "pending" }]));
@@ -561,7 +682,9 @@ export default function VideoPage() {
             if (warning) throw new Error(`无法继续查询历史任务：${warning}`);
             const budget = videoPollBudget(log.task);
             for (let attempt = 0; attempt < budget.maxAttempts; attempt += 1) {
-                const state = await pollVideoGenerationTask(pollingConfig, log.task);
+                if (controller.signal.aborted) throw new DOMException("请求已取消", "AbortError");
+                const state = await pollVideoGenerationTask(pollingConfig, log.task, { signal: controller.signal });
+                if (controller.signal.aborted) throw new DOMException("请求已取消", "AbortError");
                 if (state.status === "completed") {
                     const stored = await storeGeneratedVideo(state.result, pollingConfig);
                     const nextVideo: GeneratedVideo = {
@@ -574,7 +697,7 @@ export default function VideoPage() {
                         bytes: stored.bytes,
                         mimeType: stored.mimeType,
                     };
-                    setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
+                    if (latestVideoJobIdRef.current === log.id) setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
                     const loggedIn = Boolean(useAuthStore.getState().user);
                     const successLog: GenerationLog = {
                         ...log,
@@ -628,15 +751,24 @@ export default function VideoPage() {
                         `${budget.timeoutLabel}视频生成超时，请稍后重试` + (budget.isSoraVeo ? "（中转排队较慢时可到历史记录里继续查询）" : ""),
                     );
                 }
-                await delay(budget.delayMs);
+                await delay(budget.delayMs, controller.signal);
             }
         } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : "生成失败";
-            setResults([{ id: log.id, status: "failed", error: errorMessage }]);
-            await saveLog({ ...log, status: "失败", durationMs: Date.now() - log.createdAt, error: errorMessage });
-            message.error(errorMessage);
+            if (isAbortLikeError(error) || controller.signal.aborted) {
+                if (latestVideoJobIdRef.current === log.id) setResults([{ id: log.id, status: "failed", error: "已停止生成" }]);
+                await saveLog({ ...log, status: "失败", durationMs: Date.now() - log.createdAt, error: "已停止生成" });
+                setLogs((value) => value.map((item) => (item.id === log.id ? { ...item, status: "失败", error: "已停止生成" } : item)));
+                message.info("已停止该任务");
+            } else {
+                const errorMessage = error instanceof Error ? error.message : "生成失败";
+                if (latestVideoJobIdRef.current === log.id) setResults([{ id: log.id, status: "failed", error: errorMessage }]);
+                await saveLog({ ...log, status: "失败", durationMs: Date.now() - log.createdAt, error: errorMessage });
+                message.error(errorMessage);
+            }
         } finally {
             activeLogIdsRef.current.delete(log.id);
+            videoJobControllersRef.current.delete(log.id);
+            bumpActiveJobs();
             if (!activeLogIdsRef.current.size) {
                 setRunning(false);
                 setStartedAt(0);
@@ -683,7 +815,7 @@ export default function VideoPage() {
         <div className="flex h-full flex-col overflow-hidden bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
             <main className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[300px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)]">
                 <aside className="thin-scrollbar hidden min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:block">
-                    <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} historySource={historySource} cloudEnabled={Boolean(cloudUser)} cloudRefreshKey={cloudRefreshKey} onHistorySourceChange={setHistorySource} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} onRetryCloud={retryCloudSync} />
+                    <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} historySource={historySource} cloudEnabled={Boolean(cloudUser)} cloudRefreshKey={cloudRefreshKey} onHistorySourceChange={setHistorySource} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} onRetryCloud={retryCloudSync} onStopLog={stopVideoJob} stoppableLogIds={Array.from(new Set([...activeLogIdsRef.current, ...videoJobControllersRef.current.keys()]))} />
                 </aside>
 
                 <section className="grid gap-3 lg:min-h-0 lg:overflow-hidden xl:grid-cols-[420px_minmax(0,1fr)]">
@@ -915,9 +1047,16 @@ export default function VideoPage() {
                                     <div className="mt-1 opacity-75">当前视频模型已配置本地调用脚本；脚本需自行完成创建与轮询。清空脚本后回退 Grok/Agnes/Seedance/OpenAI 默认路径。</div>
                                 ) : null}
                             </div>
-                            <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
-                                开始生成
-                            </Button>
+                            <div className="flex gap-2">
+                                <Button type="primary" size="large" className="flex-1" icon={<Sparkles className="size-4" />} disabled={!canGenerate} onClick={() => void generate()}>
+                                    {running ? "再生成一条" : "开始生成"}
+                                </Button>
+                                {running ? (
+                                    <Button size="large" danger icon={<Square className="size-4" />} onClick={stopLatestVideoJob}>
+                                        停止
+                                    </Button>
+                                ) : null}
+                            </div>
                         </div>
                     </div>
 
@@ -951,7 +1090,7 @@ export default function VideoPage() {
                 }}
             />
             <Drawer title="生成记录" placement="bottom" size="large" open={logsOpen} onClose={() => setLogsOpen(false)}>
-                <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} historySource={historySource} cloudEnabled={Boolean(cloudUser)} cloudRefreshKey={cloudRefreshKey} onHistorySourceChange={setHistorySource} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} onRetryCloud={retryCloudSync} />
+                <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} historySource={historySource} cloudEnabled={Boolean(cloudUser)} cloudRefreshKey={cloudRefreshKey} onHistorySourceChange={setHistorySource} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} onRetryCloud={retryCloudSync} onStopLog={stopVideoJob} stoppableLogIds={Array.from(new Set([...activeLogIdsRef.current, ...videoJobControllersRef.current.keys()]))} />
             </Drawer>
             <Drawer title="参数" placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
@@ -1102,6 +1241,8 @@ function LogPanel({
     onDeleteSelected,
     onPreviewLog,
     onRetryCloud,
+    onStopLog,
+    stoppableLogIds = [],
 }: {
     logs: GenerationLog[];
     selectedLogIds: string[];
@@ -1115,10 +1256,13 @@ function LogPanel({
     onDeleteSelected: () => void;
     onPreviewLog: (log: GenerationLog) => void;
     onRetryCloud?: (log: GenerationLog) => void;
+    onStopLog?: (logId: string) => void;
+    stoppableLogIds?: string[];
 }) {
     const allSelected = Boolean(logs.length) && selectedLogIds.length === logs.length;
     const toggleAll = () => onSelectedLogIdsChange(allSelected ? [] : logs.map((log) => log.id));
     const showCloud = historySource === "cloud";
+    const stoppable = new Set(stoppableLogIds);
 
     return (
         <>
@@ -1158,7 +1302,17 @@ function LogPanel({
                     </div>
                     <div className="space-y-3">
                         {logs.map((log) => (
-                            <LogCard key={log.id} log={log} selected={selectedLogIds.includes(log.id)} active={activeLogId === log.id} onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))} onClick={() => onPreviewLog(log)} onRetryCloud={onRetryCloud} />
+                            <LogCard
+                                key={log.id}
+                                log={log}
+                                selected={selectedLogIds.includes(log.id)}
+                                active={activeLogId === log.id}
+                                canStop={Boolean(onStopLog && log.status === "生成中")}
+                                onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))}
+                                onClick={() => onPreviewLog(log)}
+                                onRetryCloud={onRetryCloud}
+                                onStop={onStopLog ? () => onStopLog(log.id) : undefined}
+                            />
                         ))}
                         {!logs.length ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">暂无生成记录</div> : null}
                     </div>
@@ -1168,7 +1322,25 @@ function LogPanel({
     );
 }
 
-function LogCard({ log, selected, active, onSelectedChange, onClick, onRetryCloud }: { log: GenerationLog; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void; onRetryCloud?: (log: GenerationLog) => void }) {
+function LogCard({
+    log,
+    selected,
+    active,
+    canStop,
+    onSelectedChange,
+    onClick,
+    onRetryCloud,
+    onStop,
+}: {
+    log: GenerationLog;
+    selected: boolean;
+    active: boolean;
+    canStop?: boolean;
+    onSelectedChange: (checked: boolean) => void;
+    onClick: () => void;
+    onRetryCloud?: (log: GenerationLog) => void;
+    onStop?: () => void;
+}) {
     const syncLabel = cloudSyncLabel(log.cloudSync);
     return (
         <div
@@ -1197,6 +1369,13 @@ function LogCard({ log, selected, active, onSelectedChange, onClick, onRetryClou
                             </Tag>
                         ) : null}
                     </div>
+                    {canStop && onStop ? (
+                        <div className="mt-2" onClick={(event) => event.stopPropagation()}>
+                            <Button size="small" danger icon={<Square className="size-3.5" />} onClick={onStop}>
+                                停止
+                            </Button>
+                        </div>
+                    ) : null}
                     {log.cloudSync === "failed" && onRetryCloud ? (
                         <div className="mt-2" onClick={(event) => event.stopPropagation()}>
                             <Button size="small" onClick={() => onRetryCloud(log)}>
@@ -1460,6 +1639,32 @@ function normalizeResolution(value: string) {
     return normalizeVideoResolutionValue(value);
 }
 
-function delay(ms: number) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, signal?: AbortSignal) {
+    return new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(new DOMException("请求已取消", "AbortError"));
+            return;
+        }
+        const timer = window.setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
+        const onAbort = () => {
+            window.clearTimeout(timer);
+            signal?.removeEventListener("abort", onAbort);
+            reject(new DOMException("请求已取消", "AbortError"));
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+    });
+}
+
+function isAbortLikeError(error: unknown) {
+    if (!error) return false;
+    if (typeof error === "object" && error !== null) {
+        const name = "name" in error ? String((error as { name?: unknown }).name || "") : "";
+        const message = "message" in error ? String((error as { message?: unknown }).message || "") : "";
+        if (name === "AbortError" || name === "CanceledError") return true;
+        if (message === "请求已取消" || message === "已停止生成" || /aborted|abort|canceled|cancelled/i.test(message)) return true;
+    }
+    return false;
 }

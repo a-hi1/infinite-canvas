@@ -237,14 +237,17 @@ export function getCloudMe() {
  * Default browser BYOK path is unchanged — call this only when user opts into platform billing.
  * Optional images: data URLs (png/jpeg/webp) → server /images/edits.
  */
-export async function generatePlatformImage(input: {
-    prompt: string;
-    size?: string;
-    quality?: string;
-    clientLocalId?: string;
-    model?: string;
-    images?: Array<{ dataUrl: string }>;
-}) {
+export async function generatePlatformImage(
+    input: {
+        prompt: string;
+        size?: string;
+        quality?: string;
+        clientLocalId?: string;
+        model?: string;
+        images?: Array<{ dataUrl: string }>;
+    },
+    options?: { signal?: AbortSignal },
+) {
     const images = (input.images || [])
         .map((item) => String(item.dataUrl || "").trim())
         .filter((dataUrl) => dataUrl.startsWith("data:image/"))
@@ -265,11 +268,12 @@ export async function generatePlatformImage(input: {
             model: input.model || "",
             images,
         }),
+        signal: options?.signal,
     });
     let dataUrl = "";
     let mimeType = data.file?.mime || "image/png";
     if (data.file?.url) {
-        const fileRes = await fetch(data.file.url, { credentials: "include" });
+        const fileRes = await fetch(data.file.url, { credentials: "include", signal: options?.signal });
         if (!fileRes.ok) throw new CloudApiError("生成成功但读取结果文件失败", fileRes.status);
         const blob = await fileRes.blob();
         mimeType = blob.type || mimeType;
@@ -296,13 +300,16 @@ export async function generatePlatformImage(input: {
 /**
  * Server-side platform text-to-video (opt-in OpenAI-compatible). No references on this path.
  */
-export async function generatePlatformVideo(input: {
-    prompt: string;
-    seconds?: string;
-    size?: string;
-    clientLocalId?: string;
-    model?: string;
-}) {
+export async function generatePlatformVideo(
+    input: {
+        prompt: string;
+        seconds?: string;
+        size?: string;
+        clientLocalId?: string;
+        model?: string;
+    },
+    options?: { signal?: AbortSignal },
+) {
     const data = await request<
         CloudJob & {
             charged_cents?: number;
@@ -317,12 +324,13 @@ export async function generatePlatformVideo(input: {
             client_local_id: input.clientLocalId || "",
             model: input.model || "",
         }),
+        signal: options?.signal,
     });
     let blob: Blob | null = null;
     let url = data.file?.url || "";
     let mimeType = data.file?.mime || "video/mp4";
     if (url) {
-        const fileRes = await fetch(url, { credentials: "include" });
+        const fileRes = await fetch(url, { credentials: "include", signal: options?.signal });
         if (!fileRes.ok) throw new CloudApiError("生成成功但读取结果视频失败", fileRes.status);
         blob = await fileRes.blob();
         mimeType = blob.type || mimeType;

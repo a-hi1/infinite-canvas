@@ -199,7 +199,7 @@ export function CanvasConfigComposer({ value, inputs, mode = "image", onChange, 
                     ref={editorRef}
                     contentEditable={!optimizingPrompt}
                     suppressContentEditableWarning
-                    className="canvas-prompt-scrollbar min-h-28 w-full overflow-y-auto whitespace-pre-wrap break-words px-3 py-2 text-sm leading-7 outline-none"
+                    className="canvas-prompt-scrollbar min-h-28 max-h-72 w-full overflow-y-auto overscroll-contain whitespace-pre-wrap break-words px-3 py-2 text-sm leading-7 outline-none"
                     style={{ color: theme.node.text }}
                     onInput={() => {
                         if (!composingRef.current) syncFromEditor();

@@ -1,7 +1,7 @@
-import { CloudDownload, Copy, Download, ImagePlus, PencilLine, Search, Trash2, Upload, VideoIcon } from "lucide-react";
+import { CheckSquare, CloudDownload, Copy, Download, ImagePlus, PencilLine, Search, Trash2, Upload, VideoIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useNavigate } from "react-router-dom";
-import { App, Button, Card, Drawer, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Spin, Tag, Typography } from "antd";
+import { App, Button, Card, Checkbox, Drawer, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Spin, Tag, Typography } from "antd";
 import { saveAs } from "file-saver";
 
 import { useCopyText } from "@/hooks/use-copy-text";
@@ -69,6 +69,7 @@ export default function AssetsPage() {
     const addAsset = useAssetStore((state) => state.addAsset);
     const updateAsset = useAssetStore((state) => state.updateAsset);
     const removeAsset = useAssetStore((state) => state.removeAsset);
+    const removeAssets = useAssetStore((state) => state.removeAssets);
     const cloudUser = useAuthStore((state) => state.user);
     const cloudPullDoneRef = useRef(false);
     const [cloudSyncing, setCloudSyncing] = useState(false);
@@ -79,6 +80,9 @@ export default function AssetsPage() {
     const [categoryFilter, setCategoryFilter] = useState(ALL_CATEGORIES_VALUE);
     const [page, setPage] = useState(1);
     const [pageSize, setPageSize] = useState(10);
+    const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
+    const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+    const [batchCategory, setBatchCategory] = useState<string | undefined>(undefined);
     const [editingAsset, setEditingAsset] = useState<Asset | null>(null);
     const [isAssetOpen, setIsAssetOpen] = useState(false);
     const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
@@ -431,6 +435,69 @@ export default function AssetsPage() {
 
     const uncategorizedCount = useMemo(() => validAssets.filter((asset) => isUncategorizedAsset(asset.category)).length, [validAssets]);
 
+    const filteredAssetIds = useMemo(() => filteredAssets.map((asset) => asset.id), [filteredAssets]);
+    const selectedAssets = useMemo(() => {
+        if (!selectedAssetIds.length) return [] as Asset[];
+        const idSet = new Set(selectedAssetIds);
+        return validAssets.filter((asset) => idSet.has(asset.id));
+    }, [selectedAssetIds, validAssets]);
+    const allFilteredSelected = Boolean(filteredAssetIds.length) && filteredAssetIds.every((id) => selectedAssetIds.includes(id));
+    const someFilteredSelected = filteredAssetIds.some((id) => selectedAssetIds.includes(id));
+
+    useEffect(() => {
+        // Drop selections that no longer exist after delete/import/filter refresh.
+        setSelectedAssetIds((ids) => {
+            if (!ids.length) return ids;
+            const alive = new Set(validAssets.map((asset) => asset.id));
+            const next = ids.filter((id) => alive.has(id));
+            return next.length === ids.length ? ids : next;
+        });
+    }, [validAssets]);
+
+    const toggleAssetSelected = (id: string, checked: boolean) => {
+        setSelectedAssetIds((ids) => (checked ? (ids.includes(id) ? ids : [...ids, id]) : ids.filter((item) => item !== id)));
+    };
+
+    const selectAllFiltered = () => {
+        setSelectedAssetIds((ids) => Array.from(new Set([...ids, ...filteredAssetIds])));
+    };
+
+    const clearSelection = () => setSelectedAssetIds([]);
+
+    const exportSelectedAssets = async () => {
+        if (!selectedAssets.length) {
+            message.warning("请先勾选要导出的资产");
+            return;
+        }
+        await exportAssets(selectedAssets);
+        message.success(`已导出选中 ${selectedAssets.length} 项`);
+    };
+
+    const applyBatchCategory = () => {
+        if (!selectedAssets.length) {
+            message.warning("请先勾选资产");
+            return;
+        }
+        const category = resolveAssetCategoryForSave(batchCategory);
+        for (const asset of selectedAssets) {
+            updateAsset(asset.id, { category });
+        }
+        message.success(category ? `已将 ${selectedAssets.length} 项设为「${assetCategoryLabel(category)}」` : `已清除 ${selectedAssets.length} 项分类`);
+    };
+
+    const confirmBatchDelete = () => {
+        if (!selectedAssets.length) {
+            setBatchDeleteOpen(false);
+            return;
+        }
+        const ids = selectedAssets.map((asset) => asset.id);
+        removeAssets(ids);
+        setSelectedAssetIds([]);
+        setBatchDeleteOpen(false);
+        if (previewAsset && ids.includes(previewAsset.id)) setPreviewAsset(null);
+        message.success(`已删除 ${ids.length} 项资产`);
+    };
+
     const useAssetInWorkbench = (asset: Asset, target: "image" | "video") => {
         if (asset.kind === "text") {
             const params = new URLSearchParams({ prompt: asset.data.content || "" });
@@ -596,13 +663,60 @@ export default function AssetsPage() {
                         </section>
                     ) : (
                         <>
+                            <div className="flex flex-col gap-3 rounded-xl border border-stone-200 bg-card/80 p-3 shadow-sm dark:border-stone-800 sm:flex-row sm:items-center sm:justify-between">
+                                <div className="flex flex-wrap items-center gap-3">
+                                    <Checkbox
+                                        checked={allFilteredSelected}
+                                        indeterminate={!allFilteredSelected && someFilteredSelected}
+                                        disabled={!filteredAssetIds.length}
+                                        onChange={(event) => {
+                                            if (event.target.checked) selectAllFiltered();
+                                            else clearSelection();
+                                        }}
+                                    >
+                                        全选当前筛选（{filteredAssets.length}）
+                                    </Checkbox>
+                                    <span className="text-xs text-stone-500 dark:text-stone-400">
+                                        已选 {selectedAssetIds.length} 项
+                                        {selectedAssetIds.length ? " · 单卡操作仍可用" : " · 勾选卡片后可批量导出/分类/删除"}
+                                    </span>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <Select
+                                        size="small"
+                                        allowClear
+                                        showSearch
+                                        className="min-w-40"
+                                        placeholder="批量设分类"
+                                        value={batchCategory}
+                                        options={collectAssetCategories(validAssets).map((name) => ({ label: name, value: name }))}
+                                        disabled={!selectedAssetIds.length}
+                                        onChange={(value) => setBatchCategory(typeof value === "string" ? value : undefined)}
+                                    />
+                                    <Button size="small" disabled={!selectedAssetIds.length} onClick={applyBatchCategory}>
+                                        应用分类
+                                    </Button>
+                                    <Button size="small" icon={<Download className="size-3.5" />} disabled={!selectedAssetIds.length} onClick={() => void exportSelectedAssets()}>
+                                        导出选中
+                                    </Button>
+                                    <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedAssetIds.length} onClick={() => setBatchDeleteOpen(true)}>
+                                        删除选中
+                                    </Button>
+                                    <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!selectedAssetIds.length} onClick={clearSelection}>
+                                        清空选择
+                                    </Button>
+                                </div>
+                            </div>
+
                             <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                                 {visibleAssets.map((asset) => (
                                     <AssetCard
                                         key={asset.id}
                                         asset={asset}
+                                        selected={selectedAssetIds.includes(asset.id)}
                                         cloudBadge={getAssetCloudBadge(asset, { loggedIn: Boolean(cloudUser), syncing: cloudSyncing })}
                                         categoryOptions={collectAssetCategories(validAssets).map((name) => ({ label: name, value: name }))}
+                                        onSelectedChange={(checked) => toggleAssetSelected(asset.id, checked)}
                                         onOpen={() => setPreviewAsset(asset)}
                                         onEdit={() => openEdit(asset)}
                                         onCategoryChange={(next) => changeAssetCategory(asset, next)}
@@ -798,6 +912,10 @@ export default function AssetsPage() {
             <Modal title="删除资产" open={Boolean(deletingAsset)} onCancel={() => setDeletingAsset(null)} onOk={confirmDelete} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
                 确定删除「{deletingAsset?.title}」吗？删除后会从我的资产中移除。
             </Modal>
+
+            <Modal title="批量删除资产" open={batchDeleteOpen} onCancel={() => setBatchDeleteOpen(false)} onOk={confirmBatchDelete} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
+                确定删除选中的 {selectedAssetIds.length} 项资产吗？本机记录会移除；登录后会同步 tombstone，不影响未选中项。
+            </Modal>
         </div>
     );
 }
@@ -818,8 +936,10 @@ function assetCloudBadgeColor(badge: AssetCloudBadge) {
 
 function AssetCard({
     asset,
+    selected,
     cloudBadge,
     categoryOptions,
+    onSelectedChange,
     onOpen,
     onEdit,
     onCategoryChange,
@@ -830,8 +950,10 @@ function AssetCard({
     onDelete,
 }: {
     asset: Asset;
+    selected: boolean;
     cloudBadge: AssetCloudBadge;
     categoryOptions: Array<{ label: string; value: string }>;
+    onSelectedChange: (checked: boolean) => void;
     onOpen: () => void;
     onEdit: () => void;
     onCategoryChange: (next?: string) => void;
@@ -849,21 +971,30 @@ function AssetCard({
     return (
         <Card
             hoverable
-            className="overflow-hidden"
+            className={cn("overflow-hidden", selected && "ring-2 ring-stone-900 dark:ring-stone-100")}
             styles={{ body: { padding: 0 } }}
             cover={
-                <button type="button" className="relative block w-full text-left" onClick={onOpen}>
-                    {asset.kind === "video" && asset.data.url ? (
-                        <video src={asset.data.url} muted playsInline preload="metadata" className="aspect-[4/3] w-full bg-black object-cover" />
-                    ) : cover ? (
-                        <img src={cover} alt={displayTitle} className="aspect-[4/3] w-full object-cover" />
-                    ) : (
-                        <div className="flex aspect-[4/3] items-center justify-center bg-stone-100 p-5 text-center text-sm leading-6 text-stone-600 dark:bg-stone-900 dark:text-stone-300">{asset.kind === "text" ? asset.data.content : "暂无封面"}</div>
-                    )}
-                    <Tag className="absolute right-2 top-2 m-0 rounded-md px-1.5 text-[11px] shadow-sm" color={assetCloudBadgeColor(cloudBadge)}>
-                        {assetCloudBadgeLabel(cloudBadge)}
-                    </Tag>
-                </button>
+                <div className="relative">
+                    <div className="absolute left-2 top-2 z-10" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
+                        <Checkbox
+                            checked={selected}
+                            className="rounded-md bg-white/90 px-1 shadow-sm dark:bg-stone-950/80"
+                            onChange={(event) => onSelectedChange(event.target.checked)}
+                        />
+                    </div>
+                    <button type="button" className="relative block w-full text-left" onClick={onOpen}>
+                        {asset.kind === "video" && asset.data.url ? (
+                            <video src={asset.data.url} muted playsInline preload="metadata" className="aspect-[4/3] w-full bg-black object-cover" />
+                        ) : cover ? (
+                            <img src={cover} alt={displayTitle} className="aspect-[4/3] w-full object-cover" />
+                        ) : (
+                            <div className="flex aspect-[4/3] items-center justify-center bg-stone-100 p-5 text-center text-sm leading-6 text-stone-600 dark:bg-stone-900 dark:text-stone-300">{asset.kind === "text" ? asset.data.content : "暂无封面"}</div>
+                        )}
+                        <Tag className="absolute right-2 top-2 m-0 rounded-md px-1.5 text-[11px] shadow-sm" color={assetCloudBadgeColor(cloudBadge)}>
+                            {assetCloudBadgeLabel(cloudBadge)}
+                        </Tag>
+                    </button>
+                </div>
             }
         >
             <button type="button" className="block w-full text-left" onClick={onOpen}>

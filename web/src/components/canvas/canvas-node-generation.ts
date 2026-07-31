@@ -42,8 +42,13 @@ export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData
     const referenceVideos = inputs.map((input) => input.video).filter((video): video is ReferenceVideo => Boolean(video));
     const referenceAudios = inputs.map((input) => input.audio).filter((audio): audio is ReferenceAudio => Boolean(audio));
 
+    // Config nodes persist the already-expanded prompt after generation. On retry the seed is
+    // non-empty and must not re-append the same upstream text (would duplicate assembled content).
+    // Empty seed still means "use connected inputs only" for first generate without composer.
+    const shouldMergeUpstreamText = Boolean(upstreamText) && !(sourceNode?.type === CanvasNodeType.Config && prompt.trim());
+
     return {
-        prompt: upstreamText ? `${prompt}\n\n${upstreamText}` : prompt,
+        prompt: shouldMergeUpstreamText ? `${prompt}\n\n${upstreamText}` : prompt,
         referenceImages,
         referenceVideos,
         referenceAudios,
@@ -88,16 +93,21 @@ function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: s
     const referenceVideos = selectedInputs.map((input) => input.video).filter((video): video is ReferenceVideo => Boolean(video));
     const referenceAudios = selectedInputs.map((input) => input.audio).filter((audio): audio is ReferenceAudio => Boolean(audio));
 
+    // No @ tokens: keep the typed prompt, but still attach all currently connected media
+    // so reconnecting/changing references on a config node takes effect on the next generate.
     if (!hasToken) {
+        const allImages = inputs.map((input) => input.image).filter((image): image is ReferenceImage => Boolean(image));
+        const allVideos = inputs.map((input) => input.video).filter((video): video is ReferenceVideo => Boolean(video));
+        const allAudios = inputs.map((input) => input.audio).filter((audio): audio is ReferenceAudio => Boolean(audio));
         return {
             prompt,
-            referenceImages: [],
-            referenceVideos: [],
-            referenceAudios: [],
-            textCount: 0,
-            imageCount: 0,
-            videoCount: 0,
-            audioCount: 0,
+            referenceImages: allImages,
+            referenceVideos: allVideos,
+            referenceAudios: allAudios,
+            textCount: inputs.filter((input) => input.type === "text").length,
+            imageCount: allImages.length,
+            videoCount: allVideos.length,
+            audioCount: allAudios.length,
         };
     }
 
