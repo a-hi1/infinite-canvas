@@ -753,7 +753,11 @@ export function createDb(dataDir) {
                 if (!membership) return null;
                 return { file, item, workspace: ws, membership };
             }
-            const task = state.workspace_tasks.find((t) => t.deliverable_file_id === fileId && !t.deleted_at);
+            const task = state.workspace_tasks.find((t) => {
+                if (t.deleted_at) return false;
+                if (t.deliverable_file_id === fileId) return true;
+                return normalizeTaskDeliverables(t).some((d) => d.file_id === fileId);
+            });
             if (!task) return null;
             const ws = this.findWorkspaceById(task.workspace_id);
             if (!ws) return null;
@@ -764,6 +768,14 @@ export function createDb(dataDir) {
 
         createWorkspaceTask(record) {
             const assigneeIds = normalizeAssigneeUserIds(record.assigneeUserIds ?? record.assigneeUserId);
+            const deliverables = normalizeTaskDeliverables({
+                deliverables: record.deliverables,
+                deliverable_file_id: record.deliverableFileId || null,
+                deliverable_name: record.deliverableName || "",
+                deliverable_mime: record.deliverableMime || "",
+                deliverable_bytes: record.deliverableBytes || 0,
+            });
+            const first = deliverables[0] || null;
             const task = {
                 id: randomId(),
                 workspace_id: record.workspaceId,
@@ -773,10 +785,12 @@ export function createDb(dataDir) {
                 // Multi-assignee; keep legacy single field as first id for older clients.
                 assignee_user_ids: assigneeIds,
                 assignee_user_id: assigneeIds[0] || null,
-                deliverable_file_id: record.deliverableFileId || null,
-                deliverable_name: String(record.deliverableName || "").slice(0, 200),
-                deliverable_mime: String(record.deliverableMime || "").slice(0, 120),
-                deliverable_bytes: Number(record.deliverableBytes || 0) || 0,
+                // Multi deliverables; keep legacy single fields as first item for older clients.
+                deliverables,
+                deliverable_file_id: first?.file_id || null,
+                deliverable_name: first?.name || "",
+                deliverable_mime: first?.mime || "",
+                deliverable_bytes: first?.bytes || 0,
                 created_by: record.createdBy,
                 sort_order: Number(record.sortOrder || Date.now()) || Date.now(),
                 created_at: now(),
@@ -813,17 +827,36 @@ export function createDb(dataDir) {
                 task.assignee_user_ids = assigneeIds;
                 task.assignee_user_id = assigneeIds[0] || null;
             }
-            if (patch.deliverableFileId !== undefined) {
-                task.deliverable_file_id = patch.deliverableFileId || null;
-                task.deliverable_name = String(patch.deliverableName || "").slice(0, 200);
-                task.deliverable_mime = String(patch.deliverableMime || "").slice(0, 120);
-                task.deliverable_bytes = Number(patch.deliverableBytes || 0) || 0;
-            }
-            if (patch.clearDeliverable) {
-                task.deliverable_file_id = null;
-                task.deliverable_name = "";
-                task.deliverable_mime = "";
-                task.deliverable_bytes = 0;
+            // Multi deliverables (preferred). Always re-sync legacy single fields from first item.
+            if (Array.isArray(patch.deliverables)) {
+                applyTaskDeliverables(task, patch.deliverables);
+            } else if (patch.appendDeliverable && patch.appendDeliverable.file_id) {
+                const current = normalizeTaskDeliverables(task);
+                if (current.length >= MAX_TASK_DELIVERABLES) {
+                    return { __error: "deliverable_limit", limit: MAX_TASK_DELIVERABLES };
+                }
+                const next = [...current, normalizeOneDeliverable(patch.appendDeliverable)].filter(Boolean);
+                applyTaskDeliverables(task, next);
+            } else if (patch.removeDeliverableFileId) {
+                const removeId = String(patch.removeDeliverableFileId || "").trim();
+                const next = normalizeTaskDeliverables(task).filter((d) => d.file_id !== removeId);
+                applyTaskDeliverables(task, next);
+            } else if (patch.clearDeliverable) {
+                applyTaskDeliverables(task, []);
+            } else if (patch.deliverableFileId !== undefined) {
+                // Legacy single-file replace / clear.
+                if (!patch.deliverableFileId) {
+                    applyTaskDeliverables(task, []);
+                } else {
+                    applyTaskDeliverables(task, [
+                        {
+                            file_id: patch.deliverableFileId,
+                            name: patch.deliverableName || "",
+                            mime: patch.deliverableMime || "",
+                            bytes: patch.deliverableBytes || 0,
+                        },
+                    ]);
+                }
             }
             if (patch.sortOrder != null) task.sort_order = Number(patch.sortOrder) || task.sort_order;
             task.updated_at = now();
@@ -985,6 +1018,61 @@ export function normalizeAssigneeUserIds(input) {
     return out;
 }
 
+/** Max image/video deliverables attached to one task. */
+export const MAX_TASK_DELIVERABLES = 12;
+
+function normalizeOneDeliverable(input) {
+    if (!input || typeof input !== "object") return null;
+    const fileId = String(input.file_id || input.fileId || "").trim();
+    if (!fileId) return null;
+    return {
+        file_id: fileId,
+        name: String(input.name || input.deliverable_name || "").slice(0, 200),
+        mime: String(input.mime || input.deliverable_mime || "").slice(0, 120),
+        bytes: Number(input.bytes || input.deliverable_bytes || 0) || 0,
+        uploaded_by: String(input.uploaded_by || input.uploadedBy || "").slice(0, 80) || undefined,
+        created_at: input.created_at || input.createdAt || undefined,
+    };
+}
+
+/** Merge multi-deliverable array with legacy single fields; de-dupe by file_id. */
+export function normalizeTaskDeliverables(task) {
+    const seen = new Set();
+    const out = [];
+    const push = (raw) => {
+        const item = normalizeOneDeliverable(raw);
+        if (!item || seen.has(item.file_id)) return;
+        seen.add(item.file_id);
+        out.push(item);
+    };
+    if (Array.isArray(task?.deliverables)) {
+        for (const d of task.deliverables) {
+            push(d);
+            if (out.length >= MAX_TASK_DELIVERABLES) break;
+        }
+    }
+    if (out.length < MAX_TASK_DELIVERABLES && task?.deliverable_file_id) {
+        push({
+            file_id: task.deliverable_file_id,
+            name: task.deliverable_name || "",
+            mime: task.deliverable_mime || "",
+            bytes: task.deliverable_bytes || 0,
+        });
+    }
+    return out;
+}
+
+function applyTaskDeliverables(task, list) {
+    const deliverables = normalizeTaskDeliverables({ deliverables: list });
+    const first = deliverables[0] || null;
+    task.deliverables = deliverables;
+    task.deliverable_file_id = first?.file_id || null;
+    task.deliverable_name = first?.name || "";
+    task.deliverable_mime = first?.mime || "";
+    task.deliverable_bytes = first?.bytes || 0;
+    return deliverables;
+}
+
 export function publicWorkspaceTask(task, extra = {}) {
     if (!task) return null;
     const assigneeIds = normalizeAssigneeUserIds(
@@ -992,7 +1080,16 @@ export function publicWorkspaceTask(task, extra = {}) {
             ? task.assignee_user_ids
             : task.assignee_user_id,
     );
-    const deliverableFileId = task.deliverable_file_id || null;
+    const deliverables = normalizeTaskDeliverables(task).map((d) => ({
+        file_id: d.file_id,
+        name: d.name || "",
+        mime: d.mime || "",
+        bytes: d.bytes || 0,
+        url: `/api/workspace-files/${d.file_id}`,
+        uploaded_by: d.uploaded_by || "",
+        created_at: d.created_at || "",
+    }));
+    const first = deliverables[0] || null;
     return {
         id: task.id,
         workspace_id: task.workspace_id,
@@ -1003,11 +1100,14 @@ export function publicWorkspaceTask(task, extra = {}) {
         // Legacy single field: first assignee (or null).
         assignee_user_id: assigneeIds[0] || null,
         assignees: Array.isArray(extra.assignees) ? extra.assignees : undefined,
-        deliverable_file_id: deliverableFileId,
-        deliverable_name: task.deliverable_name || "",
-        deliverable_mime: task.deliverable_mime || "",
-        deliverable_bytes: Number(task.deliverable_bytes || 0) || 0,
-        deliverable_url: deliverableFileId ? `/api/workspace-files/${deliverableFileId}` : null,
+        // Multi deliverables (preferred).
+        deliverables,
+        // Legacy single fields: first deliverable for older clients / UI fallbacks.
+        deliverable_file_id: first?.file_id || null,
+        deliverable_name: first?.name || "",
+        deliverable_mime: first?.mime || "",
+        deliverable_bytes: first?.bytes || 0,
+        deliverable_url: first?.url || null,
         created_by: task.created_by,
         created_by_name: extra.created_by_name || "",
         created_by_email: extra.created_by_email || "",

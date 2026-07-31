@@ -40,12 +40,14 @@ import {
     resetWorkspaceInvite,
     sourceTypeLabel,
     taskAssigneeIds,
+    taskDeliverables,
     updateWorkspaceTask,
     workspaceFileObjectUrl,
     type WorkspaceItem,
     type WorkspaceMember,
     type WorkspaceSummary,
     type WorkspaceTask,
+    type WorkspaceTaskDeliverable,
 } from "@/services/workspace-api";
 
 const taskStatusOptions = [
@@ -657,12 +659,16 @@ export default function WorkspaceDetailPage() {
                                                                                     deliverableFilename: file.name,
                                                                                 });
                                                                                 setTasks((list) => list.map((t) => (t.id === task.id ? next : t)));
-                                                                                message.success("交付物已上传");
+                                                                            }}
+                                                                            onRemoveDeliverable={async (fileId) => {
+                                                                                const next = await updateWorkspaceTask(id, task.id, {
+                                                                                    removeDeliverableFileId: fileId,
+                                                                                });
+                                                                                setTasks((list) => list.map((t) => (t.id === task.id ? next : t)));
                                                                             }}
                                                                             onClearDeliverable={async () => {
                                                                                 const next = await updateWorkspaceTask(id, task.id, { clearDeliverable: true });
                                                                                 setTasks((list) => list.map((t) => (t.id === task.id ? next : t)));
-                                                                                message.success("已清除交付物");
                                                                             }}
                                                                             onDelete={async () => {
                                                                                 await deleteWorkspaceTask(id, task.id);
@@ -728,6 +734,8 @@ function isVideoMime(mime?: string | null, name?: string | null) {
     return n.endsWith(".mp4") || n.endsWith(".webm") || n.endsWith(".mov");
 }
 
+const MAX_TASK_DELIVERABLES_UI = 12;
+
 function TaskRow({
     task,
     members,
@@ -737,6 +745,7 @@ function TaskRow({
     onChangeStatus,
     onChangeAssignees,
     onUploadDeliverable,
+    onRemoveDeliverable,
     onClearDeliverable,
     onDelete,
 }: {
@@ -748,75 +757,117 @@ function TaskRow({
     onChangeStatus: (status: string) => Promise<void>;
     onChangeAssignees: (ids: string[]) => Promise<void>;
     onUploadDeliverable: (file: File) => Promise<void>;
+    onRemoveDeliverable: (fileId: string) => Promise<void>;
     onClearDeliverable: () => Promise<void>;
     onDelete: () => Promise<void>;
 }) {
     const { message } = App.useApp();
     const [busy, setBusy] = useState(false);
-    const [previewUrl, setPreviewUrl] = useState("");
-    const [previewError, setPreviewError] = useState(false);
-    const [previewOpen, setPreviewOpen] = useState(false);
+    const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
+    const [previewErrors, setPreviewErrors] = useState<Record<string, boolean>>({});
+    const [activePreview, setActivePreview] = useState<WorkspaceTaskDeliverable | null>(null);
     const ids = taskAssigneeIds(task);
+    const deliverables = taskDeliverables(task);
     const assigneeLabels =
         (task.assignees?.length
             ? task.assignees.map((a) => a.display_name || a.email || a.user_id.slice(0, 8))
             : ids.map((id) => memberNameById.get(id) || id.slice(0, 8))) || [];
     const meta = TASK_STATUS_META[task.status] || TASK_STATUS_META[WORKSPACE_TASK_STATUS.TODO];
-    const hasDeliverable = Boolean(task.deliverable_file_id || task.deliverable_url);
-    const deliverableIsVideo = isVideoMime(task.deliverable_mime, task.deliverable_name);
+    const canAddMore = deliverables.length < MAX_TASK_DELIVERABLES_UI;
 
     useEffect(() => {
         let active = true;
-        let objectUrl = "";
-        setPreviewUrl("");
-        setPreviewError(false);
-        setPreviewOpen(false);
-        if (!task.deliverable_url) return;
-        void workspaceFileObjectUrl(task.deliverable_url)
-            .then((url) => {
+        const objectUrls: string[] = [];
+        const nextUrls: Record<string, string> = {};
+        const nextErrors: Record<string, boolean> = {};
+        setPreviewUrls({});
+        setPreviewErrors({});
+        setActivePreview(null);
+
+        const loaders = deliverables.map(async (item) => {
+            if (!item.url) {
+                nextErrors[item.file_id] = true;
+                return;
+            }
+            try {
+                const url = await workspaceFileObjectUrl(item.url);
                 if (!active) {
                     URL.revokeObjectURL(url);
                     return;
                 }
-                objectUrl = url;
-                setPreviewUrl(url);
-            })
-            .catch(() => {
-                if (active) setPreviewError(true);
-            });
+                objectUrls.push(url);
+                nextUrls[item.file_id] = url;
+            } catch {
+                if (active) nextErrors[item.file_id] = true;
+            }
+        });
+
+        void Promise.all(loaders).then(() => {
+            if (!active) return;
+            setPreviewUrls(nextUrls);
+            setPreviewErrors(nextErrors);
+        });
+
         return () => {
             active = false;
-            if (objectUrl) URL.revokeObjectURL(objectUrl);
+            for (const url of objectUrls) URL.revokeObjectURL(url);
         };
-    }, [task.deliverable_url, task.deliverable_file_id]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- re-load when deliverable ids change
+    }, [deliverables.map((d) => d.file_id).join("|")]);
 
     const deliverUploadProps: UploadProps = {
         showUploadList: false,
+        multiple: true,
         accept: "image/jpeg,image/png,image/webp,video/mp4,video/webm,.jpg,.jpeg,.png,.webp,.mp4,.webm",
-        disabled: busy || !canDeliver,
-        beforeUpload: (file) => {
+        disabled: busy || !canDeliver || !canAddMore,
+        beforeUpload: (file, fileList) => {
+            // Ant Design fires beforeUpload once per file; only start the batch on the first call.
+            if (fileList[0] && file !== fileList[0]) return false;
+            const remaining = MAX_TASK_DELIVERABLES_UI - deliverables.length;
+            if (remaining <= 0) {
+                message.warning(`每个任务最多 ${MAX_TASK_DELIVERABLES_UI} 个交付物`);
+                return false;
+            }
+            const selected = (fileList as File[]).slice(0, remaining);
+            if ((fileList as File[]).length > remaining) {
+                message.warning(`还能再添加 ${remaining} 个，已自动截取前 ${remaining} 个`);
+            }
             setBusy(true);
-            void onUploadDeliverable(file as File)
-                .catch((error) => message.error(error instanceof Error ? error.message : "上传交付物失败"))
-                .finally(() => setBusy(false));
+            void (async () => {
+                let ok = 0;
+                for (const f of selected) {
+                    try {
+                        await onUploadDeliverable(f);
+                        ok += 1;
+                    } catch (error) {
+                        message.error(error instanceof Error ? error.message : "上传交付物失败");
+                        break;
+                    }
+                }
+                if (ok === 1) message.success("交付物已添加");
+                else if (ok > 1) message.success(`已添加 ${ok} 个交付物`);
+            })().finally(() => setBusy(false));
             return false;
         },
     };
 
-    const handleDownloadDeliverable = async () => {
+    const handleDownload = async (item: WorkspaceTaskDeliverable) => {
         try {
-            const url = previewUrl || (task.deliverable_url ? await workspaceFileObjectUrl(task.deliverable_url) : "");
+            const cached = previewUrls[item.file_id];
+            const url = cached || (item.url ? await workspaceFileObjectUrl(item.url) : "");
             if (!url) {
                 message.warning("没有可下载的交付物");
                 return;
             }
-            const name = task.deliverable_name || `deliverable-${task.id}`;
-            saveAs(url, name);
-            if (!previewUrl) URL.revokeObjectURL(url);
+            saveAs(url, item.name || `deliverable-${item.file_id}`);
+            if (!cached) URL.revokeObjectURL(url);
         } catch (error) {
             message.error(error instanceof Error ? error.message : "下载失败");
         }
     };
+
+    const activeUrl = activePreview ? previewUrls[activePreview.file_id] : "";
+    const activeIsVideo = activePreview ? isVideoMime(activePreview.mime, activePreview.name) : false;
 
     return (
         <div className={`rounded-lg border border-stone-200 border-l-4 bg-card px-3 py-3 shadow-sm dark:border-stone-800 ${meta.accent}`}>
@@ -891,80 +942,133 @@ function TaskRow({
                 </div>
             ) : null}
             <div className="mt-2 rounded-md border border-dashed border-stone-300/80 bg-stone-50/70 px-2 py-2 dark:border-stone-700 dark:bg-stone-950/40">
-                <div className="mb-1 flex items-center gap-1 text-[11px] font-medium text-stone-600 dark:text-stone-300">
-                    <Paperclip className="size-3" />
-                    交付物
-                </div>
-                {hasDeliverable ? (
-                    <div className="space-y-2">
-                        <button
-                            type="button"
-                            className={`relative block w-full overflow-hidden rounded-md border border-stone-200 bg-stone-100 p-0 text-left dark:border-stone-700 dark:bg-stone-900 ${
-                                deliverableIsVideo ? "aspect-video" : "aspect-4/3"
-                            } ${previewUrl && !previewError ? "cursor-zoom-in" : "cursor-default"}`}
-                            title={previewUrl && !previewError ? "点击预览" : undefined}
+                <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1 text-[11px] font-medium text-stone-600 dark:text-stone-300">
+                    <span className="inline-flex items-center gap-1">
+                        <Paperclip className="size-3" />
+                        交付物
+                        {deliverables.length ? (
+                            <span className="font-normal text-stone-400">
+                                {deliverables.length}/{MAX_TASK_DELIVERABLES_UI}
+                            </span>
+                        ) : null}
+                    </span>
+                    {canDeliver && deliverables.length > 1 ? (
+                        <Button
+                            size="small"
+                            type="link"
+                            danger
+                            className="h-auto px-0 text-[11px]"
+                            disabled={busy}
                             onClick={() => {
-                                if (previewUrl && !previewError) setPreviewOpen(true);
+                                setBusy(true);
+                                void onClearDeliverable()
+                                    .then(() => message.success("已清空全部交付物"))
+                                    .catch((error) => message.error(error instanceof Error ? error.message : "清空失败"))
+                                    .finally(() => setBusy(false));
                             }}
                         >
-                            {previewUrl && !previewError ? (
-                                deliverableIsVideo ? (
-                                    <video src={previewUrl} muted playsInline preload="metadata" className="pointer-events-none size-full object-contain" />
-                                ) : (
-                                    <img src={previewUrl} alt={task.deliverable_name || "交付物"} className="size-full object-cover" />
-                                )
-                            ) : (
-                                <div className="flex size-full items-center justify-center text-[11px] text-stone-500">
-                                    {previewError ? "预览失败" : "加载预览…"}
-                                </div>
-                            )}
-                            {previewUrl && !previewError ? (
-                                <span className="absolute bottom-1.5 left-1.5 rounded bg-black/55 px-1.5 py-0.5 text-[10px] text-white">
-                                    点击预览
-                                </span>
-                            ) : null}
-                        </button>
-                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-stone-600 dark:text-stone-300">
-                            <span className="min-w-0 truncate font-medium text-stone-800 dark:text-stone-100">
-                                {task.deliverable_name || "已上传文件"}
-                            </span>
-                            {task.deliverable_bytes ? <span className="text-stone-400">{formatBytes(task.deliverable_bytes)}</span> : null}
-                            {previewUrl && !previewError ? (
-                                <Button size="small" onClick={() => setPreviewOpen(true)}>
-                                    预览
-                                </Button>
-                            ) : null}
-                            <Button size="small" icon={<Download className="size-3" />} onClick={() => void handleDownloadDeliverable()}>
-                                下载
-                            </Button>
-                            {canDeliver ? (
-                                <>
-                                    <Upload {...deliverUploadProps}>
-                                        <Button size="small" loading={busy}>
-                                            替换
-                                        </Button>
-                                    </Upload>
-                                    <Button
-                                        size="small"
-                                        danger
-                                        disabled={busy}
-                                        onClick={() => {
-                                            setBusy(true);
-                                            void onClearDeliverable()
-                                                .catch((error) => message.error(error instanceof Error ? error.message : "清除失败"))
-                                                .finally(() => setBusy(false));
-                                        }}
+                            清空全部
+                        </Button>
+                    ) : null}
+                </div>
+
+                {deliverables.length ? (
+                    <div className="space-y-2">
+                        <div className="grid grid-cols-2 gap-1.5">
+                            {deliverables.map((item) => {
+                                const url = previewUrls[item.file_id];
+                                const failed = previewErrors[item.file_id];
+                                const isVideo = isVideoMime(item.mime, item.name);
+                                const ready = Boolean(url) && !failed;
+                                return (
+                                    <div
+                                        key={item.file_id}
+                                        className="overflow-hidden rounded-md border border-stone-200 bg-stone-100 dark:border-stone-700 dark:bg-stone-900"
                                     >
-                                        清除
-                                    </Button>
-                                </>
-                            ) : null}
+                                        <button
+                                            type="button"
+                                            className={`relative block w-full p-0 text-left ${isVideo ? "aspect-video" : "aspect-square"} ${
+                                                ready ? "cursor-zoom-in" : "cursor-default"
+                                            }`}
+                                            title={ready ? "点击预览" : undefined}
+                                            onClick={() => {
+                                                if (ready) setActivePreview(item);
+                                            }}
+                                        >
+                                            {ready ? (
+                                                isVideo ? (
+                                                    <video
+                                                        src={url}
+                                                        muted
+                                                        playsInline
+                                                        preload="metadata"
+                                                        className="pointer-events-none size-full object-contain"
+                                                    />
+                                                ) : (
+                                                    <img src={url} alt={item.name || "交付物"} className="size-full object-cover" />
+                                                )
+                                            ) : (
+                                                <div className="flex size-full items-center justify-center text-[10px] text-stone-500">
+                                                    {failed ? "预览失败" : "加载…"}
+                                                </div>
+                                            )}
+                                        </button>
+                                        <div className="space-y-1 px-1.5 py-1">
+                                            <div className="truncate text-[10px] font-medium text-stone-700 dark:text-stone-200" title={item.name || ""}>
+                                                {item.name || "文件"}
+                                            </div>
+                                            <div className="flex flex-wrap gap-0.5">
+                                                {ready ? (
+                                                    <Button size="small" className="h-6! px-1.5! text-[10px]!" onClick={() => setActivePreview(item)}>
+                                                        预览
+                                                    </Button>
+                                                ) : null}
+                                                <Button
+                                                    size="small"
+                                                    className="h-6! px-1.5! text-[10px]!"
+                                                    icon={<Download className="size-3" />}
+                                                    onClick={() => void handleDownload(item)}
+                                                />
+                                                {canDeliver ? (
+                                                    <Button
+                                                        size="small"
+                                                        danger
+                                                        className="h-6! px-1.5! text-[10px]!"
+                                                        disabled={busy}
+                                                        icon={<Trash2 className="size-3" />}
+                                                        onClick={() => {
+                                                            setBusy(true);
+                                                            void onRemoveDeliverable(item.file_id)
+                                                                .then(() => message.success("已删除该交付物"))
+                                                                .catch((error) =>
+                                                                    message.error(error instanceof Error ? error.message : "删除失败"),
+                                                                )
+                                                                .finally(() => setBusy(false));
+                                                        }}
+                                                    />
+                                                ) : null}
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
                         </div>
+                        {canDeliver ? (
+                            canAddMore ? (
+                                <Upload {...deliverUploadProps}>
+                                    <Button size="small" icon={<FileUp className="size-3.5" />} loading={busy}>
+                                        继续添加
+                                    </Button>
+                                </Upload>
+                            ) : (
+                                <div className="text-[11px] text-stone-400">已达上限（{MAX_TASK_DELIVERABLES_UI} 个）</div>
+                            )
+                        ) : null}
                     </div>
                 ) : canDeliver ? (
                     <Upload {...deliverUploadProps}>
                         <Button size="small" icon={<FileUp className="size-3.5" />} loading={busy}>
-                            上传交付物
+                            上传交付物（可多选）
                         </Button>
                     </Upload>
                 ) : (
@@ -973,30 +1077,43 @@ function TaskRow({
             </div>
 
             <Modal
-                open={previewOpen}
-                title={task.deliverable_name || "交付物预览"}
-                onCancel={() => setPreviewOpen(false)}
+                open={Boolean(activePreview)}
+                title={activePreview?.name || "交付物预览"}
+                onCancel={() => setActivePreview(null)}
                 footer={null}
                 width={860}
                 destroyOnHidden
                 styles={{ body: { paddingTop: 8 } }}
             >
-                {previewUrl && !previewError ? (
-                    deliverableIsVideo ? (
-                        <video src={previewUrl} controls autoPlay playsInline className="max-h-[70vh] w-full rounded-md bg-black object-contain" />
+                {activePreview && activeUrl ? (
+                    activeIsVideo ? (
+                        <video
+                            src={activeUrl}
+                            controls
+                            autoPlay
+                            playsInline
+                            className="max-h-[70vh] w-full rounded-md bg-black object-contain"
+                        />
                     ) : (
-                        <Image src={previewUrl} alt={task.deliverable_name || "交付物"} className="max-h-[70vh] w-full object-contain" rootClassName="block w-full" />
+                        <Image
+                            src={activeUrl}
+                            alt={activePreview.name || "交付物"}
+                            className="max-h-[70vh] w-full object-contain"
+                            rootClassName="block w-full"
+                        />
                     )
                 ) : (
                     <div className="flex min-h-40 items-center justify-center text-sm text-stone-500">
-                        {previewError ? "预览失败" : "加载中…"}
+                        {activePreview && previewErrors[activePreview.file_id] ? "预览失败" : "加载中…"}
                     </div>
                 )}
-                <div className="mt-3 flex flex-wrap gap-2">
-                    <Button icon={<Download className="size-3.5" />} onClick={() => void handleDownloadDeliverable()}>
-                        下载
-                    </Button>
-                </div>
+                {activePreview ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                        <Button icon={<Download className="size-3.5" />} onClick={() => void handleDownload(activePreview)}>
+                            下载
+                        </Button>
+                    </div>
+                ) : null}
             </Modal>
         </div>
     );

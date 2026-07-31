@@ -63,6 +63,16 @@ export type WorkspaceTaskAssignee = {
     email?: string;
 };
 
+export type WorkspaceTaskDeliverable = {
+    file_id: string;
+    name?: string;
+    mime?: string;
+    bytes?: number;
+    url?: string | null;
+    uploaded_by?: string;
+    created_at?: string;
+};
+
 export type WorkspaceTask = {
     id: string;
     workspace_id: string;
@@ -74,6 +84,9 @@ export type WorkspaceTask = {
     /** Legacy single assignee — first of assignee_user_ids when present. */
     assignee_user_id?: string | null;
     assignees?: WorkspaceTaskAssignee[];
+    /** Multi deliverables (preferred). */
+    deliverables?: WorkspaceTaskDeliverable[];
+    /** Legacy single deliverable fields — first of deliverables when present. */
     deliverable_file_id?: string | null;
     deliverable_name?: string;
     deliverable_mime?: string;
@@ -293,14 +306,16 @@ export function updateWorkspaceTask(
         status?: string;
         assigneeUserIds?: string[];
         assigneeUserId?: string | null;
-        /** Attach a deliverable file (multipart). */
+        /** Append a deliverable file (multipart). Does not replace existing ones. */
         deliverableFile?: Blob;
         deliverableFilename?: string;
-        /** Clear existing deliverable. */
+        /** Remove one deliverable by file_id. */
+        removeDeliverableFileId?: string;
+        /** Clear all deliverables. */
         clearDeliverable?: boolean;
     },
 ) {
-    if (patch.deliverableFile || patch.clearDeliverable) {
+    if (patch.deliverableFile || patch.clearDeliverable || patch.removeDeliverableFileId) {
         const form = new FormData();
         if (patch.title !== undefined) form.append("title", patch.title);
         if (patch.body !== undefined) form.append("body", patch.body);
@@ -313,6 +328,7 @@ export function updateWorkspaceTask(
             form.append("assignee_user_id", patch.assigneeUserId || "");
         }
         if (patch.clearDeliverable) form.append("clear_deliverable", "true");
+        if (patch.removeDeliverableFileId) form.append("remove_deliverable_file_id", patch.removeDeliverableFileId);
         if (patch.deliverableFile) {
             form.append("file", patch.deliverableFile, patch.deliverableFilename || "deliverable.bin");
         }
@@ -386,6 +402,25 @@ export function taskAssigneeIds(task: Pick<WorkspaceTask, "assignee_user_ids" | 
     if (Array.isArray(task.assignees) && task.assignees.length) return task.assignees.map((a) => a.user_id);
     if (task.assignee_user_id) return [task.assignee_user_id];
     return [] as string[];
+}
+
+/** Normalize multi + legacy single deliverable fields into a list. */
+export function taskDeliverables(task: Pick<WorkspaceTask, "deliverables" | "deliverable_file_id" | "deliverable_name" | "deliverable_mime" | "deliverable_bytes" | "deliverable_url">) {
+    if (Array.isArray(task.deliverables) && task.deliverables.length) {
+        return task.deliverables.filter((d) => d && d.file_id);
+    }
+    if (task.deliverable_file_id) {
+        return [
+            {
+                file_id: task.deliverable_file_id,
+                name: task.deliverable_name || "",
+                mime: task.deliverable_mime || "",
+                bytes: task.deliverable_bytes || 0,
+                url: task.deliverable_url || `/api/workspace-files/${task.deliverable_file_id}`,
+            },
+        ] as WorkspaceTaskDeliverable[];
+    }
+    return [] as WorkspaceTaskDeliverable[];
 }
 
 export function sourceTypeLabel(sourceType?: string) {

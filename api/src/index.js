@@ -4,7 +4,7 @@ import path from "node:path";
 import dns from "node:dns/promises";
 import { URL } from "node:url";
 
-import { createDb, normalizeAssigneeUserIds, publicCreditLedgerEntry, publicJob, publicProjectMeta, publicUser, publicWorkspace, publicWorkspaceItem, publicWorkspaceTask } from "./db.js";
+import { createDb, normalizeAssigneeUserIds, normalizeTaskDeliverables, MAX_TASK_DELIVERABLES, publicCreditLedgerEntry, publicJob, publicProjectMeta, publicUser, publicWorkspace, publicWorkspaceItem, publicWorkspaceTask } from "./db.js";
 import {
     CLOUD_ERROR_REASON,
     CREDIT_LEDGER_TYPE,
@@ -2018,7 +2018,18 @@ async function handleUpdateWorkspaceTask(req, res, workspaceId, taskId) {
         body = await readJson(req);
     }
 
-    // Assignees may only attach/clear deliverables, not change title/status/assignees.
+    const removeDeliverableFileId = String(
+        body.remove_deliverable_file_id || body.removeDeliverableFileId || "",
+    ).trim();
+    const clearDeliverable =
+        body.clear_deliverable === true ||
+        body.clear_deliverable === "true" ||
+        body.clear_deliverable === "1" ||
+        body.clearDeliverable === true ||
+        body.clearDeliverable === "true";
+    const hasDeliverableAction = Boolean(file?.data?.length || removeDeliverableFileId || clearDeliverable);
+
+    // Assignees may only attach/remove/clear deliverables, not change title/status/assignees.
     if (!canEditMeta) {
         const tryingMeta =
             body.title != null ||
@@ -2030,7 +2041,7 @@ async function handleUpdateWorkspaceTask(req, res, workspaceId, taskId) {
             body.assigneeUserId !== undefined ||
             body.sort_order != null ||
             body.sortOrder != null;
-        if (tryingMeta && !file && body.clear_deliverable == null && body.clearDeliverable == null) {
+        if (tryingMeta && !hasDeliverableAction) {
             return fail(res, 403, "负责人只能上传交付物，不能改任务字段", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
         }
         if (tryingMeta && (body.title != null || body.status != null || body.assignee_user_ids !== undefined || body.assigneeUserIds !== undefined)) {
@@ -2054,20 +2065,27 @@ async function handleUpdateWorkspaceTask(req, res, workspaceId, taskId) {
           }
         : {};
 
-    const clearDeliverable =
-        body.clear_deliverable === true ||
-        body.clear_deliverable === "true" ||
-        body.clear_deliverable === "1" ||
-        body.clearDeliverable === true ||
-        body.clearDeliverable === "true";
     if (clearDeliverable) {
         if (!canUploadDeliverable) {
             return fail(res, 403, "无权清除交付物", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
         }
         patch.clearDeliverable = true;
+    } else if (removeDeliverableFileId) {
+        if (!canUploadDeliverable) {
+            return fail(res, 403, "无权删除交付物", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+        }
+        const existing = normalizeTaskDeliverables(task);
+        if (!existing.some((d) => d.file_id === removeDeliverableFileId)) {
+            return fail(res, 404, "交付物不存在", CLOUD_ERROR_REASON.NOT_FOUND);
+        }
+        patch.removeDeliverableFileId = removeDeliverableFileId;
     } else if (file?.data?.length) {
         if (!canUploadDeliverable) {
             return fail(res, 403, "无权上传交付物", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+        }
+        const existing = normalizeTaskDeliverables(task);
+        if (existing.length >= MAX_TASK_DELIVERABLES) {
+            return fail(res, 400, `每个任务最多 ${MAX_TASK_DELIVERABLES} 个交付物`, CLOUD_ERROR_REASON.BAD_REQUEST);
         }
         const sniffed = sniffMime(file.data) || file.mime || "";
         const isImage = ["image/jpeg", "image/png", "image/webp"].includes(sniffed);
@@ -2090,14 +2108,26 @@ async function handleUpdateWorkspaceTask(req, res, workspaceId, taskId) {
             durationMs: 0,
             filename: file.filename,
         });
-        patch.deliverableFileId = fileRow.id;
-        patch.deliverableName = String(file.filename || body.deliverable_name || body.deliverableName || "交付物").slice(0, 200);
-        patch.deliverableMime = sniffed;
-        patch.deliverableBytes = file.data.length;
+        // Append (not replace) so multiple outcomes can accumulate on one task.
+        patch.appendDeliverable = {
+            file_id: fileRow.id,
+            name: String(file.filename || body.deliverable_name || body.deliverableName || "交付物").slice(0, 200),
+            mime: sniffed,
+            bytes: file.data.length,
+            uploaded_by: ctx.user.id,
+            created_at: new Date().toISOString(),
+        };
     }
 
     const updated = workspacesRepo.updateTask(taskId, workspaceId, patch);
-    json(res, 200, decorateWorkspaceTask(updated), file?.data?.length ? "交付物已上传" : "任务已更新");
+    if (updated && updated.__error === "deliverable_limit") {
+        return fail(res, 400, `每个任务最多 ${updated.limit || MAX_TASK_DELIVERABLES} 个交付物`, CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    let msg = "任务已更新";
+    if (file?.data?.length) msg = "交付物已添加";
+    else if (removeDeliverableFileId) msg = "交付物已删除";
+    else if (clearDeliverable) msg = "交付物已清空";
+    json(res, 200, decorateWorkspaceTask(updated), msg);
 }
 
 function handleDeleteWorkspaceTask(req, res, workspaceId, taskId) {
