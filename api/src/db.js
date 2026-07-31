@@ -2,7 +2,19 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { ensureDir, randomId, sha256 } from "./util.js";
-import { CLOUD_ERROR_REASON, CREDIT_CURRENCY, CREDIT_LEDGER_TYPE, FILE_STORAGE_BACKEND, JOB_STATUS, JOB_SOURCE, SAVE_STATUS, USER_STATUS } from "./model/cloud-domain.js";
+import {
+        CLOUD_ERROR_REASON,
+        CREDIT_CURRENCY,
+        CREDIT_LEDGER_TYPE,
+        FILE_STORAGE_BACKEND,
+        JOB_STATUS,
+        JOB_SOURCE,
+        SAVE_STATUS,
+        USER_STATUS,
+        WORKSPACE_ROLE,
+        WORKSPACE_STATUS,
+        WORKSPACE_TASK_STATUS,
+    } from "./model/cloud-domain.js";
 
 /**
  * Lightweight JSON-file database.
@@ -15,8 +27,20 @@ export function createDb(dataDir) {
     const assetsDir = path.join(dataDir, "assets");
     ensureDir(projectsDir);
     ensureDir(assetsDir);
-    /** @type {{ users: any[], sessions: any[], jobs: any[], files: any[], credit_ledger: any[], projects: any[], asset_manifests: any[] }} */
-    let state = { users: [], sessions: [], jobs: [], files: [], credit_ledger: [], projects: [], asset_manifests: [] };
+    /** @type {{ users: any[], sessions: any[], jobs: any[], files: any[], credit_ledger: any[], projects: any[], asset_manifests: any[], workspaces: any[], workspace_members: any[], workspace_items: any[], workspace_tasks: any[] }} */
+    let state = {
+        users: [],
+        sessions: [],
+        jobs: [],
+        files: [],
+        credit_ledger: [],
+        projects: [],
+        asset_manifests: [],
+        workspaces: [],
+        workspace_members: [],
+        workspace_items: [],
+        workspace_tasks: [],
+    };
 
     if (fs.existsSync(dbPath)) {
         try {
@@ -28,6 +52,10 @@ export function createDb(dataDir) {
             state.credit_ledger ||= [];
             state.projects ||= [];
             state.asset_manifests ||= [];
+            state.workspaces ||= [];
+            state.workspace_members ||= [];
+            state.workspace_items ||= [];
+            state.workspace_tasks ||= [];
         } catch {
             // keep empty state if corrupt; operator can restore from backup
         }
@@ -544,6 +572,277 @@ export function createDb(dataDir) {
             schedulePersist();
             return { entry, user, deduped: false };
         },
+
+        // ── Collaborative workspaces (explicit share; not private assets/jobs) ──
+
+        createWorkspace({ name, ownerId, inviteCode }) {
+            const id = randomId();
+            const ts = now();
+            const workspace = {
+                id,
+                name: String(name || "未命名空间").trim().slice(0, 80) || "未命名空间",
+                owner_id: ownerId,
+                invite_code: String(inviteCode || "").trim(),
+                status: WORKSPACE_STATUS.ACTIVE,
+                created_at: ts,
+                updated_at: ts,
+            };
+            state.workspaces.unshift(workspace);
+            state.workspace_members.push({
+                id: randomId(),
+                workspace_id: id,
+                user_id: ownerId,
+                role: WORKSPACE_ROLE.OWNER,
+                joined_at: ts,
+            });
+            schedulePersist();
+            return workspace;
+        },
+
+        findWorkspaceById(workspaceId) {
+            return state.workspaces.find((w) => w.id === workspaceId && w.status !== WORKSPACE_STATUS.ARCHIVED) || null;
+        },
+
+        findWorkspaceByInviteCode(inviteCode) {
+            const code = String(inviteCode || "").trim().toLowerCase();
+            if (!code) return null;
+            return state.workspaces.find((w) => w.status === WORKSPACE_STATUS.ACTIVE && String(w.invite_code || "").toLowerCase() === code) || null;
+        },
+
+        listWorkspacesForUser(userId) {
+            const memberships = state.workspace_members.filter((m) => m.user_id === userId);
+            return memberships
+                .map((m) => {
+                    const ws = state.workspaces.find((w) => w.id === m.workspace_id && w.status !== WORKSPACE_STATUS.ARCHIVED);
+                    if (!ws) return null;
+                    return { workspace: ws, membership: m };
+                })
+                .filter(Boolean)
+                .sort((a, b) => String(b.workspace.updated_at || "").localeCompare(String(a.workspace.updated_at || "")));
+        },
+
+        findMembership(workspaceId, userId) {
+            return state.workspace_members.find((m) => m.workspace_id === workspaceId && m.user_id === userId) || null;
+        },
+
+        listMembers(workspaceId) {
+            return state.workspace_members
+                .filter((m) => m.workspace_id === workspaceId)
+                .map((m) => {
+                    const user = this.findUserById(m.user_id);
+                    return {
+                        id: m.id,
+                        workspace_id: m.workspace_id,
+                        user_id: m.user_id,
+                        role: m.role,
+                        joined_at: m.joined_at,
+                        display_name: user?.display_name || "",
+                        email: user?.email || "",
+                    };
+                });
+        },
+
+        addWorkspaceMember({ workspaceId, userId, role = WORKSPACE_ROLE.MEMBER }) {
+            const existing = this.findMembership(workspaceId, userId);
+            if (existing) return existing;
+            const member = {
+                id: randomId(),
+                workspace_id: workspaceId,
+                user_id: userId,
+                role: role || WORKSPACE_ROLE.MEMBER,
+                joined_at: now(),
+            };
+            state.workspace_members.push(member);
+            const ws = this.findWorkspaceById(workspaceId);
+            if (ws) ws.updated_at = now();
+            schedulePersist();
+            return member;
+        },
+
+        resetWorkspaceInviteCode(workspaceId, ownerId, inviteCode) {
+            const ws = this.findWorkspaceById(workspaceId);
+            if (!ws || ws.owner_id !== ownerId) return null;
+            ws.invite_code = String(inviteCode || "").trim();
+            ws.updated_at = now();
+            schedulePersist();
+            return ws;
+        },
+
+        archiveWorkspace(workspaceId, ownerId) {
+            const ws = state.workspaces.find((w) => w.id === workspaceId && w.status !== WORKSPACE_STATUS.ARCHIVED);
+            if (!ws || ws.owner_id !== ownerId) return null;
+            ws.status = WORKSPACE_STATUS.ARCHIVED;
+            ws.updated_at = now();
+            schedulePersist();
+            return ws;
+        },
+
+        createWorkspaceItem(record) {
+            const item = {
+                id: randomId(),
+                workspace_id: record.workspaceId,
+                kind: record.kind,
+                title: String(record.title || "").slice(0, 200),
+                note: String(record.note || "").slice(0, 1000),
+                category: String(record.category || "").slice(0, 80),
+                tags: Array.isArray(record.tags) ? record.tags.map((t) => String(t).slice(0, 40)).slice(0, 20) : [],
+                prompt: String(record.prompt || "").slice(0, 4000),
+                model: String(record.model || "").slice(0, 120),
+                file_id: record.fileId || null,
+                text_content: record.textContent != null ? String(record.textContent).slice(0, 20000) : "",
+                width: Number(record.width || 0) || 0,
+                height: Number(record.height || 0) || 0,
+                bytes: Number(record.bytes || 0) || 0,
+                mime: String(record.mime || "").slice(0, 120),
+                source_type: String(record.sourceType || "").slice(0, 40),
+                source_ref: String(record.sourceRef || "").slice(0, 200),
+                created_by: record.createdBy,
+                created_at: now(),
+                updated_at: now(),
+                deleted_at: null,
+            };
+            state.workspace_items.unshift(item);
+            const ws = this.findWorkspaceById(record.workspaceId);
+            if (ws) ws.updated_at = now();
+            schedulePersist();
+            return item;
+        },
+
+        listWorkspaceItems(workspaceId, { kind, page = 1, pageSize = 50 } = {}) {
+            let rows = state.workspace_items.filter((i) => i.workspace_id === workspaceId && !i.deleted_at);
+            if (kind) {
+                const kinds = String(kind)
+                    .split(",")
+                    .map((k) => k.trim())
+                    .filter(Boolean);
+                if (kinds.length) rows = rows.filter((i) => kinds.includes(i.kind));
+            }
+            const total = rows.length;
+            const start = Math.max(0, (page - 1) * pageSize);
+            return { items: rows.slice(start, start + pageSize), total, page, page_size: pageSize };
+        },
+
+        findWorkspaceItem(itemId, workspaceId) {
+            return state.workspace_items.find((i) => i.id === itemId && i.workspace_id === workspaceId && !i.deleted_at) || null;
+        },
+
+        softDeleteWorkspaceItem(itemId, workspaceId) {
+            const item = this.findWorkspaceItem(itemId, workspaceId);
+            if (!item) return null;
+            item.deleted_at = now();
+            item.updated_at = now();
+            const ws = this.findWorkspaceById(workspaceId);
+            if (ws) ws.updated_at = now();
+            schedulePersist();
+            return item;
+        },
+
+        findFileById(fileId) {
+            return state.files.find((f) => f.id === fileId && !f.deleted_at) || null;
+        },
+
+        /** File is readable by workspace members when linked from a workspace item or task deliverable. */
+        findWorkspaceFileAccess(fileId, userId) {
+            const file = this.findFileById(fileId);
+            if (!file) return null;
+            const item = state.workspace_items.find((i) => i.file_id === fileId && !i.deleted_at);
+            if (item) {
+                const ws = this.findWorkspaceById(item.workspace_id);
+                if (!ws) return null;
+                const membership = this.findMembership(ws.id, userId);
+                if (!membership) return null;
+                return { file, item, workspace: ws, membership };
+            }
+            const task = state.workspace_tasks.find((t) => t.deliverable_file_id === fileId && !t.deleted_at);
+            if (!task) return null;
+            const ws = this.findWorkspaceById(task.workspace_id);
+            if (!ws) return null;
+            const membership = this.findMembership(ws.id, userId);
+            if (!membership) return null;
+            return { file, task, workspace: ws, membership };
+        },
+
+        createWorkspaceTask(record) {
+            const assigneeIds = normalizeAssigneeUserIds(record.assigneeUserIds ?? record.assigneeUserId);
+            const task = {
+                id: randomId(),
+                workspace_id: record.workspaceId,
+                title: String(record.title || "").trim().slice(0, 200) || "未命名任务",
+                body: String(record.body || "").slice(0, 4000),
+                status: record.status || WORKSPACE_TASK_STATUS.TODO,
+                // Multi-assignee; keep legacy single field as first id for older clients.
+                assignee_user_ids: assigneeIds,
+                assignee_user_id: assigneeIds[0] || null,
+                deliverable_file_id: record.deliverableFileId || null,
+                deliverable_name: String(record.deliverableName || "").slice(0, 200),
+                deliverable_mime: String(record.deliverableMime || "").slice(0, 120),
+                deliverable_bytes: Number(record.deliverableBytes || 0) || 0,
+                created_by: record.createdBy,
+                sort_order: Number(record.sortOrder || Date.now()) || Date.now(),
+                created_at: now(),
+                updated_at: now(),
+                deleted_at: null,
+            };
+            state.workspace_tasks.unshift(task);
+            const ws = this.findWorkspaceById(record.workspaceId);
+            if (ws) ws.updated_at = now();
+            schedulePersist();
+            return task;
+        },
+
+        listWorkspaceTasks(workspaceId) {
+            return state.workspace_tasks
+                .filter((t) => t.workspace_id === workspaceId && !t.deleted_at)
+                .sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0));
+        },
+
+        findWorkspaceTask(taskId, workspaceId) {
+            return state.workspace_tasks.find((t) => t.id === taskId && t.workspace_id === workspaceId && !t.deleted_at) || null;
+        },
+
+        updateWorkspaceTask(taskId, workspaceId, patch) {
+            const task = this.findWorkspaceTask(taskId, workspaceId);
+            if (!task) return null;
+            if (patch.title != null) task.title = String(patch.title).trim().slice(0, 200) || task.title;
+            if (patch.body != null) task.body = String(patch.body).slice(0, 4000);
+            if (patch.status != null) task.status = String(patch.status);
+            if (patch.assigneeUserIds !== undefined || patch.assigneeUserId !== undefined) {
+                const assigneeIds = normalizeAssigneeUserIds(
+                    patch.assigneeUserIds !== undefined ? patch.assigneeUserIds : patch.assigneeUserId,
+                );
+                task.assignee_user_ids = assigneeIds;
+                task.assignee_user_id = assigneeIds[0] || null;
+            }
+            if (patch.deliverableFileId !== undefined) {
+                task.deliverable_file_id = patch.deliverableFileId || null;
+                task.deliverable_name = String(patch.deliverableName || "").slice(0, 200);
+                task.deliverable_mime = String(patch.deliverableMime || "").slice(0, 120);
+                task.deliverable_bytes = Number(patch.deliverableBytes || 0) || 0;
+            }
+            if (patch.clearDeliverable) {
+                task.deliverable_file_id = null;
+                task.deliverable_name = "";
+                task.deliverable_mime = "";
+                task.deliverable_bytes = 0;
+            }
+            if (patch.sortOrder != null) task.sort_order = Number(patch.sortOrder) || task.sort_order;
+            task.updated_at = now();
+            const ws = this.findWorkspaceById(workspaceId);
+            if (ws) ws.updated_at = now();
+            schedulePersist();
+            return task;
+        },
+
+        softDeleteWorkspaceTask(taskId, workspaceId) {
+            const task = this.findWorkspaceTask(taskId, workspaceId);
+            if (!task) return null;
+            task.deleted_at = now();
+            task.updated_at = now();
+            const ws = this.findWorkspaceById(workspaceId);
+            if (ws) ws.updated_at = now();
+            schedulePersist();
+            return task;
+        },
     };
 }
 
@@ -621,5 +920,99 @@ export function publicJob(job, file, extra = {}) {
                   url: `/api/files/${file.id}`,
               }
             : null,
+    };
+}
+
+export function publicWorkspace(workspace, membership = null, extra = {}) {
+    if (!workspace) return null;
+    return {
+        id: workspace.id,
+        name: workspace.name,
+        owner_id: workspace.owner_id,
+        // Invite code only returned to members (caller decides); owner sees it for sharing.
+        invite_code: extra.includeInvite ? workspace.invite_code || "" : undefined,
+        status: workspace.status,
+        created_at: workspace.created_at,
+        updated_at: workspace.updated_at,
+        role: membership?.role || null,
+        member_count: extra.memberCount,
+        ...extra.publicFields,
+    };
+}
+
+export function publicWorkspaceItem(item, extra = {}) {
+    if (!item) return null;
+    return {
+        id: item.id,
+        workspace_id: item.workspace_id,
+        kind: item.kind,
+        title: item.title,
+        note: item.note || "",
+        category: item.category || "",
+        tags: Array.isArray(item.tags) ? item.tags : [],
+        prompt: item.prompt || "",
+        model: item.model || "",
+        file_id: item.file_id || null,
+        text_content: item.text_content || "",
+        width: item.width || 0,
+        height: item.height || 0,
+        bytes: item.bytes || 0,
+        mime: item.mime || "",
+        source_type: item.source_type || "",
+        source_ref: item.source_ref || "",
+        created_by: item.created_by,
+        created_by_name: extra.created_by_name || "",
+        created_by_email: extra.created_by_email || "",
+        created_at: item.created_at,
+        updated_at: item.updated_at,
+        file_url: item.file_id ? `/api/workspace-files/${item.file_id}` : null,
+        ...extra,
+    };
+}
+
+/** Normalize single id / id[] into unique non-empty string ids (max 20). */
+export function normalizeAssigneeUserIds(input) {
+    const raw = Array.isArray(input) ? input : input ? [input] : [];
+    const seen = new Set();
+    const out = [];
+    for (const value of raw) {
+        const id = String(value || "").trim();
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        out.push(id);
+        if (out.length >= 20) break;
+    }
+    return out;
+}
+
+export function publicWorkspaceTask(task, extra = {}) {
+    if (!task) return null;
+    const assigneeIds = normalizeAssigneeUserIds(
+        Array.isArray(task.assignee_user_ids) && task.assignee_user_ids.length
+            ? task.assignee_user_ids
+            : task.assignee_user_id,
+    );
+    const deliverableFileId = task.deliverable_file_id || null;
+    return {
+        id: task.id,
+        workspace_id: task.workspace_id,
+        title: task.title,
+        body: task.body || "",
+        status: task.status,
+        assignee_user_ids: assigneeIds,
+        // Legacy single field: first assignee (or null).
+        assignee_user_id: assigneeIds[0] || null,
+        assignees: Array.isArray(extra.assignees) ? extra.assignees : undefined,
+        deliverable_file_id: deliverableFileId,
+        deliverable_name: task.deliverable_name || "",
+        deliverable_mime: task.deliverable_mime || "",
+        deliverable_bytes: Number(task.deliverable_bytes || 0) || 0,
+        deliverable_url: deliverableFileId ? `/api/workspace-files/${deliverableFileId}` : null,
+        created_by: task.created_by,
+        created_by_name: extra.created_by_name || "",
+        created_by_email: extra.created_by_email || "",
+        sort_order: task.sort_order,
+        created_at: task.created_at,
+        updated_at: task.updated_at,
     };
 }

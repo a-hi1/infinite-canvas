@@ -12,7 +12,8 @@ description: 当前项目后续值得处理的事项
 - **当前主线（S0 已出门，收费仍后置）：** 本地 BYOK + 云双轨/画布素材同步已验收 + **个人自用体验优化** + 上游按矩阵小切片。S1 图生图边界已合入 `main`；**视频多参考图首图静默退化已修**；ai-proxy 白名单/Vitest lock 等微修仍可暂缓。完整矩阵见 [上游跟进矩阵](/docs/progress/upstream-follow)。运维见 [日常运维自检](/docs/progress/ops-daily)。
 - 云端账号 P0.5c / S0：**已出门** — [P0.5c 验稳收口](/docs/progress/p05c-acceptance) 与 [S0 人工验收清单](/docs/progress/s0-human-checklist) A/B/C/D 均已勾选；自动 `check-cloud-stack` + `smoke-dual-track` 硬失败 0。账号积分余额展示已打开；平台代生成仍默认关。**支付/插件大改仍勿抢跑。**
 - 云端账号 P1：底座 A～G 代码已在（网关+账本默认关）。**画布扣积分 / 平台扣积分 / 支付均后置**（需明确要收费再开）。
-- 云端账号 P2：**P2.0-A/B/C 代码已完成且 S0 已点验**（projects/blobs/assets + tombstone）；**未做：** Postgres、S3、素材跨用户分享、完整可调宽画布侧栏。
+- 云端账号 P2：**P2.0-A/B/C 代码已完成且 S0 已点验**（projects/blobs/assets + tombstone）；**未做：** Postgres、S3、完整可调宽画布侧栏。
+- 协作工作空间后续（MVP 代码已落地，待人工验收）：WebSocket 实时推送、服务端 `copy-from-job` 免客户端中转、空间级配额与踢人、匿名只读链接、画布项目实时协作均后置；勿与私有 assets LWW 混表。
 - 上游跟进：对照 **`v0.10.0`**；**不整仓 merge**；推送 `a-hi1`。已移植：透明背景、组节点（最小）、模型调用脚本、导出当前/选中节点、**生成后保留节点提示词**、**节点名默认隐藏**、**提示词搜索防抖**。**明确不做（现阶段）：** 完整侧栏资产 Tab（用独立素材库）、整包侧栏/插件 registry、GA/百度、@ 行内缩略图（光标风险高）。**下一优先：** 自用体验小切片（提示词源 JSON / 来源状态卡等按需）→ 有需要再「仅节点列表」→（独立工程）插件系统。
 - 渠道生图兼容：`compatProfile` = auto / openai / openai-slim / grok-image / relay-fragile。**auto 与历史行为一致**（/lan-ai→Grok 比例；codex2api→fragile；其它→OpenAI）。换中转优先改预设，复杂协议再用模型自定义脚本。
 - 提示词库预览：精选只认可用封面 + 坏链 runtime 剔除已落地；单条「生成预览图」按需 BYOK 已落地。**不做：** 打开库自动批量给无图条目生封面；一键「给所有精选补图」。后续若有需要，仅考虑「我的提示词」小批量补图。

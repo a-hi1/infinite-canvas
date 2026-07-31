@@ -2,6 +2,7 @@ import { Check, Download, Pencil, Trash2, X } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button, Input, Tag } from "antd";
 
+import { SelectCheckbox } from "@/components/ui/select-checkbox";
 import { cloudSyncColor } from "@/lib/cloud-sync";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import type { CanvasCloudBadge } from "@/services/canvas-cloud-sync";
@@ -45,13 +46,12 @@ export function CanvasProjectCard({ project, cloudBadge = "local" }: { project: 
     return (
         <article className="group flex min-h-44 cursor-pointer flex-col justify-between rounded-2xl bg-[#f1eee8] p-5 transition hover:bg-[#ebe6dc] dark:bg-white/5 dark:hover:bg-white/10" onClick={() => !editing && open()}>
             <div className="flex items-start gap-3">
-                <input
-                    type="checkbox"
+                <SelectCheckbox
+                    variant="inline"
+                    className="mt-1"
                     checked={selected}
-                    onClick={(event) => event.stopPropagation()}
-                    onChange={(event) => toggleSelected(project.id, event.target.checked)}
-                    className="mt-1 size-4 accent-stone-950 dark:accent-stone-100"
                     aria-label={`选择 ${project.title}`}
+                    onChange={(checked) => toggleSelected(project.id, checked)}
                 />
                 {editing ? (
                     <Input className="min-w-0" value={editingTitle} onClick={(event) => event.stopPropagation()} onChange={(event) => setEditingTitle(event.target.value)} onKeyDown={(event) => event.key === "Enter" && saveTitle()} autoFocus />

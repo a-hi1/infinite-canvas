@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { App, Button, Checkbox, Empty, Image, Modal, Spin, Tag, Typography } from "antd";
-import { CheckSquare, Download, Expand, RefreshCw, Trash2 } from "lucide-react";
+import { App, Button, Empty, Image, Modal, Spin, Tag, Typography } from "antd";
+import { CheckSquare, Download, Expand, RefreshCw, Share2, Trash2 } from "lucide-react";
 import { saveAs } from "file-saver";
 
+import { SelectCheckbox, SelectionCount, SelectionToolbar } from "@/components/ui/select-checkbox";
+import { ShareToWorkspaceModal, type ShareDraft } from "@/components/workspace/share-to-workspace-modal";
 import { cloudFileObjectUrl, deleteCloudJob, listCloudJobs, type CloudJob } from "@/services/cloud-api";
+import { WORKSPACE_ITEM_KIND, WORKSPACE_ITEM_SOURCE } from "@/services/workspace-api";
 import { useAuthStore } from "@/stores/use-auth-store";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +28,8 @@ export function CloudHistoryPanel({ type, refreshKey = 0 }: Props) {
     const [error, setError] = useState("");
     const [videoPreview, setVideoPreview] = useState<{ url: string; title: string } | null>(null);
     const [selectedIds, setSelectedIds] = useState<string[]>([]);
+    const [shareDrafts, setShareDrafts] = useState<ShareDraft[]>([]);
+    const [shareOpen, setShareOpen] = useState(false);
 
     const load = useCallback(async () => {
         if (!user) {
@@ -142,6 +147,54 @@ export function CloudHistoryPanel({ type, refreshKey = 0 }: Props) {
         }
     };
 
+    const openShareJobs = async (jobs: CloudJob[]) => {
+        if (!jobs.length) {
+            message.warning("请先勾选要分享的云端记录");
+            return;
+        }
+        setBatchBusy(true);
+        const drafts: ShareDraft[] = [];
+        let failed = 0;
+        try {
+            for (const job of jobs) {
+                if (!job.file?.url) {
+                    failed += 1;
+                    continue;
+                }
+                try {
+                    const objectUrl = await cloudFileObjectUrl(job.file.url);
+                    const blob = await fetch(objectUrl).then((res) => res.blob());
+                    URL.revokeObjectURL(objectUrl);
+                    drafts.push({
+                        kind: type === "video" ? WORKSPACE_ITEM_KIND.GEN_VIDEO : WORKSPACE_ITEM_KIND.GEN_IMAGE,
+                        title: job.prompt?.slice(0, 80) || (type === "video" ? "云端视频" : "云端图片"),
+                        prompt: job.prompt || "",
+                        model: job.model || "",
+                        blob,
+                        bytes: blob.size,
+                        mime: blob.type || job.file.mime || (type === "video" ? "video/mp4" : "image/png"),
+                        width: job.file.width,
+                        height: job.file.height,
+                        sourceType: WORKSPACE_ITEM_SOURCE.WORKBENCH_CLOUD,
+                        sourceRef: job.id,
+                        filename: type === "video" ? `${job.id}.mp4` : `${job.id}.png`,
+                    });
+                } catch {
+                    failed += 1;
+                }
+            }
+            if (!drafts.length) {
+                message.error(failed ? "无法读取云端文件，分享失败" : "没有可分享的内容");
+                return;
+            }
+            if (failed) message.warning(`${failed} 项读取失败，将分享其余 ${drafts.length} 项`);
+            setShareDrafts(drafts);
+            setShareOpen(true);
+        } finally {
+            setBatchBusy(false);
+        }
+    };
+
     const handleBatchDelete = () => {
         if (!selectedJobs.length) {
             message.warning("请先勾选要删除的云端记录");
@@ -193,27 +246,32 @@ export function CloudHistoryPanel({ type, refreshKey = 0 }: Props) {
             </div>
 
             {items.length ? (
-                <div className="flex flex-col gap-2 rounded-lg border border-stone-200 bg-card/70 p-2.5 dark:border-stone-800">
+                <SelectionToolbar active={selectedIds.length > 0} className="gap-2 p-2.5 sm:flex-col sm:items-stretch">
                     <div className="flex flex-wrap items-center gap-2">
-                        <Checkbox
+                        <SelectCheckbox
+                            variant="toolbar"
                             checked={allSelected}
                             indeterminate={!allSelected && someSelected}
                             disabled={!itemIds.length || batchBusy}
-                            onChange={(event) => {
-                                if (event.target.checked) selectAll();
+                            label={`全选当前列表（${items.length}）`}
+                            aria-label="全选当前列表"
+                            onChange={(checked) => {
+                                if (checked) selectAll();
                                 else clearSelection();
                             }}
-                        >
-                            全选当前列表（{items.length}）
-                        </Checkbox>
-                        <span className="text-[11px] text-stone-500 dark:text-stone-400">
-                            已选 {selectedIds.length} 项
-                            {selectedIds.length ? " · 单卡下载/删除仍可用" : " · 勾选后可批量下载/删除"}
-                        </span>
+                        />
+                        <SelectionCount
+                            count={selectedIds.length}
+                            idleHint="勾选后可批量下载/分享/删除"
+                            activeHint="已选 · 单卡下载/分享/删除仍可用"
+                        />
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                         <Button size="small" icon={<Download className="size-3.5" />} disabled={!selectedIds.length || batchBusy} loading={batchBusy} onClick={() => void handleBatchDownload()}>
                             下载选中
+                        </Button>
+                        <Button size="small" icon={<Share2 className="size-3.5" />} disabled={!selectedIds.length || batchBusy} loading={batchBusy} onClick={() => void openShareJobs(selectedJobs)}>
+                            分享选中
                         </Button>
                         <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedIds.length || batchBusy} onClick={handleBatchDelete}>
                             删除选中
@@ -222,7 +280,7 @@ export function CloudHistoryPanel({ type, refreshKey = 0 }: Props) {
                             清空选择
                         </Button>
                     </div>
-                </div>
+                </SelectionToolbar>
             ) : null}
 
             {loading && !items.length ? (
@@ -241,6 +299,7 @@ export function CloudHistoryPanel({ type, refreshKey = 0 }: Props) {
                         onSelectedChange={(checked) => toggleSelected(job.id, checked)}
                         onDelete={() => handleDelete(job)}
                         onDownload={() => void handleDownload(job)}
+                        onShare={() => void openShareJobs([job])}
                         onOpenVideoPreview={(url) => setVideoPreview({ url, title: job.prompt || "云端视频" })}
                     />
                 ))}
@@ -259,6 +318,14 @@ export function CloudHistoryPanel({ type, refreshKey = 0 }: Props) {
                     <video src={videoPreview.url} controls autoPlay playsInline className="max-h-[70vh] w-full rounded-lg bg-black object-contain" />
                 ) : null}
             </Modal>
+            <ShareToWorkspaceModal
+                open={shareOpen}
+                drafts={shareDrafts}
+                onClose={() => {
+                    setShareOpen(false);
+                    setShareDrafts([]);
+                }}
+            />
         </div>
     );
 }
@@ -270,6 +337,7 @@ function CloudJobCard({
     onSelectedChange,
     onDelete,
     onDownload,
+    onShare,
     onOpenVideoPreview,
 }: {
     job: CloudJob;
@@ -278,6 +346,7 @@ function CloudJobCard({
     onSelectedChange: (checked: boolean) => void;
     onDelete: () => void;
     onDownload: () => void;
+    onShare: () => void;
     onOpenVideoPreview: (url: string) => void;
 }) {
     const [previewUrl, setPreviewUrl] = useState("");
@@ -310,13 +379,14 @@ function CloudJobCard({
     const time = job.created_at ? new Date(job.created_at).toLocaleString() : "";
 
     return (
-        <div className={cn("overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800", selected && "ring-2 ring-stone-900 dark:ring-stone-100")}>
+        <div className={cn("overflow-hidden rounded-lg border border-stone-200 bg-background transition dark:border-stone-800", selected && "ring-2 ring-stone-900 ring-offset-1 ring-offset-background dark:ring-stone-100")}>
             <div className={`relative bg-stone-100 dark:bg-stone-900 ${type === "video" ? "aspect-video" : "aspect-square"}`}>
-                <div className="absolute left-2 top-2 z-20" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
-                    <Checkbox
+                <div className="absolute left-2.5 top-2.5 z-20">
+                    <SelectCheckbox
+                        variant="overlay"
                         checked={selected}
-                        className="rounded-md bg-white/90 px-1 shadow-sm dark:bg-stone-950/80"
-                        onChange={(event) => onSelectedChange(event.target.checked)}
+                        aria-label="选择该记录"
+                        onChange={onSelectedChange}
                     />
                 </div>
                 {previewUrl && !previewError ? (
@@ -359,9 +429,12 @@ function CloudJobCard({
                     </Tag>
                 </div>
                 <div className="text-[11px] text-stone-400">{time}</div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                     <Button size="small" icon={<Download className="size-3.5" />} onClick={onDownload}>
                         下载
+                    </Button>
+                    <Button size="small" icon={<Share2 className="size-3.5" />} onClick={onShare}>
+                        分享
                     </Button>
                     <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={onDelete}>
                         删除

@@ -9,6 +9,7 @@
     "render",
     "docker",
     "cloud-api",
+    "workspace",
     "third-party-prompt-repositories",
     "[在线体验](https://canvas.best/)"
   ]

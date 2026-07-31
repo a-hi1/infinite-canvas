@@ -47,6 +47,8 @@
 
 **P2.0-A / P2.0-B / P2.0-C：** `GET/PUT/DELETE /api/projects` + `POST /api/blobs` / `GET /api/blobs/by-key/:clientKey` + `GET/PUT /api/assets`（用户级素材 manifest + tombstones）。项目 JSON、画布媒体、素材清单本地优先同步；推送先媒体后清单/JSON；拉取补齐缺失 blob。云失败不丢本地。Postgres / S3 仍未做。
 
+**协作工作空间 MVP：** 独立 `/workspace` 模块 + `/api/workspaces*`（与私有 assets/jobs 分轨）；显式分享我的资产/工作台历史 + 进度板；邀请码加入；成员读全/传己/删己，owner 可删他人/解散。待人工验收，见 `docs/.../pending-test.mdx`。
+
 **P0.5c：** 已通过并出门。清单 `docs/content/docs/progress/p05c-acceptance.mdx`；自动 `scripts/check-cloud-stack.*` + `scripts/smoke-dual-track.*` 与人工 UI/服务器 B2 均已验收。本机上云占本机 `./data/api`，服务器占服务器 `./data/api`。
 
 **上游跟进：** 矩阵见 `docs/content/docs/progress/upstream-follow.mdx`（对照 **v0.10.0**）。**禁止整仓 merge**；推送 `a-hi1`。已移植：透明背景（BYOK）、组节点（最小）、模型调用脚本（旁路 `modelScripts`）、**画布导出当前/选中节点**、**生成后保留节点提示词**、**节点名默认隐藏**、**提示词搜索防抖**。完整可调宽侧栏/侧栏资产 Tab **现阶段明确不做**（素材用独立素材库；若缺找节点再做最小节点列表）。当前优先自用体验小切片；插件系统保持独立工程。`docker-compose` / `nginx` / 端口 `3001`/`3011` 禁止被上游覆盖。

@@ -1,7 +1,7 @@
-import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Square, Trash2, Upload, WandSparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpen, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, Share2, SlidersHorizontal, Sparkles, Square, Trash2, Upload, WandSparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Segmented, Switch, Tag, Tooltip, Typography } from "antd";
+import { App, Button, Drawer, Empty, Image, Input, Modal, Segmented, Switch, Tag, Tooltip, Typography } from "antd";
 import localforage from "localforage";
 import { saveAs } from "file-saver";
 
@@ -9,6 +9,8 @@ import { ImageSettingsPanel } from "@/components/image-settings-panel";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
+import { SelectCheckbox } from "@/components/ui/select-checkbox";
+import { ShareToWorkspaceModal, type ShareDraft } from "@/components/workspace/share-to-workspace-modal";
 import { suggestAssetCategory } from "@/lib/asset-category";
 import { assetTitleFromPrompt } from "@/lib/asset-display";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -28,6 +30,7 @@ import { formatYuanFromCents, hasEnoughCredits, isPlatformImageReady, platformIm
 import { generatePlatformImage, isStorageQuotaError } from "@/services/cloud-api";
 import { saveImageToCloudDetailed } from "@/services/cloud-history";
 import { deleteStoredImages, ensureLocalImageDataUrl, resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { WORKSPACE_ITEM_KIND, WORKSPACE_ITEM_SOURCE } from "@/services/workspace-api";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useAuthStore } from "@/stores/use-auth-store";
 import type { ReferenceImage } from "@/types/image";
@@ -120,6 +123,8 @@ export default function ImagePage() {
     const [previewLog, setPreviewLog] = useState<GenerationLog | null>(null);
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
     const [historySource, setHistorySource] = useState<"local" | "cloud">("local");
+    const [shareDrafts, setShareDrafts] = useState<ShareDraft[]>([]);
+    const [shareOpen, setShareOpen] = useState(false);
     const [cloudRefreshKey, setCloudRefreshKey] = useState(0);
     const [preferPlatformImage, setPreferPlatformImage] = useState(() => {
         try {
@@ -860,6 +865,41 @@ export default function ImagePage() {
         }
     };
 
+    const openShareLogs = (targetLogs: GenerationLog[]) => {
+        if (!cloudUser) {
+            message.info("登录后可将生成结果分享到工作空间");
+            return;
+        }
+        const drafts: ShareDraft[] = [];
+        for (const log of targetLogs) {
+            if (log.status !== "成功") continue;
+            for (const image of log.images || []) {
+                if (!image.storageKey && !image.dataUrl) continue;
+                drafts.push({
+                    kind: WORKSPACE_ITEM_KIND.GEN_IMAGE,
+                    title: log.title || assetTitleFromPrompt(log.prompt, "生成图片"),
+                    prompt: log.prompt,
+                    model: log.model || log.config.imageModel || log.config.model,
+                    storageKey: image.storageKey,
+                    mediaUrl: image.dataUrl,
+                    width: image.width,
+                    height: image.height,
+                    bytes: image.bytes,
+                    mime: image.mimeType,
+                    sourceType: WORKSPACE_ITEM_SOURCE.WORKBENCH_LOCAL,
+                    sourceRef: `${log.id}:${image.id}`,
+                    filename: `${log.title || "image"}.png`,
+                });
+            }
+        }
+        if (!drafts.length) {
+            message.warning("所选记录没有可分享的本地图片（需成功且可读）");
+            return;
+        }
+        setShareDrafts(drafts);
+        setShareOpen(true);
+    };
+
     const retryCloudSync = (log: GenerationLog) => {
         if (!cloudUser) {
             message.warning("请先登录后再同步到云端");
@@ -905,6 +945,8 @@ export default function ImagePage() {
                         onDeleteSelected={() => setDeleteConfirmOpen(true)}
                         onPreviewLog={(log) => void previewGenerationLog(log)}
                         onRetryCloud={retryCloudSync}
+                        onShareSelected={() => openShareLogs(logs.filter((log) => selectedLogIds.includes(log.id)))}
+                        onShareLog={(log) => openShareLogs([log])}
                         onStopLog={stopImageJob}
                         stoppableLogIds={Array.from(activeImageJobsRef.current)}
                     />
@@ -1137,6 +1179,8 @@ export default function ImagePage() {
                     onDeleteSelected={() => setDeleteConfirmOpen(true)}
                     onPreviewLog={(log) => void previewGenerationLog(log)}
                     onRetryCloud={retryCloudSync}
+                    onShareSelected={() => openShareLogs(logs.filter((log) => selectedLogIds.includes(log.id)))}
+                    onShareLog={(log) => openShareLogs([log])}
                     onStopLog={stopImageJob}
                     stoppableLogIds={Array.from(activeImageJobsRef.current)}
                 />
@@ -1157,6 +1201,14 @@ export default function ImagePage() {
             <Modal title="删除生成记录" open={deleteConfirmOpen} onCancel={() => setDeleteConfirmOpen(false)} onOk={deleteSelectedLogs} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
                 确定删除选中的 {selectedLogIds.length} 条生成记录吗？
             </Modal>
+            <ShareToWorkspaceModal
+                open={shareOpen}
+                drafts={shareDrafts}
+                onClose={() => {
+                    setShareOpen(false);
+                    setShareDrafts([]);
+                }}
+            />
         </div>
     );
 }
@@ -1298,6 +1350,8 @@ function LogPanel({
     onDeleteSelected,
     onPreviewLog,
     onRetryCloud,
+    onShareSelected,
+    onShareLog,
     onStopLog,
     stoppableLogIds = [],
 }: {
@@ -1313,11 +1367,12 @@ function LogPanel({
     onDeleteSelected: () => void;
     onPreviewLog: (log: GenerationLog) => void;
     onRetryCloud?: (log: GenerationLog) => void;
+    onShareSelected?: () => void;
+    onShareLog?: (log: GenerationLog) => void;
     onStopLog?: (logId: string) => void;
     stoppableLogIds?: string[];
 }) {
     const allSelected = Boolean(logs.length) && selectedLogIds.length === logs.length;
-    const toggleAll = () => onSelectedLogIdsChange(allSelected ? [] : logs.map((log) => log.id));
     const showCloud = historySource === "cloud";
     const stoppable = new Set(stoppableLogIds);
 
@@ -1348,13 +1403,29 @@ function LogPanel({
                 <CloudHistoryPanel type="image" refreshKey={cloudRefreshKey} />
             ) : (
                 <>
-                    <div className="mb-4 flex flex-wrap gap-2">
+                    <div className="mb-4 flex flex-wrap items-center gap-2">
                         <Button size="small" icon={<Plus className="size-3.5" />} onClick={onCreateSession}>
                             新建
                         </Button>
-                        <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!logs.length} onClick={toggleAll}>
-                            {allSelected ? "取消" : "全选"}
-                        </Button>
+                        <SelectCheckbox
+                            variant="toolbar"
+                            checked={allSelected}
+                            indeterminate={!allSelected && selectedLogIds.length > 0}
+                            disabled={!logs.length}
+                            label={allSelected ? "取消全选" : "全选"}
+                            aria-label={allSelected ? "取消全选" : "全选"}
+                            onChange={(checked) => onSelectedLogIdsChange(checked ? logs.map((log) => log.id) : [])}
+                        />
+                        {selectedLogIds.length ? (
+                            <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-stone-900 px-1.5 text-[11px] font-medium tabular-nums text-white dark:bg-stone-100 dark:text-stone-900">
+                                {selectedLogIds.length}
+                            </span>
+                        ) : null}
+                        {onShareSelected ? (
+                            <Button size="small" icon={<Share2 className="size-3.5" />} disabled={!selectedLogIds.length} onClick={onShareSelected}>
+                                分享
+                            </Button>
+                        ) : null}
                         <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedLogIds.length} onClick={onDeleteSelected}>
                             删除
                         </Button>
@@ -1370,6 +1441,7 @@ function LogPanel({
                                 onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))}
                                 onClick={() => onPreviewLog(log)}
                                 onRetryCloud={onRetryCloud}
+                                onShare={onShareLog && log.status === "成功" ? () => onShareLog(log) : undefined}
                                 onStop={onStopLog ? () => onStopLog(log.id) : undefined}
                             />
                         ))}
@@ -1389,6 +1461,7 @@ function LogCard({
     onSelectedChange,
     onClick,
     onRetryCloud,
+    onShare,
     onStop,
 }: {
     log: GenerationLog;
@@ -1398,6 +1471,7 @@ function LogCard({
     onSelectedChange: (checked: boolean) => void;
     onClick: () => void;
     onRetryCloud?: (log: GenerationLog) => void;
+    onShare?: () => void;
     onStop?: () => void;
 }) {
     const thumbnails = (log.thumbnails || []).filter(Boolean).slice(0, 4);
@@ -1418,7 +1492,7 @@ function LogCard({
         >
             <div className="grid grid-cols-[minmax(128px,1fr)_auto] gap-2">
                 <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-2">
-                    <Checkbox className="mt-0.5" checked={selected} onClick={(event) => event.stopPropagation()} onChange={(event) => onSelectedChange(event.target.checked)} />
+                    <SelectCheckbox className="mt-0.5" checked={selected} aria-label="选择该记录" onChange={onSelectedChange} />
                     <div className="min-w-0">
                         <div className="truncate text-sm font-semibold leading-5">{log.title}</div>
                         {thumbnails.length ? (
@@ -1432,6 +1506,13 @@ function LogCard({
                             <div className="mt-2" onClick={(event) => event.stopPropagation()}>
                                 <Button size="small" danger icon={<Square className="size-3.5" />} onClick={onStop}>
                                     停止
+                                </Button>
+                            </div>
+                        ) : null}
+                        {onShare ? (
+                            <div className="mt-2" onClick={(event) => event.stopPropagation()}>
+                                <Button size="small" icon={<Share2 className="size-3.5" />} onClick={onShare}>
+                                    分享
                                 </Button>
                             </div>
                         ) : null}

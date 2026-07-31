@@ -80,7 +80,46 @@ export const CLOUD_ERROR_REASON = {
     PLATFORM_UPSTREAM_NOT_CONFIGURED: "platform_upstream_not_configured",
     PLATFORM_UPSTREAM_FAILED: "platform_upstream_failed",
     PLATFORM_NO_IMAGE: "platform_no_image",
+    WORKSPACE_NOT_FOUND: "workspace_not_found",
+    WORKSPACE_FORBIDDEN: "workspace_forbidden",
+    WORKSPACE_INVITE_INVALID: "workspace_invite_invalid",
+    WORKSPACE_ALREADY_MEMBER: "workspace_already_member",
+    WORKSPACE_ARCHIVED: "workspace_archived",
+    WORKSPACE_ITEM_NOT_FOUND: "workspace_item_not_found",
+    WORKSPACE_TASK_NOT_FOUND: "workspace_task_not_found",
     INTERNAL_ERROR: "internal_error",
+} as const;
+
+export const WORKSPACE_ROLE = {
+    OWNER: "owner",
+    MEMBER: "member",
+} as const;
+
+export const WORKSPACE_STATUS = {
+    ACTIVE: "active",
+    ARCHIVED: "archived",
+} as const;
+
+export const WORKSPACE_ITEM_KIND = {
+    ASSET_IMAGE: "asset_image",
+    ASSET_VIDEO: "asset_video",
+    ASSET_TEXT: "asset_text",
+    GEN_IMAGE: "gen_image",
+    GEN_VIDEO: "gen_video",
+} as const;
+
+export const WORKSPACE_ITEM_SOURCE = {
+    ASSET: "asset",
+    WORKBENCH_LOCAL: "workbench_local",
+    WORKBENCH_CLOUD: "workbench_cloud",
+    /** Direct browser file upload into a workspace (not from private assets/history). */
+    LOCAL_UPLOAD: "local_upload",
+} as const;
+
+export const WORKSPACE_TASK_STATUS = {
+    TODO: "todo",
+    DOING: "doing",
+    DONE: "done",
 } as const;
 
 export type CloudErrorReason = (typeof CLOUD_ERROR_REASON)[keyof typeof CLOUD_ERROR_REASON];

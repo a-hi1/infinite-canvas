@@ -1,9 +1,11 @@
-import { CheckSquare, CloudDownload, Copy, Download, ImagePlus, PencilLine, Search, Trash2, Upload, VideoIcon } from "lucide-react";
+import { CheckSquare, CloudDownload, Copy, Download, ImagePlus, PencilLine, Search, Share2, Trash2, Upload, VideoIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useNavigate } from "react-router-dom";
-import { App, Button, Card, Checkbox, Drawer, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Spin, Tag, Typography } from "antd";
+import { App, Button, Card, Drawer, Empty, Form, Image, Input, Modal, Pagination, Select, Space, Spin, Tag, Typography } from "antd";
 import { saveAs } from "file-saver";
 
+import { SelectCheckbox, SelectionCount, SelectionToolbar } from "@/components/ui/select-checkbox";
+import { draftsFromAssets, ShareToWorkspaceModal } from "@/components/workspace/share-to-workspace-modal";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { cloudSyncColor } from "@/lib/cloud-sync";
 import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
@@ -83,6 +85,8 @@ export default function AssetsPage() {
     const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
     const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
     const [batchCategory, setBatchCategory] = useState<string | undefined>(undefined);
+    const [shareDrafts, setShareDrafts] = useState<ReturnType<typeof draftsFromAssets>>([]);
+    const [shareOpen, setShareOpen] = useState(false);
     const [editingAsset, setEditingAsset] = useState<Asset | null>(null);
     const [isAssetOpen, setIsAssetOpen] = useState(false);
     const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
@@ -485,6 +489,19 @@ export default function AssetsPage() {
         message.success(category ? `已将 ${selectedAssets.length} 项设为「${assetCategoryLabel(category)}」` : `已清除 ${selectedAssets.length} 项分类`);
     };
 
+    const openShareAssets = (assets: Asset[]) => {
+        if (!cloudUser) {
+            message.info("登录后可将选中内容分享到工作空间");
+            return;
+        }
+        if (!assets.length) {
+            message.warning("请先选择要分享的资产");
+            return;
+        }
+        setShareDrafts(draftsFromAssets(assets));
+        setShareOpen(true);
+    };
+
     const confirmBatchDelete = () => {
         if (!selectedAssets.length) {
             setBatchDeleteOpen(false);
@@ -663,23 +680,25 @@ export default function AssetsPage() {
                         </section>
                     ) : (
                         <>
-                            <div className="flex flex-col gap-3 rounded-xl border border-stone-200 bg-card/80 p-3 shadow-sm dark:border-stone-800 sm:flex-row sm:items-center sm:justify-between">
-                                <div className="flex flex-wrap items-center gap-3">
-                                    <Checkbox
+                            <SelectionToolbar active={selectedAssetIds.length > 0}>
+                                <div className="flex min-w-0 flex-wrap items-center gap-3">
+                                    <SelectCheckbox
+                                        variant="toolbar"
                                         checked={allFilteredSelected}
                                         indeterminate={!allFilteredSelected && someFilteredSelected}
                                         disabled={!filteredAssetIds.length}
-                                        onChange={(event) => {
-                                            if (event.target.checked) selectAllFiltered();
+                                        label={`全选当前筛选（${filteredAssets.length}）`}
+                                        aria-label="全选当前筛选"
+                                        onChange={(checked) => {
+                                            if (checked) selectAllFiltered();
                                             else clearSelection();
                                         }}
-                                    >
-                                        全选当前筛选（{filteredAssets.length}）
-                                    </Checkbox>
-                                    <span className="text-xs text-stone-500 dark:text-stone-400">
-                                        已选 {selectedAssetIds.length} 项
-                                        {selectedAssetIds.length ? " · 单卡操作仍可用" : " · 勾选卡片后可批量导出/分类/删除"}
-                                    </span>
+                                    />
+                                    <SelectionCount
+                                        count={selectedAssetIds.length}
+                                        idleHint="勾选卡片后可批量导出/分类/分享/删除"
+                                        activeHint="已选 · 单卡操作仍可用"
+                                    />
                                 </div>
                                 <div className="flex flex-wrap items-center gap-2">
                                     <Select
@@ -699,6 +718,9 @@ export default function AssetsPage() {
                                     <Button size="small" icon={<Download className="size-3.5" />} disabled={!selectedAssetIds.length} onClick={() => void exportSelectedAssets()}>
                                         导出选中
                                     </Button>
+                                    <Button size="small" icon={<Share2 className="size-3.5" />} disabled={!selectedAssetIds.length} onClick={() => openShareAssets(selectedAssets)}>
+                                        分享到工作空间
+                                    </Button>
                                     <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedAssetIds.length} onClick={() => setBatchDeleteOpen(true)}>
                                         删除选中
                                     </Button>
@@ -706,7 +728,7 @@ export default function AssetsPage() {
                                         清空选择
                                     </Button>
                                 </div>
-                            </div>
+                            </SelectionToolbar>
 
                             <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                                 {visibleAssets.map((asset) => (
@@ -724,6 +746,7 @@ export default function AssetsPage() {
                                         onDownload={downloadImage}
                                         onUseImage={() => useAssetInWorkbench(asset, "image")}
                                         onUseVideo={() => useAssetInWorkbench(asset, "video")}
+                                        onShare={() => openShareAssets([asset])}
                                         onDelete={() => setDeletingAsset(asset)}
                                     />
                                 ))}
@@ -916,6 +939,15 @@ export default function AssetsPage() {
             <Modal title="批量删除资产" open={batchDeleteOpen} onCancel={() => setBatchDeleteOpen(false)} onOk={confirmBatchDelete} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
                 确定删除选中的 {selectedAssetIds.length} 项资产吗？本机记录会移除；登录后会同步 tombstone，不影响未选中项。
             </Modal>
+
+            <ShareToWorkspaceModal
+                open={shareOpen}
+                drafts={shareDrafts}
+                onClose={() => {
+                    setShareOpen(false);
+                    setShareDrafts([]);
+                }}
+            />
         </div>
     );
 }
@@ -947,6 +979,7 @@ function AssetCard({
     onDownload,
     onUseImage,
     onUseVideo,
+    onShare,
     onDelete,
 }: {
     asset: Asset;
@@ -961,6 +994,7 @@ function AssetCard({
     onDownload: (asset: Asset) => void;
     onUseImage: () => void;
     onUseVideo: () => void;
+    onShare: () => void;
     onDelete: () => void;
 }) {
     const cover = asset.coverUrl || (asset.kind === "image" ? asset.data.dataUrl : "");
@@ -971,15 +1005,19 @@ function AssetCard({
     return (
         <Card
             hoverable
-            className={cn("overflow-hidden", selected && "ring-2 ring-stone-900 dark:ring-stone-100")}
+            className={cn(
+                "overflow-hidden transition",
+                selected && "ring-2 ring-stone-900 ring-offset-1 ring-offset-background dark:ring-stone-100",
+            )}
             styles={{ body: { padding: 0 } }}
             cover={
                 <div className="relative">
-                    <div className="absolute left-2 top-2 z-10" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
-                        <Checkbox
+                    <div className="absolute left-2.5 top-2.5 z-10">
+                        <SelectCheckbox
+                            variant="overlay"
                             checked={selected}
-                            className="rounded-md bg-white/90 px-1 shadow-sm dark:bg-stone-950/80"
-                            onChange={(event) => onSelectedChange(event.target.checked)}
+                            aria-label={`选择 ${displayTitle}`}
+                            onChange={onSelectedChange}
                         />
                     </div>
                     <button type="button" className="relative block w-full text-left" onClick={onOpen}>
@@ -1068,6 +1106,9 @@ function AssetCard({
                 )}
                 <Button size="small" icon={<PencilLine className="size-3.5" />} onClick={onEdit}>
                     编辑
+                </Button>
+                <Button size="small" icon={<Share2 className="size-3.5" />} onClick={onShare}>
+                    分享
                 </Button>
                 <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={onDelete}>
                     删除

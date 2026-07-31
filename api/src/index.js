@@ -4,8 +4,20 @@ import path from "node:path";
 import dns from "node:dns/promises";
 import { URL } from "node:url";
 
-import { createDb, publicCreditLedgerEntry, publicJob, publicProjectMeta, publicUser } from "./db.js";
-import { CLOUD_ERROR_REASON, CREDIT_LEDGER_TYPE, JOB_SOURCE, JOB_STATUS, JOB_TYPE, SAVE_STATUS, USER_STATUS } from "./model/cloud-domain.js";
+import { createDb, normalizeAssigneeUserIds, publicCreditLedgerEntry, publicJob, publicProjectMeta, publicUser, publicWorkspace, publicWorkspaceItem, publicWorkspaceTask } from "./db.js";
+import {
+    CLOUD_ERROR_REASON,
+    CREDIT_LEDGER_TYPE,
+    JOB_SOURCE,
+    JOB_STATUS,
+    JOB_TYPE,
+    SAVE_STATUS,
+    USER_STATUS,
+    WORKSPACE_ITEM_KIND,
+    WORKSPACE_ITEM_SOURCE,
+    WORKSPACE_ROLE,
+    WORKSPACE_TASK_STATUS,
+} from "./model/cloud-domain.js";
 import { createUsersRepo } from "./repositories/users-repo.js";
 import { createSessionsRepo } from "./repositories/sessions-repo.js";
 import { createJobsRepo } from "./repositories/jobs-repo.js";
@@ -13,6 +25,7 @@ import { createFilesRepo } from "./repositories/files-repo.js";
 import { createCreditsRepo } from "./repositories/credits-repo.js";
 import { createProjectsRepo } from "./repositories/projects-repo.js";
 import { createAssetsRepo } from "./repositories/assets-repo.js";
+import { createWorkspacesRepo } from "./repositories/workspaces-repo.js";
 import { decodePlatformReferenceDataUrl, generateOnePlatformImage, PLATFORM_IMAGE_REF_LIMIT } from "./platform-image.js";
 import { generateOnePlatformVideo } from "./platform-video.js";
 import { findExistingPlatformJob, persistPlatformResultAndCharge } from "./platform-billing.js";
@@ -112,6 +125,7 @@ const filesRepo = createFilesRepo(db);
 const creditsRepo = createCreditsRepo(db);
 const projectsRepo = createProjectsRepo(db);
 const assetsRepo = createAssetsRepo(db);
+const workspacesRepo = createWorkspacesRepo(db);
 const maxProjectJsonBytes = Math.min(maxBodyBytes, Math.max(1024 * 1024, Number(process.env.API_MAX_PROJECT_JSON_BYTES || 8 * 1024 * 1024) || 8 * 1024 * 1024));
 // Keep JSON session table small before Postgres; does not affect active logins.
 try {
@@ -213,6 +227,47 @@ const server = http.createServer(async (req, res) => {
         if (req.method === "GET" && route === "/assets") return await handleGetAssetManifest(req, res);
         if (req.method === "PUT" && route === "/assets") return await handlePutAssetManifest(req, res, url);
 
+        // Collaborative workspaces (explicit share; separate from private assets/jobs).
+        if (req.method === "GET" && route === "/workspaces") return await handleListWorkspaces(req, res);
+        if (req.method === "POST" && route === "/workspaces") return await handleCreateWorkspace(req, res);
+        if (req.method === "POST" && route === "/workspaces/join") return await handleJoinWorkspace(req, res);
+        if (req.method === "GET" && /^\/workspaces\/[^/]+$/.test(route)) {
+            return await handleGetWorkspace(req, res, route.slice("/workspaces/".length));
+        }
+        if (req.method === "POST" && /^\/workspaces\/[^/]+\/invite\/reset$/.test(route)) {
+            return await handleResetWorkspaceInvite(req, res, route.split("/")[2]);
+        }
+        if (req.method === "DELETE" && /^\/workspaces\/[^/]+$/.test(route)) {
+            return await handleArchiveWorkspace(req, res, route.slice("/workspaces/".length));
+        }
+        if (req.method === "GET" && /^\/workspaces\/[^/]+\/items$/.test(route)) {
+            return await handleListWorkspaceItems(req, res, route.split("/")[2], url);
+        }
+        if (req.method === "POST" && /^\/workspaces\/[^/]+\/items$/.test(route)) {
+            return await handleCreateWorkspaceItem(req, res, route.split("/")[2]);
+        }
+        if (req.method === "DELETE" && /^\/workspaces\/[^/]+\/items\/[^/]+$/.test(route)) {
+            const parts = route.split("/");
+            return await handleDeleteWorkspaceItem(req, res, parts[2], parts[4]);
+        }
+        if (req.method === "GET" && /^\/workspaces\/[^/]+\/tasks$/.test(route)) {
+            return await handleListWorkspaceTasks(req, res, route.split("/")[2]);
+        }
+        if (req.method === "POST" && /^\/workspaces\/[^/]+\/tasks$/.test(route)) {
+            return await handleCreateWorkspaceTask(req, res, route.split("/")[2]);
+        }
+        if (req.method === "PATCH" && /^\/workspaces\/[^/]+\/tasks\/[^/]+$/.test(route)) {
+            const parts = route.split("/");
+            return await handleUpdateWorkspaceTask(req, res, parts[2], parts[4]);
+        }
+        if (req.method === "DELETE" && /^\/workspaces\/[^/]+\/tasks\/[^/]+$/.test(route)) {
+            const parts = route.split("/");
+            return await handleDeleteWorkspaceTask(req, res, parts[2], parts[4]);
+        }
+        if (req.method === "GET" && route.startsWith("/workspace-files/")) {
+            return await handleGetWorkspaceFile(req, res, route.slice("/workspace-files/".length));
+        }
+
         // Platform generation (opt-in server-side; charges credits only on success).
         if (req.method === "POST" && route === "/generate/image") return await handlePlatformGenerateImage(req, res);
         if (req.method === "POST" && route === "/generate/video") return await handlePlatformGenerateVideo(req, res);
@@ -242,7 +297,7 @@ function setCors(res, origin, req) {
         res.setHeader("Access-Control-Allow-Credentials", "true");
     }
     res.setHeader("Vary", "Origin");
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     res.setHeader("Access-Control-Max-Age", "86400");
 }
@@ -1562,6 +1617,540 @@ function handleGetFile(req, res, fileId) {
     res.writeHead(200, {
         "Content-Length": size,
         "Content-Type": file.mime || "application/octet-stream",
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=3600",
+    });
+    fs.createReadStream(abs).pipe(res);
+}
+
+// ── Collaborative workspaces ───────────────────────────────────────────────
+
+function makeWorkspaceInviteCode() {
+    return randomToken(6).replace(/[^a-zA-Z0-9]/g, "").slice(0, 10).toLowerCase() || randomId().slice(0, 10);
+}
+
+function requireWorkspaceMember(req, res, workspaceId) {
+    const auth = requireUser(req, res);
+    if (!auth) return null;
+    const workspace = workspacesRepo.findById(workspaceId);
+    if (!workspace) {
+        fail(res, 404, "工作空间不存在", CLOUD_ERROR_REASON.WORKSPACE_NOT_FOUND);
+        return null;
+    }
+    const membership = workspacesRepo.findMembership(workspaceId, auth.user.id);
+    if (!membership) {
+        fail(res, 403, "你不是该工作空间的成员", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+        return null;
+    }
+    return { ...auth, workspace, membership };
+}
+
+function requireWorkspaceOwner(req, res, workspaceId) {
+    const ctx = requireWorkspaceMember(req, res, workspaceId);
+    if (!ctx) return null;
+    if (ctx.membership.role !== WORKSPACE_ROLE.OWNER && ctx.workspace.owner_id !== ctx.user.id) {
+        fail(res, 403, "仅空间所有者可执行此操作", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+        return null;
+    }
+    return ctx;
+}
+
+function handleListWorkspaces(req, res) {
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const rows = workspacesRepo.listForUser(auth.user.id);
+    const items = rows.map(({ workspace, membership }) => {
+        const members = workspacesRepo.listMembers(workspace.id);
+        return publicWorkspace(workspace, membership, {
+            includeInvite: membership.role === WORKSPACE_ROLE.OWNER,
+            memberCount: members.length,
+        });
+    });
+    json(res, 200, { items, total: items.length });
+}
+
+async function handleCreateWorkspace(req, res) {
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const body = await readJson(req);
+    const name = String(body.name || "").trim();
+    if (!name) return fail(res, 400, "请输入工作空间名称", CLOUD_ERROR_REASON.BAD_REQUEST);
+    if (name.length > 80) return fail(res, 400, "名称过长", CLOUD_ERROR_REASON.BAD_REQUEST);
+    const workspace = workspacesRepo.create({
+        name,
+        ownerId: auth.user.id,
+        inviteCode: makeWorkspaceInviteCode(),
+    });
+    const membership = workspacesRepo.findMembership(workspace.id, auth.user.id);
+    json(
+        res,
+        200,
+        publicWorkspace(workspace, membership, { includeInvite: true, memberCount: 1 }),
+        "工作空间已创建",
+    );
+}
+
+async function handleJoinWorkspace(req, res) {
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const body = await readJson(req);
+    const inviteCode = String(body.invite_code || body.inviteCode || "").trim();
+    if (!inviteCode) return fail(res, 400, "请输入空间邀请码", CLOUD_ERROR_REASON.BAD_REQUEST);
+    const workspace = workspacesRepo.findByInviteCode(inviteCode);
+    if (!workspace) return fail(res, 404, "邀请码无效或空间不存在", CLOUD_ERROR_REASON.WORKSPACE_INVITE_INVALID);
+    const existing = workspacesRepo.findMembership(workspace.id, auth.user.id);
+    if (existing) {
+        return json(
+            res,
+            200,
+            publicWorkspace(workspace, existing, {
+                includeInvite: existing.role === WORKSPACE_ROLE.OWNER,
+                memberCount: workspacesRepo.listMembers(workspace.id).length,
+            }),
+            "你已在该工作空间中",
+        );
+    }
+    const membership = workspacesRepo.addMember({
+        workspaceId: workspace.id,
+        userId: auth.user.id,
+        role: WORKSPACE_ROLE.MEMBER,
+    });
+    json(
+        res,
+        200,
+        publicWorkspace(workspace, membership, {
+            includeInvite: false,
+            memberCount: workspacesRepo.listMembers(workspace.id).length,
+        }),
+        "已加入工作空间",
+    );
+}
+
+function handleGetWorkspace(req, res, workspaceId) {
+    const ctx = requireWorkspaceMember(req, res, workspaceId);
+    if (!ctx) return;
+    const members = workspacesRepo.listMembers(workspaceId);
+    json(res, 200, {
+        workspace: publicWorkspace(ctx.workspace, ctx.membership, {
+            includeInvite: true,
+            memberCount: members.length,
+        }),
+        members,
+    });
+}
+
+function handleResetWorkspaceInvite(req, res, workspaceId) {
+    const ctx = requireWorkspaceOwner(req, res, workspaceId);
+    if (!ctx) return;
+    const workspace = workspacesRepo.resetInviteCode(workspaceId, ctx.user.id, makeWorkspaceInviteCode());
+    if (!workspace) return fail(res, 403, "无法重置邀请码", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+    json(
+        res,
+        200,
+        publicWorkspace(workspace, ctx.membership, {
+            includeInvite: true,
+            memberCount: workspacesRepo.listMembers(workspaceId).length,
+        }),
+        "邀请码已重置",
+    );
+}
+
+function handleArchiveWorkspace(req, res, workspaceId) {
+    const ctx = requireWorkspaceOwner(req, res, workspaceId);
+    if (!ctx) return;
+    const workspace = workspacesRepo.archive(workspaceId, ctx.user.id);
+    if (!workspace) return fail(res, 404, "工作空间不存在", CLOUD_ERROR_REASON.WORKSPACE_NOT_FOUND);
+    json(res, 200, { ok: true, id: workspace.id }, "工作空间已解散");
+}
+
+function userPublicName(user) {
+    if (!user) return { name: "", email: "" };
+    return {
+        name: String(user.display_name || user.email || "").trim(),
+        email: String(user.email || "").trim(),
+    };
+}
+
+function decorateWorkspaceItem(item) {
+    const user = item?.created_by ? usersRepo.findById(item.created_by) : null;
+    const { name, email } = userPublicName(user);
+    return publicWorkspaceItem(item, {
+        created_by_name: name,
+        created_by_email: email,
+    });
+}
+
+function decorateWorkspaceTask(task) {
+    const creator = task?.created_by ? usersRepo.findById(task.created_by) : null;
+    const creatorInfo = userPublicName(creator);
+    const assigneeIds = normalizeAssigneeUserIds(
+        Array.isArray(task?.assignee_user_ids) && task.assignee_user_ids.length
+            ? task.assignee_user_ids
+            : task?.assignee_user_id,
+    );
+    const assignees = assigneeIds.map((id) => {
+        const u = usersRepo.findById(id);
+        const info = userPublicName(u);
+        return { user_id: id, display_name: info.name, email: info.email };
+    });
+    return publicWorkspaceTask(task, {
+        created_by_name: creatorInfo.name,
+        created_by_email: creatorInfo.email,
+        assignees,
+    });
+}
+
+function parseAssigneeUserIds(body, workspaceId) {
+    let raw =
+        body?.assignee_user_ids !== undefined
+            ? body.assignee_user_ids
+            : body?.assigneeUserIds !== undefined
+              ? body.assigneeUserIds
+              : body?.assignee_user_id !== undefined
+                ? body.assignee_user_id
+                : body?.assigneeUserId;
+    if (raw === undefined) return { present: false, ids: [] };
+    // multipart fields arrive as strings; accept JSON array / comma-separated.
+    if (typeof raw === "string") {
+        const text = raw.trim();
+        if (!text) {
+            raw = [];
+        } else if (text.startsWith("[")) {
+            try {
+                raw = JSON.parse(text);
+            } catch {
+                raw = text;
+            }
+        } else if (text.includes(",")) {
+            raw = text.split(",").map((s) => s.trim()).filter(Boolean);
+        }
+    }
+    const ids = normalizeAssigneeUserIds(raw);
+    for (const id of ids) {
+        if (!workspacesRepo.findMembership(workspaceId, id)) {
+            return { present: true, ids, error: "只能指派给本空间成员" };
+        }
+    }
+    return { present: true, ids };
+}
+
+function handleListWorkspaceItems(req, res, workspaceId, url) {
+    const ctx = requireWorkspaceMember(req, res, workspaceId);
+    if (!ctx) return;
+    const page = Math.max(1, Number(url.searchParams.get("page") || 1) || 1);
+    const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get("page_size") || url.searchParams.get("pageSize") || 50) || 50));
+    const kind = String(url.searchParams.get("kind") || "").trim();
+    const result = workspacesRepo.listItems(workspaceId, { kind, page, pageSize });
+    json(res, 200, {
+        items: result.items.map((item) => decorateWorkspaceItem(item)),
+        total: result.total,
+        page: result.page,
+        page_size: result.page_size,
+    });
+}
+
+async function handleCreateWorkspaceItem(req, res, workspaceId) {
+    const ctx = requireWorkspaceMember(req, res, workspaceId);
+    if (!ctx) return;
+    const ip = clientIp(req);
+    if (!rateLimit(uploadHits, `${ctx.user.id}:ws:${ip}`, 60, 60 * 60 * 1000)) {
+        return fail(res, 429, "上传过于频繁", CLOUD_ERROR_REASON.UPLOAD_RATE_LIMITED);
+    }
+
+    const contentType = String(req.headers["content-type"] || "");
+    let fields = {};
+    let file = null;
+    if (contentType.includes("multipart/form-data")) {
+        const raw = await readBody(req, maxBodyBytes);
+        const parsed = parseMultipart(raw, contentType);
+        fields = parsed.fields || {};
+        file = parsed.file || null;
+    } else {
+        fields = await readJson(req, Math.min(maxBodyBytes, 2 * 1024 * 1024));
+    }
+
+    const kind = String(fields.kind || "").trim();
+    const allowedKinds = Object.values(WORKSPACE_ITEM_KIND);
+    if (!allowedKinds.includes(kind)) {
+        return fail(res, 400, "无效的分享类型", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+
+    const isText = kind === WORKSPACE_ITEM_KIND.ASSET_TEXT;
+    const isImage = kind === WORKSPACE_ITEM_KIND.ASSET_IMAGE || kind === WORKSPACE_ITEM_KIND.GEN_IMAGE;
+    const isVideo = kind === WORKSPACE_ITEM_KIND.ASSET_VIDEO || kind === WORKSPACE_ITEM_KIND.GEN_VIDEO;
+
+    let fileRow = null;
+    if (!isText) {
+        if (!file?.data?.length) return fail(res, 400, "请上传媒体文件", CLOUD_ERROR_REASON.BAD_REQUEST);
+        const sniffed = sniffMime(file.data) || file.mime || "";
+        const allowed = isImage ? ["image/jpeg", "image/png", "image/webp"] : ["video/mp4", "video/webm"];
+        if (!allowed.includes(sniffed)) {
+            return fail(res, 400, `不支持的文件类型: ${sniffed || "unknown"}`, CLOUD_ERROR_REASON.UNSUPPORTED_MEDIA_TYPE);
+        }
+        const maxBytes = isImage ? maxImageBytes : maxVideoBytes;
+        if (file.data.length > maxBytes) return fail(res, 413, "文件过大", CLOUD_ERROR_REASON.PAYLOAD_TOO_LARGE);
+        if (filesRepo.countUserBytes(ctx.user.id) + file.data.length > maxUserBytes) {
+            return fail(res, 413, "云端存储空间不足", CLOUD_ERROR_REASON.STORAGE_QUOTA_EXCEEDED);
+        }
+        fileRow = writeUserFile({
+            userId: ctx.user.id,
+            type: isImage ? JOB_TYPE.IMAGE : JOB_TYPE.VIDEO,
+            sniffed,
+            bytes: file.data,
+            width: Number(fields.width || 0) || 0,
+            height: Number(fields.height || 0) || 0,
+            durationMs: Number(fields.duration_ms || fields.durationMs || 0) || 0,
+            filename: file.filename,
+        });
+    }
+
+    let tags = [];
+    try {
+        tags = fields.tags ? (typeof fields.tags === "string" ? JSON.parse(fields.tags) : fields.tags) : [];
+    } catch {
+        tags = String(fields.tags || "")
+            .split(",")
+            .map((t) => t.trim())
+            .filter(Boolean);
+    }
+    if (!Array.isArray(tags)) tags = [];
+
+    const sourceType = String(fields.source_type || fields.sourceType || WORKSPACE_ITEM_SOURCE.ASSET).trim() || WORKSPACE_ITEM_SOURCE.ASSET;
+    const item = workspacesRepo.createItem({
+        workspaceId,
+        kind,
+        title: String(fields.title || "").trim() || (isText ? "文本分享" : isImage ? "图片分享" : "视频分享"),
+        note: String(fields.note || ""),
+        category: String(fields.category || ""),
+        tags,
+        prompt: String(fields.prompt || ""),
+        model: String(fields.model || ""),
+        fileId: fileRow?.id || null,
+        textContent: isText ? String(fields.text_content || fields.textContent || fields.content || "") : "",
+        width: Number(fields.width || fileRow?.width || 0) || 0,
+        height: Number(fields.height || fileRow?.height || 0) || 0,
+        bytes: Number(fields.bytes || fileRow?.bytes || 0) || 0,
+        mime: String(fields.mime || fileRow?.mime || (isText ? "text/plain" : "")),
+        sourceType,
+        sourceRef: String(fields.source_ref || fields.sourceRef || ""),
+        createdBy: ctx.user.id,
+    });
+
+    if (isText && !item.text_content) {
+        workspacesRepo.softDeleteItem(item.id, workspaceId);
+        return fail(res, 400, "文本内容不能为空", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+
+    json(res, 200, decorateWorkspaceItem(item), "已分享到工作空间");
+}
+
+function handleDeleteWorkspaceItem(req, res, workspaceId, itemId) {
+    const ctx = requireWorkspaceMember(req, res, workspaceId);
+    if (!ctx) return;
+    const item = workspacesRepo.findItem(itemId, workspaceId);
+    if (!item) return fail(res, 404, "分享条目不存在", CLOUD_ERROR_REASON.WORKSPACE_ITEM_NOT_FOUND);
+    const isOwner = ctx.membership.role === WORKSPACE_ROLE.OWNER || ctx.workspace.owner_id === ctx.user.id;
+    if (item.created_by !== ctx.user.id && !isOwner) {
+        return fail(res, 403, "只能删除自己的分享，或由所有者删除", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+    }
+    workspacesRepo.softDeleteItem(itemId, workspaceId);
+    json(res, 200, { ok: true, id: itemId }, "已删除分享");
+}
+
+function handleListWorkspaceTasks(req, res, workspaceId) {
+    const ctx = requireWorkspaceMember(req, res, workspaceId);
+    if (!ctx) return;
+    const items = workspacesRepo.listTasks(workspaceId).map((task) => decorateWorkspaceTask(task));
+    json(res, 200, { items, total: items.length });
+}
+
+async function handleCreateWorkspaceTask(req, res, workspaceId) {
+    const ctx = requireWorkspaceMember(req, res, workspaceId);
+    if (!ctx) return;
+    const body = await readJson(req);
+    const title = String(body.title || "").trim();
+    if (!title) return fail(res, 400, "请输入任务标题", CLOUD_ERROR_REASON.BAD_REQUEST);
+    const status = String(body.status || WORKSPACE_TASK_STATUS.TODO).trim() || WORKSPACE_TASK_STATUS.TODO;
+    if (!Object.values(WORKSPACE_TASK_STATUS).includes(status)) {
+        return fail(res, 400, "无效的任务状态", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    const assignees = parseAssigneeUserIds(body, workspaceId);
+    if (assignees.error) return fail(res, 400, assignees.error, CLOUD_ERROR_REASON.BAD_REQUEST);
+    const task = workspacesRepo.createTask({
+        workspaceId,
+        title,
+        body: String(body.body || ""),
+        status,
+        assigneeUserIds: assignees.present ? assignees.ids : [],
+        createdBy: ctx.user.id,
+        sortOrder: body.sort_order ?? body.sortOrder,
+    });
+    json(res, 200, decorateWorkspaceTask(task), "任务已创建");
+}
+
+async function handleUpdateWorkspaceTask(req, res, workspaceId, taskId) {
+    const ctx = requireWorkspaceMember(req, res, workspaceId);
+    if (!ctx) return;
+    const task = workspacesRepo.findTask(taskId, workspaceId);
+    if (!task) return fail(res, 404, "任务不存在", CLOUD_ERROR_REASON.WORKSPACE_TASK_NOT_FOUND);
+    const isOwner = ctx.membership.role === WORKSPACE_ROLE.OWNER || ctx.workspace.owner_id === ctx.user.id;
+    const assigneeIds = normalizeAssigneeUserIds(
+        Array.isArray(task.assignee_user_ids) && task.assignee_user_ids.length
+            ? task.assignee_user_ids
+            : task.assignee_user_id,
+    );
+    const isAssignee = assigneeIds.includes(ctx.user.id);
+    const canEditMeta = task.created_by === ctx.user.id || isOwner;
+    const canUploadDeliverable = canEditMeta || isAssignee;
+    if (!canEditMeta && !canUploadDeliverable) {
+        return fail(res, 403, "只能编辑自己创建的任务，或由所有者编辑", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+    }
+
+    const contentType = String(req.headers["content-type"] || "");
+    let body = {};
+    let file = null;
+    if (contentType.includes("multipart/form-data")) {
+        const raw = await readBody(req, maxBodyBytes);
+        const parsed = parseMultipart(raw, contentType);
+        body = parsed.fields || {};
+        file = parsed.file || null;
+    } else {
+        body = await readJson(req);
+    }
+
+    // Assignees may only attach/clear deliverables, not change title/status/assignees.
+    if (!canEditMeta) {
+        const tryingMeta =
+            body.title != null ||
+            body.body != null ||
+            body.status != null ||
+            body.assignee_user_ids !== undefined ||
+            body.assigneeUserIds !== undefined ||
+            body.assignee_user_id !== undefined ||
+            body.assigneeUserId !== undefined ||
+            body.sort_order != null ||
+            body.sortOrder != null;
+        if (tryingMeta && !file && body.clear_deliverable == null && body.clearDeliverable == null) {
+            return fail(res, 403, "负责人只能上传交付物，不能改任务字段", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+        }
+        if (tryingMeta && (body.title != null || body.status != null || body.assignee_user_ids !== undefined || body.assigneeUserIds !== undefined)) {
+            return fail(res, 403, "负责人只能上传交付物，不能改任务字段", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+        }
+    }
+
+    if (body.status != null && !Object.values(WORKSPACE_TASK_STATUS).includes(String(body.status))) {
+        return fail(res, 400, "无效的任务状态", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    const assignees = canEditMeta ? parseAssigneeUserIds(body, workspaceId) : { present: false, ids: [] };
+    if (assignees.error) return fail(res, 400, assignees.error, CLOUD_ERROR_REASON.BAD_REQUEST);
+
+    const patch = canEditMeta
+        ? {
+              title: body.title,
+              body: body.body,
+              status: body.status,
+              assigneeUserIds: assignees.present ? assignees.ids : undefined,
+              sortOrder: body.sort_order ?? body.sortOrder,
+          }
+        : {};
+
+    const clearDeliverable =
+        body.clear_deliverable === true ||
+        body.clear_deliverable === "true" ||
+        body.clear_deliverable === "1" ||
+        body.clearDeliverable === true ||
+        body.clearDeliverable === "true";
+    if (clearDeliverable) {
+        if (!canUploadDeliverable) {
+            return fail(res, 403, "无权清除交付物", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+        }
+        patch.clearDeliverable = true;
+    } else if (file?.data?.length) {
+        if (!canUploadDeliverable) {
+            return fail(res, 403, "无权上传交付物", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+        }
+        const sniffed = sniffMime(file.data) || file.mime || "";
+        const isImage = ["image/jpeg", "image/png", "image/webp"].includes(sniffed);
+        const isVideo = ["video/mp4", "video/webm"].includes(sniffed);
+        if (!isImage && !isVideo) {
+            return fail(res, 400, `交付物仅支持图片/视频: ${sniffed || "unknown"}`, CLOUD_ERROR_REASON.UNSUPPORTED_MEDIA_TYPE);
+        }
+        const maxBytes = isImage ? maxImageBytes : maxVideoBytes;
+        if (file.data.length > maxBytes) return fail(res, 413, "文件过大", CLOUD_ERROR_REASON.PAYLOAD_TOO_LARGE);
+        if (filesRepo.countUserBytes(ctx.user.id) + file.data.length > maxUserBytes) {
+            return fail(res, 413, "云端存储空间不足", CLOUD_ERROR_REASON.STORAGE_QUOTA_EXCEEDED);
+        }
+        const fileRow = writeUserFile({
+            userId: ctx.user.id,
+            type: isImage ? JOB_TYPE.IMAGE : JOB_TYPE.VIDEO,
+            sniffed,
+            bytes: file.data,
+            width: Number(body.width || 0) || 0,
+            height: Number(body.height || 0) || 0,
+            durationMs: 0,
+            filename: file.filename,
+        });
+        patch.deliverableFileId = fileRow.id;
+        patch.deliverableName = String(file.filename || body.deliverable_name || body.deliverableName || "交付物").slice(0, 200);
+        patch.deliverableMime = sniffed;
+        patch.deliverableBytes = file.data.length;
+    }
+
+    const updated = workspacesRepo.updateTask(taskId, workspaceId, patch);
+    json(res, 200, decorateWorkspaceTask(updated), file?.data?.length ? "交付物已上传" : "任务已更新");
+}
+
+function handleDeleteWorkspaceTask(req, res, workspaceId, taskId) {
+    const ctx = requireWorkspaceMember(req, res, workspaceId);
+    if (!ctx) return;
+    const task = workspacesRepo.findTask(taskId, workspaceId);
+    if (!task) return fail(res, 404, "任务不存在", CLOUD_ERROR_REASON.WORKSPACE_TASK_NOT_FOUND);
+    const isOwner = ctx.membership.role === WORKSPACE_ROLE.OWNER || ctx.workspace.owner_id === ctx.user.id;
+    if (task.created_by !== ctx.user.id && !isOwner) {
+        return fail(res, 403, "只能删除自己创建的任务，或由所有者删除", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+    }
+    workspacesRepo.softDeleteTask(taskId, workspaceId);
+    json(res, 200, { ok: true, id: taskId }, "任务已删除");
+}
+
+function handleGetWorkspaceFile(req, res, fileIdRaw) {
+    const auth = requireUser(req, res);
+    if (!auth) return;
+    const fileId = fileIdRaw.split(/[/?#]/)[0];
+    const access = workspacesRepo.findFileAccess(fileId, auth.user.id);
+    if (!access) return fail(res, 404, "文件不存在或无权访问", CLOUD_ERROR_REASON.NOT_FOUND);
+
+    const abs = safeJoin(uploadsDir, ...String(access.file.storage_key).split("/"));
+    if (!fs.existsSync(abs)) return fail(res, 404, "文件已丢失", CLOUD_ERROR_REASON.NOT_FOUND);
+
+    const stat = fs.statSync(abs);
+    const size = stat.size;
+    const range = req.headers.range;
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Content-Type", access.file.mime || "application/octet-stream");
+    res.setHeader("Cache-Control", "private, max-age=3600");
+
+    if (range) {
+        const m = /^bytes=(\d*)-(\d*)$/.exec(String(range));
+        if (!m) return fail(res, 416, "Range 无效");
+        let start = m[1] ? Number(m[1]) : 0;
+        let end = m[2] ? Number(m[2]) : size - 1;
+        if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= size) return fail(res, 416, "Range 无效");
+        end = Math.min(end, size - 1);
+        res.writeHead(206, {
+            "Content-Range": `bytes ${start}-${end}/${size}`,
+            "Content-Length": end - start + 1,
+            "Content-Type": access.file.mime || "application/octet-stream",
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "private, max-age=3600",
+        });
+        fs.createReadStream(abs, { start, end }).pipe(res);
+        return;
+    }
+
+    res.writeHead(200, {
+        "Content-Length": size,
+        "Content-Type": access.file.mime || "application/octet-stream",
         "Accept-Ranges": "bytes",
         "Cache-Control": "private, max-age=3600",
     });

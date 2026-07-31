@@ -1,12 +1,14 @@
-import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImageIcon, LoaderCircle, Music2, Plus, SlidersHorizontal, Sparkles, Square, Trash2, Upload, VideoIcon, WandSparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpen, ClipboardPaste, Download, FolderPlus, History, ImageIcon, LoaderCircle, Music2, Plus, Share2, SlidersHorizontal, Sparkles, Square, Trash2, Upload, VideoIcon, WandSparkles } from "lucide-react";
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import { useSearchParams } from "react-router-dom";
-import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Segmented, Switch, Tag, Typography } from "antd";
+import { App, Button, Drawer, Empty, Image, Input, Modal, Segmented, Switch, Tag, Typography } from "antd";
 import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { saveAs } from "file-saver";
 
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
+import { SelectCheckbox } from "@/components/ui/select-checkbox";
+import { ShareToWorkspaceModal, type ShareDraft } from "@/components/workspace/share-to-workspace-modal";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { VideoSettingsPanel, normalizeVideoResolutionValue, videoSettingsSummary } from "@/components/video-settings-panel";
@@ -35,6 +37,7 @@ import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyn
 import { formatYuanFromCents, hasEnoughCredits, isPlatformVideoReady, platformVideoPriceCents } from "@/lib/platform-credits";
 import { generatePlatformVideo, isStorageQuotaError } from "@/services/cloud-api";
 import { saveVideoToCloudDetailed } from "@/services/cloud-history";
+import { WORKSPACE_ITEM_KIND, WORKSPACE_ITEM_SOURCE } from "@/services/workspace-api";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useAuthStore } from "@/stores/use-auth-store";
 import { isSameOriginRelayBaseUrl, modelOptionLabel, modelOptionName, resolveModelChannel, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
@@ -130,6 +133,8 @@ export default function VideoPage() {
     const [previewLog, setPreviewLog] = useState<GenerationLog | null>(null);
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
     const [historySource, setHistorySource] = useState<"local" | "cloud">("local");
+    const [shareDrafts, setShareDrafts] = useState<ShareDraft[]>([]);
+    const [shareOpen, setShareOpen] = useState(false);
     const [cloudRefreshKey, setCloudRefreshKey] = useState(0);
     const [preferPlatformVideo, setPreferPlatformVideo] = useState(() => {
         try {
@@ -776,6 +781,40 @@ export default function VideoPage() {
         }
     };
 
+    const openShareLogs = (targetLogs: GenerationLog[]) => {
+        if (!cloudUser) {
+            message.info("登录后可将生成结果分享到工作空间");
+            return;
+        }
+        const drafts: ShareDraft[] = [];
+        for (const log of targetLogs) {
+            if (log.status !== "成功" || !log.video) continue;
+            const video = log.video;
+            if (!video.storageKey && !video.url) continue;
+            drafts.push({
+                kind: WORKSPACE_ITEM_KIND.GEN_VIDEO,
+                title: log.title || assetTitleFromPrompt(log.prompt, "生成视频"),
+                prompt: log.prompt,
+                model: log.model || log.config.videoModel || log.config.model,
+                storageKey: video.storageKey,
+                mediaUrl: video.url,
+                width: video.width,
+                height: video.height,
+                bytes: video.bytes,
+                mime: video.mimeType,
+                sourceType: WORKSPACE_ITEM_SOURCE.WORKBENCH_LOCAL,
+                sourceRef: `${log.id}:${video.id}`,
+                filename: `${log.title || "video"}.mp4`,
+            });
+        }
+        if (!drafts.length) {
+            message.warning("所选记录没有可分享的本地视频（需成功且可读）");
+            return;
+        }
+        setShareDrafts(drafts);
+        setShareOpen(true);
+    };
+
     const retryCloudSync = (log: GenerationLog) => {
         if (!cloudUser) {
             message.warning("请先登录后再同步到云端");
@@ -815,7 +854,7 @@ export default function VideoPage() {
         <div className="flex h-full flex-col overflow-hidden bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
             <main className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[300px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)]">
                 <aside className="thin-scrollbar hidden min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:block">
-                    <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} historySource={historySource} cloudEnabled={Boolean(cloudUser)} cloudRefreshKey={cloudRefreshKey} onHistorySourceChange={setHistorySource} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} onRetryCloud={retryCloudSync} onStopLog={stopVideoJob} stoppableLogIds={Array.from(new Set([...activeLogIdsRef.current, ...videoJobControllersRef.current.keys()]))} />
+                    <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} historySource={historySource} cloudEnabled={Boolean(cloudUser)} cloudRefreshKey={cloudRefreshKey} onHistorySourceChange={setHistorySource} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} onRetryCloud={retryCloudSync} onShareSelected={() => openShareLogs(logs.filter((log) => selectedLogIds.includes(log.id)))} onShareLog={(log) => openShareLogs([log])} onStopLog={stopVideoJob} stoppableLogIds={Array.from(new Set([...activeLogIdsRef.current, ...videoJobControllersRef.current.keys()]))} />
                 </aside>
 
                 <section className="grid gap-3 lg:min-h-0 lg:overflow-hidden xl:grid-cols-[420px_minmax(0,1fr)]">
@@ -1090,7 +1129,7 @@ export default function VideoPage() {
                 }}
             />
             <Drawer title="生成记录" placement="bottom" size="large" open={logsOpen} onClose={() => setLogsOpen(false)}>
-                <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} historySource={historySource} cloudEnabled={Boolean(cloudUser)} cloudRefreshKey={cloudRefreshKey} onHistorySourceChange={setHistorySource} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} onRetryCloud={retryCloudSync} onStopLog={stopVideoJob} stoppableLogIds={Array.from(new Set([...activeLogIdsRef.current, ...videoJobControllersRef.current.keys()]))} />
+                <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} historySource={historySource} cloudEnabled={Boolean(cloudUser)} cloudRefreshKey={cloudRefreshKey} onHistorySourceChange={setHistorySource} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} onRetryCloud={retryCloudSync} onShareSelected={() => openShareLogs(logs.filter((log) => selectedLogIds.includes(log.id)))} onShareLog={(log) => openShareLogs([log])} onStopLog={stopVideoJob} stoppableLogIds={Array.from(new Set([...activeLogIdsRef.current, ...videoJobControllersRef.current.keys()]))} />
             </Drawer>
             <Drawer title="参数" placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
@@ -1102,6 +1141,14 @@ export default function VideoPage() {
             <Modal title="删除生成记录" open={deleteConfirmOpen} onCancel={() => setDeleteConfirmOpen(false)} onOk={deleteSelectedLogs} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
                 确定删除选中的 {selectedLogIds.length} 条生成记录吗？
             </Modal>
+            <ShareToWorkspaceModal
+                open={shareOpen}
+                drafts={shareDrafts}
+                onClose={() => {
+                    setShareOpen(false);
+                    setShareDrafts([]);
+                }}
+            />
         </div>
     );
 }
@@ -1241,6 +1288,8 @@ function LogPanel({
     onDeleteSelected,
     onPreviewLog,
     onRetryCloud,
+    onShareSelected,
+    onShareLog,
     onStopLog,
     stoppableLogIds = [],
 }: {
@@ -1256,11 +1305,12 @@ function LogPanel({
     onDeleteSelected: () => void;
     onPreviewLog: (log: GenerationLog) => void;
     onRetryCloud?: (log: GenerationLog) => void;
+    onShareSelected?: () => void;
+    onShareLog?: (log: GenerationLog) => void;
     onStopLog?: (logId: string) => void;
     stoppableLogIds?: string[];
 }) {
     const allSelected = Boolean(logs.length) && selectedLogIds.length === logs.length;
-    const toggleAll = () => onSelectedLogIdsChange(allSelected ? [] : logs.map((log) => log.id));
     const showCloud = historySource === "cloud";
     const stoppable = new Set(stoppableLogIds);
 
@@ -1289,13 +1339,29 @@ function LogPanel({
                 <CloudHistoryPanel type="video" refreshKey={cloudRefreshKey} />
             ) : (
                 <>
-                    <div className="mb-4 flex flex-wrap gap-2">
+                    <div className="mb-4 flex flex-wrap items-center gap-2">
                         <Button size="small" icon={<Plus className="size-3.5" />} onClick={onCreateSession}>
                             新建
                         </Button>
-                        <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!logs.length} onClick={toggleAll}>
-                            {allSelected ? "取消" : "全选"}
-                        </Button>
+                        <SelectCheckbox
+                            variant="toolbar"
+                            checked={allSelected}
+                            indeterminate={!allSelected && selectedLogIds.length > 0}
+                            disabled={!logs.length}
+                            label={allSelected ? "取消全选" : "全选"}
+                            aria-label={allSelected ? "取消全选" : "全选"}
+                            onChange={(checked) => onSelectedLogIdsChange(checked ? logs.map((log) => log.id) : [])}
+                        />
+                        {selectedLogIds.length ? (
+                            <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-stone-900 px-1.5 text-[11px] font-medium tabular-nums text-white dark:bg-stone-100 dark:text-stone-900">
+                                {selectedLogIds.length}
+                            </span>
+                        ) : null}
+                        {onShareSelected ? (
+                            <Button size="small" icon={<Share2 className="size-3.5" />} disabled={!selectedLogIds.length} onClick={onShareSelected}>
+                                分享
+                            </Button>
+                        ) : null}
                         <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedLogIds.length} onClick={onDeleteSelected}>
                             删除
                         </Button>
@@ -1311,6 +1377,7 @@ function LogPanel({
                                 onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))}
                                 onClick={() => onPreviewLog(log)}
                                 onRetryCloud={onRetryCloud}
+                                onShare={onShareLog && log.status === "成功" ? () => onShareLog(log) : undefined}
                                 onStop={onStopLog ? () => onStopLog(log.id) : undefined}
                             />
                         ))}
@@ -1330,6 +1397,7 @@ function LogCard({
     onSelectedChange,
     onClick,
     onRetryCloud,
+    onShare,
     onStop,
 }: {
     log: GenerationLog;
@@ -1339,6 +1407,7 @@ function LogCard({
     onSelectedChange: (checked: boolean) => void;
     onClick: () => void;
     onRetryCloud?: (log: GenerationLog) => void;
+    onShare?: () => void;
     onStop?: () => void;
 }) {
     const syncLabel = cloudSyncLabel(log.cloudSync);
@@ -1356,7 +1425,7 @@ function LogCard({
             }}
         >
             <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2">
-                <Checkbox className="mt-0.5" checked={selected} onClick={(event) => event.stopPropagation()} onChange={(event) => onSelectedChange(event.target.checked)} />
+                <SelectCheckbox className="mt-0.5" checked={selected} aria-label="选择该记录" onChange={onSelectedChange} />
                 <div className="min-w-0">
                     <div className="truncate text-sm font-semibold leading-5">{log.title}</div>
                     <div className="mt-2 flex flex-wrap gap-1">
@@ -1373,6 +1442,13 @@ function LogCard({
                         <div className="mt-2" onClick={(event) => event.stopPropagation()}>
                             <Button size="small" danger icon={<Square className="size-3.5" />} onClick={onStop}>
                                 停止
+                            </Button>
+                        </div>
+                    ) : null}
+                    {onShare ? (
+                        <div className="mt-2" onClick={(event) => event.stopPropagation()}>
+                            <Button size="small" icon={<Share2 className="size-3.5" />} onClick={onShare}>
+                                分享
                             </Button>
                         </div>
                     ) : null}
