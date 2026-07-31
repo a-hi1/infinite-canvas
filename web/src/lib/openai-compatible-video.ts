@@ -266,11 +266,27 @@ export function parseSupportedVideoModelsFromError(errorText: string): string[] 
 
 export function isUnsupportedVideoModelError(error: unknown) {
     const blob = collectErrorBlob(error);
-    return (
-        /not supported for modelmodality\.video|not supported for.*video endpoint|modelmodality\.video|validation_error|unsupported model|model .* is not supported|模型不支持|不支持该模型|is not supported for/i.test(
+    if (!blob) return false;
+    // openai2api 原文：sora sora-2 is not supported for ModelModality.VIDEO endpoint. Supported models: ['azure-sora', ...]
+    // 以及 video submit failed: 422 {...}
+    if (
+        /not supported for modelmodality\.video|not supported for.*video endpoint|modelmodality\.video|unsupported model|model .* is not supported|模型不支持|不支持该模型|is not supported for/i.test(
             blob,
-        ) || Boolean(parseSupportedVideoModelsFromError(blob).length && /not supported|validation_error|422|modelmodality/i.test(blob))
-    );
+        )
+    ) {
+        return true;
+    }
+    if (/validation_error/i.test(blob) && (/modelmodality|supported models|sora-2|not supported/i.test(blob) || /\b422\b|status=422/i.test(blob))) {
+        return true;
+    }
+    if (parseSupportedVideoModelsFromError(blob).length && /not supported|validation_error|422|modelmodality|video submit failed/i.test(blob)) {
+        return true;
+    }
+    // 短 message 只剩「video submit failed: 422」+ 片段时也要认
+    if (/video submit failed/i.test(blob) && (/\b422\b|status=422|modelmodality|supported models|sora-2/i.test(blob))) {
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -631,28 +647,32 @@ export function buildSoraVeoFormFieldCandidates(opts: {
     }
 
     // 文生：JSON 优先（New API 原样改 model 转发；少踩 multipart 重建）
+    // 对齐可用脚本 veo-sora：首包仅 {model,prompt,seconds}，不要先塞 size（中转常因 size 触发 invalid body）
     // Sora 额外：数字 seconds / duration / 仅 model+prompt —— 应对 fail_to_fetch_task + invalid request body
     if (sora && !veo) {
         return [
-            { label: "json:seconds+size", encoding: "json", model: modelName, prompt, seconds, size, withReferences: false },
+            // 与参考脚本一致：model + prompt + seconds（字符串）
             { label: "json:seconds-only", encoding: "json", model: modelName, prompt, seconds, withReferences: false },
-            { label: "json:num-seconds+size", encoding: "json", model: modelName, prompt, seconds, size, withReferences: false, secondsAsNumber: true },
             { label: "json:num-seconds-only", encoding: "json", model: modelName, prompt, seconds, withReferences: false, secondsAsNumber: true },
-            { label: "json:duration+size", encoding: "json", model: modelName, prompt, seconds, size, withReferences: false, durationField: "duration" },
+            { label: "json:seconds+size", encoding: "json", model: modelName, prompt, seconds, size, withReferences: false },
+            { label: "json:num-seconds+size", encoding: "json", model: modelName, prompt, seconds, size, withReferences: false, secondsAsNumber: true },
             { label: "json:duration-only", encoding: "json", model: modelName, prompt, seconds, withReferences: false, durationField: "duration" },
+            { label: "json:duration+size", encoding: "json", model: modelName, prompt, seconds, size, withReferences: false, durationField: "duration" },
             // 部分中转只接受 model+prompt，size/seconds 由上游默认
             { label: "json:model+prompt", encoding: "json", model: modelName, prompt, seconds: "", withReferences: false },
-            { label: "multipart:seconds+size", encoding: "multipart", model: modelName, prompt, seconds, size, withReferences: false },
             { label: "multipart:seconds-only", encoding: "multipart", model: modelName, prompt, seconds, withReferences: false },
+            { label: "multipart:seconds+size", encoding: "multipart", model: modelName, prompt, seconds, size, withReferences: false },
             { label: "multipart:model+prompt", encoding: "multipart", model: modelName, prompt, seconds: "", withReferences: false },
         ];
     }
 
+    // Veo 文生：同样优先最小 seconds-only（与参考脚本一致），再补 size
     return [
-        { label: "json:seconds+size", encoding: "json", model: modelName, prompt, seconds, size, withReferences: false },
         { label: "json:seconds-only", encoding: "json", model: modelName, prompt, seconds, withReferences: false },
-        { label: "multipart:seconds+size", encoding: "multipart", model: modelName, prompt, seconds, size, withReferences: false },
+        { label: "json:seconds+size", encoding: "json", model: modelName, prompt, seconds, size, withReferences: false },
+        { label: "json:num-seconds-only", encoding: "json", model: modelName, prompt, seconds, withReferences: false, secondsAsNumber: true },
         { label: "multipart:seconds-only", encoding: "multipart", model: modelName, prompt, seconds, withReferences: false },
+        { label: "multipart:seconds+size", encoding: "multipart", model: modelName, prompt, seconds, size, withReferences: false },
     ];
 }
 
@@ -661,11 +681,13 @@ export const buildSoraVeoRequestCandidates = buildSoraVeoFormFieldCandidates;
 
 /**
  * Sora/Veo 创建任务路径候选。
- * 官方 OpenAI Videos 是 POST /v1/videos；部分中转把视频挂在 /video/generations 或 /videos/generations。
+ * 实测可用脚本（veo-sora）：POST `${base}/v1/video/generations` + `{model,prompt,seconds}`。
+ * 官方 OpenAI Videos 仍是 /videos；另保留 /videos/generations 兜底。
  * 仅用于 Sora/Veo，不改 Grok 路径表。
  */
 export function soraVeoCreatePathCandidates(): string[] {
-    return ["/videos", "/video/generations", "/videos/generations"];
+    // 中转（openai2api / New API 类）优先 /video/generations；官方 /videos 次之
+    return ["/video/generations", "/videos", "/videos/generations"];
 }
 
 /** 路径本身不存在 / 方法不对：应立刻换下一条路径，不要继续刷 body */
@@ -699,13 +721,13 @@ export function shouldTryNextSoraVeoCreatePath(error: unknown) {
 }
 
 export const soraVeoModeHint =
-    "Sora / Veo（OpenAI 兼容）：支持文生与图生视频。Sora 图生 1 张首帧；Veo 3.1 最多 3 张参考图。创建路径会按序尝试 /videos → /video/generations → /videos/generations。远程 imgen 图常因 CORS 读不到。不支持参考视频/音频。Sora 秒数 4/8/12，Veo 4/6/8；sora-2 尺寸仅 1280x720/720x1280。";
+    "Sora / Veo（OpenAI 兼容）：支持文生与图生视频。Sora 图生 1 张首帧；Veo 3.1 最多 3 张参考图。创建优先 /video/generations + 最小 body {model,prompt,seconds}，再回退 /videos、/videos/generations。远程 imgen 图常因 CORS 读不到。不支持参考视频/音频。Sora 秒数 4/8/12，Veo 4/6/8；sora-2 尺寸仅 1280x720/720x1280。";
 
 export const soraVideoModeHint =
-    "Sora：文生优先 JSON；图生走 multipart `input_reference` 或 JSON images，仅 1 张首帧。秒数 4/8/12。创建会自动试 /videos、/video/generations、/videos/generations；部分中转 VIDEO 端点只认 azure-sora，不认 sora-2——请求会先发你选的 sora-2，再回退 azure-sora。";
+    "Sora：文生优先 JSON 最小字段 {model,prompt,seconds}（对齐可用脚本 /video/generations）；图生走 multipart `input_reference` 或 JSON images，仅 1 张首帧。秒数 4/8/12。路径优先 /video/generations，再 /videos。部分中转 VIDEO 端点只认 azure-sora——请求会先发你选的 sora-2，再回退 azure-sora。";
 
 export const veoVideoModeHint =
-    "Veo（OpenAI 兼容中转）：文生 JSON；图生优先 JSON `images`/`reference_images`，最多 3 张参考图，并尽量选用 veo-*-i2v。创建路径同 Sora 多路径兼容。秒数 4/6/8。请用本地可读参考图。";
+    "Veo（OpenAI 兼容中转）：文生优先 /video/generations + {model,prompt,seconds}；图生优先 JSON `images`/`reference_images`，最多 3 张参考图，并尽量选用 veo-*-i2v。秒数 4/6/8。请用本地可读参考图。";
 
 function readErrorText(error: unknown): string {
     if (!error) return "";

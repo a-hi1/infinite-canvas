@@ -50,6 +50,8 @@ type VideoResponse = {
     result_url?: string;
     video_url?: string;
     content?: { video_url?: string; url?: string } | null;
+    /** 部分中转轮询返回 0–100；100 可当完成信号 */
+    progress?: number;
 };
 type ApiVideoResponse = VideoResponse | { code?: number | string; data?: VideoResponse | null; msg?: string; message?: string; error?: { message?: string } };
 type GrokVideoAsset = { url?: string; video_url?: string; output_url?: string; download_url?: string; [key: string]: unknown };
@@ -97,6 +99,10 @@ export type VideoGenerationTask = {
     requestModel?: string;
     /** Sora/Veo 实际打通的创建路径，如 /videos 或 /video/generations；轮询优先对齐 */
     createPath?: string;
+    /** 用户在 UI 选择的清晰度（Grok 如 1080p）；用于结果对照，不代表上游一定交付 */
+    requestedResolution?: string;
+    /** 创建成功时实际写入请求的 resolution（可能因创建失败后降档而低于 requested） */
+    acceptedResolution?: string;
     readyResult?: VideoGenerationResult;
 };
 export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "failed"; error: string };
@@ -115,16 +121,38 @@ function aiHeaders(config: AiConfig, contentType?: string) {
     };
 }
 
+/** 轮询预算：Sora/Veo 中转常 5～15 分钟；Grok/Seedance/Agnes 保持原节奏 */
+export function videoPollBudget(task: Pick<VideoGenerationTask, "provider" | "model" | "requestModel">): {
+    delayMs: number;
+    maxAttempts: number;
+    isSoraVeo: boolean;
+    timeoutLabel: string;
+} {
+    const isSoraVeo = task.provider === "openai" && isSoraOrVeoVideoModel(task.requestModel || task.model);
+    if (task.provider === "seedance" || task.provider === "agnes" || task.provider === "grok") {
+        return { delayMs: 5000, maxAttempts: 120, isSoraVeo: false, timeoutLabel: task.provider === "seedance" ? "Seedance " : task.provider === "agnes" ? "Agnes " : "" };
+    }
+    if (isSoraVeo) {
+        // 300 × 3s ≈ 15 分钟（参考脚本 300s 偏紧，中转排队常更久）
+        return { delayMs: 3000, maxAttempts: 300, isSoraVeo: true, timeoutLabel: "Sora/Veo " };
+    }
+    return { delayMs: 2500, maxAttempts: 120, isSoraVeo: false, timeoutLabel: "" };
+}
+
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], videoReferences: ReferenceVideo[] = [], audioReferences: ReferenceAudio[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {
     const task = await createVideoGenerationTask(config, prompt, references, videoReferences, audioReferences, options);
-    const delayMs = task.provider === "seedance" || task.provider === "agnes" || task.provider === "grok" ? 5000 : 2500;
-    for (let attempt = 0; attempt < 120; attempt += 1) {
+    const budget = videoPollBudget(task);
+    for (let attempt = 0; attempt < budget.maxAttempts; attempt += 1) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const state = await pollVideoGenerationTask(config, task, options);
         if (state.status === "completed") return state.result;
         if (state.status === "failed") throw new Error(state.error);
-        if (attempt === 119) throw new Error(`${task.provider === "seedance" ? "Seedance " : task.provider === "agnes" ? "Agnes " : ""}视频生成超时，请稍后重试`);
-        await delay(delayMs, options?.signal);
+        if (attempt === budget.maxAttempts - 1) {
+            throw new Error(
+                `${budget.timeoutLabel}视频生成超时，请稍后重试` + (budget.isSoraVeo ? "（中转排队较慢时可到历史记录里继续查询）" : ""),
+            );
+        }
+        await delay(budget.delayMs, options?.signal);
     }
     throw new Error("视频生成超时，请稍后重试");
 }
@@ -454,19 +482,21 @@ async function createSoraVeoOpenAiVideoTask(
     })();
     const inventory = Array.from(new Set([...requestChannelModels, ...channelModels].filter(Boolean)));
 
-    // 用可变队列：首包用用户选择（如 sora-2）；422/503 再换 azure-sora 等别名
-    // 不强制先发 azure-sora，避免上游实际就叫 sora-2 时误伤
+    // 用可变队列：默认首包用用户选择（如 sora-2）；422 ModelModality 立刻换 azure-sora。
+    // 若本 host 曾因 VIDEO 白名单拒收 sora-2、且 azure-sora 创建成功，下次优先 azure（仍保留 sora-2 作回退）。
     const modelNames = isSoraVideoModel(selectedName)
-        ? [...soraRequestModelCandidates(selectedName, inventory)]
+        ? orderSoraRequestModelsForHost(config, selectedName, inventory)
         : [preferVeoI2vModelName(selectedName, inventory) || selectedName].filter(Boolean);
 
-    // 路径候选：官方 /videos；部分中转视频在 /video/generations 或 /videos/generations
+    // 路径候选：参考脚本优先 POST /video/generations；官方 /videos；再 /videos/generations
     // 成功路径按 host 记忆，下次优先（不碰 Grok 路径表）
     const createPaths = orderSoraVeoCreatePaths(config);
 
     let lastError: unknown;
     const triedModels: string[] = [];
     const triedPaths: string[] = [];
+    // 跨路径记住「VIDEO 模态明确拒收」的模型名，避免每条路径再刷一遍 sora-2 的 422
+    const modalityRejectedLower = new Set<string>();
     const multipartFiles = preparedList.map((item) => item.file).filter((file): file is File => Boolean(file));
 
     for (const createPath of createPaths) {
@@ -478,6 +508,8 @@ async function createSoraVeoOpenAiVideoTask(
             const requestModel = modelNames[i];
             const requestLower = requestModel.toLowerCase();
             if (triedLower.has(requestLower)) continue;
+            // 本 host 本次请求里已被 ModelModality 拒收的名字：整次创建都不要再试
+            if (modalityRejectedLower.has(requestLower)) continue;
             triedLower.add(requestLower);
             if (!triedModels.includes(requestModel)) triedModels.push(requestModel);
             const candidates = buildSoraVeoFormFieldCandidates({
@@ -505,51 +537,84 @@ async function createSoraVeoOpenAiVideoTask(
                             : await postSoraVeoMultipartCreate(config, createPath, fields, multipartFiles, options);
                     if (!created.id) throw new Error("视频接口没有返回任务 ID");
                     rememberSoraVeoCreatePath(config, createPath);
+                    // 若最终成功的是别名（如 azure-sora），记住本 host 偏好，减少下次 422
+                    if (isSoraVideoModel(selectedName) && requestModel.toLowerCase() !== selectedName.toLowerCase()) {
+                        rememberSoraPreferredRequestModel(config, requestModel);
+                    } else if (isSoraVideoModel(selectedName)) {
+                        // 用户原名直接成功：清掉错误的 azure 优先记忆
+                        clearSoraPreferredRequestModel(config);
+                    }
+                    // 创建响应若已带可播 URL（部分中转同步完成），跳过轮询
+                    const readyUrl = openAiCompatibleVideoUrl(created);
                     // 返回原始 UI 模型选择；上游实际 requestModel + 打通路径 createPath
-                    return { id: created.id, provider: "openai", model, requestModel, createPath };
+                    return {
+                        id: created.id,
+                        provider: "openai",
+                        model,
+                        requestModel,
+                        createPath,
+                        ...(readyUrl ? { readyResult: { url: readyUrl } } : {}),
+                    };
                 } catch (error) {
                     lastError = error;
                     if (options?.signal?.aborted) throw new Error(readAxiosError(error, "视频任务创建失败"));
                     const message = readAxiosError(error, "");
+                    // 合并 axios 原文 + 规范化文案，避免只剩短 message 时漏判 ModelModality
+                    const errorBlob = `${message}\n${collectSoraCreateErrorBlob(error)}`;
 
                     // 路径不存在：立刻换下一条 create path，不继续刷 body/model
-                    if (isMissingSoraVeoCreatePathError(error) || isMissingSoraVeoCreatePathError(message)) {
+                    if (isMissingSoraVeoCreatePathError(error) || isMissingSoraVeoCreatePathError(message) || isMissingSoraVeoCreatePathError(errorBlob)) {
                         rememberSoraVeoCreatePathMissing(config, createPath);
                         pathDead = true;
                         break;
                     }
 
                     // 422 模型不被 VIDEO 端点支持，或 503 当前分组无可用上游：换下一个 model 名
-                    if (shouldSkipToNextVideoModelName(error) || shouldSkipToNextVideoModelName(message)) {
+                    // 注意：绝不能把 ModelModality 422 当最终错误抛出——必须继续试 azure-sora
+                    if (
+                        shouldSkipToNextVideoModelName(error) ||
+                        shouldSkipToNextVideoModelName(message) ||
+                        shouldSkipToNextVideoModelName(errorBlob) ||
+                        isSoraVideoModalityRejectedError(errorBlob)
+                    ) {
                         skipToNextModel = true;
-                        if (isSoraVideoModel(selectedName)) {
-                            if (isUnsupportedVideoModelError(error) || isUnsupportedVideoModelError(message)) {
-                                for (const name of parseSupportedVideoModelsFromError(message)) {
+                        if (isSoraVideoModel(selectedName) || isSoraVideoModel(requestModel)) {
+                            const modalityRejected =
+                                isUnsupportedVideoModelError(error) ||
+                                isUnsupportedVideoModelError(message) ||
+                                isUnsupportedVideoModelError(errorBlob) ||
+                                isSoraVideoModalityRejectedError(errorBlob);
+                            if (modalityRejected) {
+                                modalityRejectedLower.add(requestLower);
+                                // 从 422 Supported models 里抠 sora/azure 名，插到队列最前（紧挨当前之后）
+                                const supported = parseSupportedVideoModelsFromError(errorBlob);
+                                const aliases: string[] = [];
+                                for (const name of supported) {
                                     const trimmed = modelOptionName(name).trim();
                                     if (!trimmed) continue;
                                     if (!isSoraVideoModel(trimmed) && !/azure[-_]?sora/i.test(trimmed)) continue;
-                                    if (triedLower.has(trimmed.toLowerCase())) continue;
-                                    if (modelNames.some((item) => item.toLowerCase() === trimmed.toLowerCase())) continue;
-                                    modelNames.push(trimmed);
+                                    if (modalityRejectedLower.has(trimmed.toLowerCase())) continue;
+                                    aliases.push(trimmed);
                                 }
-                                if (!triedLower.has("azure-sora") && !modelNames.some((item) => item.toLowerCase() === "azure-sora")) {
-                                    modelNames.push("azure-sora");
+                                // 白名单没解析出来时，经典回退仍必须有 azure-sora
+                                if (!aliases.some((item) => item.toLowerCase() === "azure-sora")) aliases.push("azure-sora");
+                                if (!aliases.some((item) => item.toLowerCase() === "azure_sora")) aliases.push("azure_sora");
+                                promoteSoraModelAliases(modelNames, i + 1, aliases, modalityRejectedLower);
+                                // 本 host 明确拒收 sora-2 时，记住下次优先 azure
+                                if (/sora-2|sora sora-2/i.test(errorBlob) && aliases.some((item) => /azure[-_]?sora/i.test(item))) {
+                                    rememberSoraPreferredRequestModel(config, aliases.find((item) => /azure[-_]?sora/i.test(item)) || "azure-sora");
                                 }
                             }
-                            if (isUnavailableVideoChannelError(error) || isUnavailableVideoChannelError(message)) {
-                                for (const alias of ["sora-2", "azure_sora", "sora-2-pro", "azure-sora-pro"]) {
-                                    if (triedLower.has(alias.toLowerCase())) continue;
-                                    if (modelNames.some((item) => item.toLowerCase() === alias.toLowerCase())) continue;
-                                    if (!isSoraVideoModel(alias) && !/azure[-_]?sora/i.test(alias)) continue;
-                                    modelNames.push(alias);
-                                }
+                            if (isUnavailableVideoChannelError(error) || isUnavailableVideoChannelError(message) || isUnavailableVideoChannelError(errorBlob)) {
+                                // 503 无渠道：当前别名不可用，换其它 sora 名；不要标记 modalityRejected
+                                promoteSoraModelAliases(modelNames, i + 1, ["sora-2", "azure_sora", "sora-2-pro", "azure-sora-pro", "azure-sora"], modalityRejectedLower);
                             }
                         }
                         break;
                     }
 
                     // body/上游兼容类：换 body 候选
-                    if (isInvalidVideoRequestBodyError(error) || isInvalidVideoRequestBodyError(message)) {
+                    if (isInvalidVideoRequestBodyError(error) || isInvalidVideoRequestBodyError(message) || isInvalidVideoRequestBodyError(errorBlob)) {
                         bodyExhaustedInvalid = true;
                         continue;
                     }
@@ -576,6 +641,8 @@ async function createSoraVeoOpenAiVideoTask(
 
 /** 按 host 记住 Sora/Veo 创建成功路径 / 不存在路径（与 Grok 缓存隔离） */
 const soraVeoCreatePathMemory = new Map<string, { good?: string; missing: Set<string> }>();
+/** 按 host 记住 VIDEO 端点实际吃得下的 Sora 请求名（如 azure-sora） */
+const soraVeoModelNameMemory = new Map<string, string>();
 
 function soraVeoPathMemoryKey(config: AiConfig) {
     return (config.baseUrl || "").trim().replace(/\/+$/, "").toLowerCase() || "default";
@@ -605,6 +672,88 @@ function rememberSoraVeoCreatePathMissing(config: AiConfig, path: string) {
     mem.missing.add(path);
     if (mem.good === path) mem.good = undefined;
     soraVeoCreatePathMemory.set(key, mem);
+}
+
+function rememberSoraPreferredRequestModel(config: AiConfig, modelName: string) {
+    const name = modelOptionName(modelName).trim();
+    if (!name) return;
+    soraVeoModelNameMemory.set(soraVeoPathMemoryKey(config), name);
+}
+
+function clearSoraPreferredRequestModel(config: AiConfig) {
+    soraVeoModelNameMemory.delete(soraVeoPathMemoryKey(config));
+}
+
+function orderSoraRequestModelsForHost(config: AiConfig, selectedName: string, inventory: string[]): string[] {
+    const base = [...soraRequestModelCandidates(selectedName, inventory)];
+    const preferred = soraVeoModelNameMemory.get(soraVeoPathMemoryKey(config));
+    if (!preferred) return base;
+    const preferredLower = preferred.toLowerCase();
+    // 用户已显式选 azure-sora 等：不改
+    if (selectedName.toLowerCase() === preferredLower) return base;
+    // 把 host 偏好插到最前，用户选择仍保留在列表（偏好失败时可回退）
+    const rest = base.filter((item) => item.toLowerCase() !== preferredLower);
+    return [preferred, ...rest];
+}
+
+/** 把别名插到 queue 的 at 位置，已存在则移到前面；跳过 modality 已拒收的名字 */
+function promoteSoraModelAliases(queue: string[], at: number, aliases: string[], rejectedLower: Set<string>) {
+    const insertAt = Math.max(0, Math.min(at, queue.length));
+    const ordered: string[] = [];
+    for (const alias of aliases) {
+        const value = modelOptionName(alias).trim();
+        if (!value) continue;
+        const lower = value.toLowerCase();
+        if (rejectedLower.has(lower)) continue;
+        if (ordered.some((item) => item.toLowerCase() === lower)) continue;
+        ordered.push(value);
+    }
+    if (!ordered.length) return;
+    // 先从队列去掉即将提升的名字，再按顺序插入
+    for (let i = queue.length - 1; i >= 0; i -= 1) {
+        if (ordered.some((item) => item.toLowerCase() === queue[i].toLowerCase())) {
+            queue.splice(i, 1);
+        }
+    }
+    queue.splice(insertAt, 0, ...ordered);
+}
+
+/** 专门识别 openai2api 一类「sora-2 不在 VIDEO 白名单」422，防止漏判后直接抛错 */
+function isSoraVideoModalityRejectedError(error: unknown) {
+    const blob = collectSoraCreateErrorBlob(error);
+    if (!blob) return false;
+    if (/modelmodality\.video|not supported for.*video endpoint|supported models:\s*\[/i.test(blob) && /sora|validation_error|422/i.test(blob)) {
+        return true;
+    }
+    if (/\b422\b|status=422/i.test(blob) && /sora-2|sora sora-2/i.test(blob) && /not supported|validation_error|supported models/i.test(blob)) {
+        return true;
+    }
+    return false;
+}
+
+function collectSoraCreateErrorBlob(error: unknown): string {
+    if (!error) return "";
+    if (typeof error === "string") return error;
+    const parts: string[] = [];
+    if (error instanceof Error) parts.push(error.message);
+    if (axios.isAxiosError(error)) {
+        if (error.response?.status) parts.push(`status=${error.response.status}`);
+        const data = error.response?.data;
+        if (typeof data === "string") parts.push(data);
+        else if (data && typeof data === "object") {
+            try {
+                parts.push(JSON.stringify(data));
+            } catch {
+                /* ignore */
+            }
+        }
+    }
+    try {
+        parts.push(JSON.stringify(error));
+    } catch {
+        parts.push(String(error));
+    }
+    return parts.filter(Boolean).join("\n");
 }
 
 type SoraVeoPreparedReference = {
@@ -798,7 +947,7 @@ function enhanceSoraVeoCreateError(upstream: string, model: string, hasReference
     if (/invalid request body|invalid_request_error|fail_to_fetch_task|invalid_size|unsupported media type|415/i.test(text)) {
         hints.push("本站已按 New API 精简字段（model/prompt/seconds/size，图生另加 input_reference），不发 resolution_name/preset");
         if (isSoraVideoModel(model) && !/pro/i.test(model)) {
-            hints.push("sora-2 尺寸通常仅 1280x720 / 720x1280；秒数 4/8/12；已自动试字符串/数字 seconds、duration、仅 model+prompt、multipart 字段名，并切换 /videos、/video/generations、/videos/generations");
+            hints.push("sora-2 尺寸通常仅 1280x720 / 720x1280；秒数 4/8/12；已优先 /video/generations + 最小 body {model,prompt,seconds}，并自动试 size/duration/multipart 与 /videos 兜底");
         } else {
             hints.push("秒数用 4/8/12（Sora）或 4/6/8（Veo）；尺寸用面板枚举");
         }
@@ -861,45 +1010,138 @@ export {
 function openAiVideoPollPaths(task: VideoGenerationTask): string[] {
     const id = encodeURIComponent(task.id);
     const preferred: string[] = [];
+    // 参考脚本 veo-sora：GET /v1/video/generations/{id}
     if (task.createPath === "/video/generations") {
-        preferred.push(`/video/generations/${id}`, `/video/generations?request_id=${id}`, `/video/generations?id=${id}`);
+        preferred.push(`/video/generations/${id}`, `/video/generations?request_id=${id}`, `/video/generations?id=${id}`, `/video/generations?task_id=${id}`);
     } else if (task.createPath === "/videos/generations") {
-        preferred.push(`/videos/generations/${id}`, `/videos/generations?request_id=${id}`, `/videos/generations?id=${id}`);
+        preferred.push(`/videos/generations/${id}`, `/videos/generations?request_id=${id}`, `/videos/generations?id=${id}`, `/videos/generations?task_id=${id}`);
+    } else if (task.createPath === "/videos") {
+        preferred.push(`/videos/${id}`, `/videos?request_id=${id}`, `/videos?id=${id}`);
     }
-    // 官方 OpenAI Videos + 通用兜底
-    preferred.push(`/videos/${id}`, `/videos?request_id=${id}`, `/videos/generations?request_id=${id}`, `/video/generations?request_id=${id}`);
+    // 官方 OpenAI Videos + 通用兜底（含创建路径与轮询路径不一致的中转）
+    preferred.push(
+        `/video/generations/${id}`,
+        `/videos/${id}`,
+        `/videos/generations/${id}`,
+        `/video/generations?request_id=${id}`,
+        `/videos?request_id=${id}`,
+        `/videos/generations?request_id=${id}`,
+        `/video/generations?id=${id}`,
+        `/videos/generations?id=${id}`,
+    );
     return Array.from(new Set(preferred));
 }
 
 function openAiVideoContentPaths(task: VideoGenerationTask): string[] {
     const id = encodeURIComponent(task.id);
-    return Array.from(new Set([`/videos/${id}/content`, `/videos/${id}/download`, `/video/generations/${id}/content`, `/videos/generations/${id}/content`]));
+    return Array.from(
+        new Set([
+            `/videos/${id}/content`,
+            `/videos/${id}/download`,
+            `/video/generations/${id}/content`,
+            `/video/generations/${id}/download`,
+            `/videos/generations/${id}/content`,
+            `/videos/generations/${id}/download`,
+        ]),
+    );
+}
+
+function isOpenAiVideoCompletedStatus(status: string) {
+    const value = String(status || "").toLowerCase().trim();
+    if (!value) return false;
+    if (
+        value === "completed" ||
+        value === "complete" ||
+        value === "succeeded" ||
+        value === "success" ||
+        value === "successful" ||
+        value === "done" ||
+        value === "finished" ||
+        value === "finish" ||
+        value === "ready" ||
+        value === "ok" ||
+        value === "process_success" ||
+        value === "generate_success" ||
+        value === "generation_success" ||
+        value === "task_success" ||
+        // 部分中文中转
+        value === "完成" ||
+        value === "成功" ||
+        value === "已完成"
+    ) {
+        return true;
+    }
+    // 宽松：含 success/complete/finish 且不像失败
+    if (/(success|succeed|completed|complete|finished|finish|ready)/i.test(value) && !/(fail|error|cancel|invalid|pending|process(?!_success)|queue|run)/i.test(value)) {
+        return true;
+    }
+    return false;
+}
+
+function isOpenAiVideoFailedStatus(status: string) {
+    const value = String(status || "").toLowerCase().trim();
+    return (
+        value === "failed" ||
+        value === "failure" ||
+        value === "error" ||
+        value === "cancelled" ||
+        value === "canceled" ||
+        value === "expired" ||
+        value === "失败" ||
+        value === "取消" ||
+        value === "已取消" ||
+        value === "超时"
+    );
 }
 
 async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
         let video: VideoResponse | null = null;
         let lastPollError: unknown;
+        let sawNotReady = false;
         for (const path of openAiVideoPollPaths(task)) {
             try {
-                video = unwrapVideoResponse((await axios.get<ApiVideoResponse>(aiApiUrl(config, path), { headers: aiHeaders(config), signal: options?.signal })).data);
+                // 轮询响应常只带 status/url、不再重复 task id；用创建时 id 兜底
+                video = unwrapVideoResponse((await axios.get<ApiVideoResponse>(aiApiUrl(config, path), { headers: aiHeaders(config), signal: options?.signal, timeout: 60000 })).data, {
+                    allowMissingId: true,
+                    fallbackId: task.id,
+                });
                 break;
             } catch (error) {
                 lastPollError = error;
                 const message = readAxiosError(error, "");
-                // 路径不存在再试下一条；任务暂未落库的 404 也继续试其它查询形态
-                if (isMissingSoraVeoCreatePathError(error) || isMissingSoraVeoCreatePathError(message) || (axios.isAxiosError(error) && (error.response?.status === 404 || error.response?.status === 405))) {
+                // 路径不存在 / 任务暂未落库：继续试其它查询形态，不要整轮直接失败
+                if (
+                    isMissingSoraVeoCreatePathError(error) ||
+                    isMissingSoraVeoCreatePathError(message) ||
+                    (axios.isAxiosError(error) && (error.response?.status === 404 || error.response?.status === 405 || error.response?.status === 409 || error.response?.status === 425))
+                ) {
+                    sawNotReady = true;
+                    continue;
+                }
+                // 瞬时网络错误：当 pending，留给下一轮
+                if (axios.isAxiosError(error) && !error.response) {
+                    sawNotReady = true;
                     continue;
                 }
                 throw error;
             }
         }
-        if (!video) throw lastPollError || new Error("视频状态查询失败");
+        // 创建刚成功、查询接口尚未可见时，返回 pending 而不是立刻超时/报错
+        if (!video) {
+            if (sawNotReady) return { status: "pending" };
+            throw lastPollError || new Error("视频状态查询失败");
+        }
+        if (!video.id) video.id = task.id;
 
         // 部分中转在 status 未完成或没有 /content 时直接返回可播 URL
+        // 参考脚本 veo-sora：completed 时读 data.video_url / data.url（含嵌套 data.data）
         const directUrl = openAiCompatibleVideoUrl(video);
         if (directUrl) return { status: "completed", result: await videoResultFromUrl(directUrl, options, config) };
-        if (video.status === "completed") {
+        const status = String(video.status || "").toLowerCase();
+        // progress=100 且无失败态：按完成处理
+        const progressDone = typeof video.progress === "number" && video.progress >= 100;
+        if (isOpenAiVideoCompletedStatus(status) || (progressDone && !isOpenAiVideoFailedStatus(status))) {
             try {
                 // 优先走渠道 Base（/lan-ai）+ Authorization 拉 content，避免返回 127.0.0.1 给浏览器
                 let contentError: unknown;
@@ -915,25 +1157,38 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
                 // /content 不存在时，再尝试从任务体里抠 URL（内网 URL 会再经 /lan-ai + Key 下载）
                 const fallbackUrl = openAiCompatibleVideoUrl(video);
                 if (fallbackUrl) return { status: "completed", result: await videoResultFromUrl(fallbackUrl, options, config) };
+                // 已 completed 但文件暂不可下：继续 pending，避免 5 分钟内因 content 瞬时失败直接挂
+                if (axios.isAxiosError(contentError) && (!contentError.response || contentError.response.status === 404 || contentError.response.status === 409)) {
+                    return { status: "pending" };
+                }
                 throw contentError || new Error("视频已完成但无法下载内容");
             } catch (contentError) {
                 const fallbackUrl = openAiCompatibleVideoUrl(video);
                 if (fallbackUrl) return { status: "completed", result: await videoResultFromUrl(fallbackUrl, options, config) };
+                if (axios.isAxiosError(contentError) && (!contentError.response || contentError.response.status === 404 || contentError.response.status === 409)) {
+                    return { status: "pending" };
+                }
                 throw contentError;
             }
         }
-        if (video.status === "failed" || video.status === "cancelled") {
+        if (isOpenAiVideoFailedStatus(status)) {
             return { status: "failed", error: readErrorPayload(video.error?.message) || readErrorPayload(video) || "视频生成失败" };
         }
         return { status: "pending" };
     } catch (error) {
-        throw new Error(readAxiosError(error, "视频任务查询失败"));
+        // 轮询瞬时失败不要把整次生成打成失败；Sora 排队中常见
+        const message = readAxiosError(error, "视频任务查询失败");
+        if (/timeout|network|econnreset|enotfound|503|502|504|pending|not ready|not found/i.test(message)) {
+            return { status: "pending" };
+        }
+        throw new Error(message);
     }
 }
 
 async function createGrokTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     const payloads = await buildGrokPayloadCandidates(config, model, prompt, references);
     const paths = grokCreatePathCandidates(config, references.length, model);
+    const requestedResolution = normalizeGrokResolution(config.vquality);
     let lastError: unknown;
     let attemptCount = 0;
     let lastCreateUrl = "";
@@ -960,12 +1215,18 @@ async function createGrokTask(config: AiConfig, model: string, prompt: string, r
                 rememberGrokCreatePath(config, path, references.length);
                 const id = readGrokTaskId(created) || "grok-inline";
                 const ready = extractGrokReadyResult(created);
+                const acceptedResolution = readPayloadResolution(payload);
+                const taskBase: VideoGenerationTask = {
+                    id,
+                    provider: "grok",
+                    model,
+                    requestModel: String(payload.model || modelOptionName(model)),
+                    requestedResolution,
+                    acceptedResolution,
+                };
                 if (ready) {
                     return {
-                        id,
-                        provider: "grok",
-                        model,
-                        requestModel: String(payload.model || modelOptionName(model)),
+                        ...taskBase,
                         readyResult: await videoResultFromUrl(ready, options, config),
                     };
                 }
@@ -973,7 +1234,7 @@ async function createGrokTask(config: AiConfig, model: string, prompt: string, r
                 // 新任务清掉「路由不存在」短路与该任务 miss 计数；不删已验证可用的 poll path 缓存
                 grokPollHostState.delete(hostKeyOf(config));
                 grokPollMissCount.delete(pollMissKey(config, id));
-                return { id, provider: "grok", model, requestModel: String(payload.model || modelOptionName(model)) };
+                return taskBase;
             } catch (error) {
                 lastError = error;
                 if (axios.isCancel(error) || options?.signal?.aborted) throw error;
@@ -1016,7 +1277,13 @@ async function createGrokTask(config: AiConfig, model: string, prompt: string, r
             lastCreateUrl = aiApiUrl(config, "/videos");
             const openaiTask = await createOpenAIVideoTask(config, model, prompt, references, options);
             rememberGrokCreatePath(config, "/videos", references.length);
-            return { ...openaiTask, provider: "grok", requestModel: modelOptionName(model) };
+            return {
+                ...openaiTask,
+                provider: "grok",
+                requestModel: modelOptionName(model),
+                requestedResolution,
+                acceptedResolution: openaiTask.acceptedResolution,
+            };
         } catch (error) {
             lastError = error;
             lastCreateUrl = aiApiUrl(config, "/videos");
@@ -1038,6 +1305,7 @@ async function createGrokEditTask(config: AiConfig, model: string, prompt: strin
 
     const payloads = await buildGrokEditPayloadCandidates(config, model, prompt, videoReferences[0]);
     const paths = grokEditPathCandidates(config);
+    const requestedResolution = normalizeGrokResolution(config.vquality);
     let lastError: unknown;
     let attemptCount = 0;
     let lastCreateUrl = "";
@@ -1070,12 +1338,18 @@ async function createGrokEditTask(config: AiConfig, model: string, prompt: strin
                     ? modelOptionName(model)
                     : String((payload as Record<string, unknown>).model || modelOptionName(model));
                 const ready = extractGrokReadyResult(created);
+                const acceptedResolution = isForm ? readFormDataResolution(payload) : readPayloadResolution(payload as Record<string, unknown>);
+                const taskBase: VideoGenerationTask = {
+                    id,
+                    provider: "grok",
+                    model,
+                    requestModel,
+                    requestedResolution,
+                    acceptedResolution,
+                };
                 if (ready) {
                     return {
-                        id,
-                        provider: "grok",
-                        model,
-                        requestModel,
+                        ...taskBase,
                         readyResult: await videoResultFromUrl(ready, options, config),
                     };
                 }
@@ -1083,7 +1357,7 @@ async function createGrokEditTask(config: AiConfig, model: string, prompt: strin
                 // edits 与 generation 共用 GET /videos/{id}；只清 host 短路与本任务 miss
                 grokPollHostState.delete(hostKeyOf(config));
                 grokPollMissCount.delete(pollMissKey(config, id));
-                return { id, provider: "grok", model, requestModel };
+                return taskBase;
             } catch (caught) {
                 lastError = caught;
                 if (axios.isCancel(caught) || options?.signal?.aborted) throw caught;
@@ -1753,14 +2027,18 @@ export async function buildGrokEditPayloadCandidates(config: AiConfig, model: st
     }
     if (videoUrl) {
         for (const nextModel of models) {
-            // 优先带用户比例/时长；无比例的 body 放后面兜底
+            // 优先带用户完整规格（比例 + 清晰度 + 时长）；去掉清晰度/比例只作创建失败兜底
             pushJson({ model: nextModel, prompt, video: { url: videoUrl }, duration, aspect_ratio: aspectRatio, resolution });
-            pushJson({ model: nextModel, prompt, video: { url: videoUrl }, seconds: String(duration), aspect_ratio: aspectRatio });
+            pushJson({ model: nextModel, prompt, video_url: videoUrl, duration, aspect_ratio: aspectRatio, resolution });
+            pushJson({ model: nextModel, prompt, video: videoUrl, duration, aspect_ratio: aspectRatio, resolution });
+            pushJson({ model: nextModel, prompt, input_video: { url: videoUrl }, duration, aspect_ratio: aspectRatio, resolution });
+            pushJson({ model: nextModel, prompt, video: { url: videoUrl }, seconds: String(duration), aspect_ratio: aspectRatio, resolution });
+            pushJson({ model: nextModel, prompt, video_url: videoUrl, seconds: String(duration), aspect_ratio: aspectRatio, resolution });
+            // 创建失败后再试：有比例无清晰度
+            pushJson({ model: nextModel, prompt, video: { url: videoUrl }, duration, aspect_ratio: aspectRatio });
             pushJson({ model: nextModel, prompt, video_url: videoUrl, duration, aspect_ratio: aspectRatio });
-            pushJson({ model: nextModel, prompt, video_url: videoUrl, seconds: String(duration), aspect_ratio: aspectRatio });
             pushJson({ model: nextModel, prompt, video: videoUrl, duration, aspect_ratio: aspectRatio });
-            pushJson({ model: nextModel, prompt, input_video: { url: videoUrl }, duration, aspect_ratio: aspectRatio });
-            // 兜底：无比例
+            // 末位兜底：无比例
             pushJson({ model: nextModel, prompt, video: { url: videoUrl }, duration });
             pushJson({ model: nextModel, prompt, video_url: videoUrl, duration });
             pushJson({ model: nextModel, prompt, video: videoUrl, duration });
@@ -1937,8 +2215,7 @@ export async function buildGrokPayloadCandidates(config: AiConfig, model: string
     const channel = resolveModelChannel(config, model);
     const models = grokModelCandidates(modelName, imageInputs.length, config.baseUrl, channel.models || []);
     const relay = isCodex2apiBaseUrl(config.baseUrl) || isLanAiBaseUrl(config.baseUrl);
-    // 图生视频：codex2api/内网中继上 1080p 常“创建成功但忽略参考图”。HTTP 一成功就不会再试其它候选，
-    // 所以 I2V 在脆弱中转上优先 720p（保留图），再试用户选的 1080p。纯文生仍优先用户分辨率。
+    // 清晰度候选：用户所选优先（选 1080p 就先发 1080p）。失败再降 720/480；不再静默把图生 1080 改成先 720。
     const resolutions = grokResolutionCandidates(resolution, imageInputs.length, config.baseUrl);
 
     const candidates: Array<Record<string, unknown>> = [];
@@ -1948,21 +2225,26 @@ export async function buildGrokPayloadCandidates(config: AiConfig, model: string
         candidates.push(payload);
     };
 
-    // 用户选的比例/时长必须进主候选。无 aspect_ratio 的 body 只能作末位兜底，
-    // 否则中转一接住「仅 duration」就会固定默认 16:9 / 8s，看起来像 UI 没生效。
+    // 用户选的比例/时长/清晰度必须进主候选。
+    // 顺序硬约束：① 完整用户规格 ② 字段变体（仍保留用户规格）③ 仅创建失败后的降档/去字段兜底。
+    // 禁止用无 resolution 或更低 resolution 的 body 抢先成功。
     if (!imageInputs.length) {
+        // 1) 所有模型先完整用户规格
         for (const nextModel of models) {
-            // 文生视频优先完整参数
-            for (const nextResolution of resolutions) {
-                pushUnique({ model: nextModel, prompt, duration, aspect_ratio: aspectRatio, resolution: nextResolution });
-            }
-            pushUnique({ model: nextModel, prompt, duration, aspect_ratio: aspectRatio });
+            pushUnique({ model: nextModel, prompt, duration, aspect_ratio: aspectRatio, resolution });
             pushUnique({ model: nextModel, prompt, seconds: String(duration), aspect_ratio: aspectRatio, resolution });
-            pushUnique({ model: nextModel, prompt, seconds: duration, aspect_ratio: aspectRatio, resolution: "720p" });
-            // OpenAI Videos 兼容（New API 等）：seconds + WxH size
             const openAiSize = openAiVideoSizeFromGrok(aspectRatio, resolution);
             if (openAiSize) pushUnique({ model: nextModel, prompt, seconds: String(duration), size: openAiSize });
-            // 末位兜底：不带比例（仅当上游拒绝 aspect_ratio 字段时）
+        }
+        // 2) 创建失败后再降清晰度（只降不升）
+        for (const nextResolution of resolutions.slice(1)) {
+            for (const nextModel of models) {
+                pushUnique({ model: nextModel, prompt, duration, aspect_ratio: aspectRatio, resolution: nextResolution });
+            }
+        }
+        // 3) 去掉清晰度 / 比例的兜底
+        for (const nextModel of models) {
+            pushUnique({ model: nextModel, prompt, duration, aspect_ratio: aspectRatio });
             pushUnique({ model: nextModel, prompt, duration });
             pushUnique({ model: nextModel, prompt, seconds: String(duration) });
         }
@@ -1974,42 +2256,61 @@ export async function buildGrokPayloadCandidates(config: AiConfig, model: string
     // 勿混用 image + reference_images。
     if (imageInputs.length === 1) {
         const image = imageInputs[0];
-        const preferredResolution = resolutions[0] || resolution;
-        // 单图 I2V：对齐 92f9cd9 / 同事可用路径——最小 body 优先，再补比例/分辨率。
-        // 满字段（长 prompt + data URI + aspect/resolution）在 codex2api/xAI 上更易 400；
-        // 纯文生仍优先用户比例；多图仍全量参考图。不截断 prompt。
+        // 单图 I2V：完整用户规格必须先于任何降档/无 resolution 最小 body。
+        // 多模型时也先让每个模型都试用户规格，再统一降档——禁止 modelA 的 720 抢在 modelB 的 1080 前。
+        // 1) 用户所选清晰度 + 比例（所有模型 × 字段变体）
         for (const nextModel of models) {
-            // 1) 最小成功面（官方常见：model + prompt + image + duration）
-            pushUnique({ model: nextModel, prompt, image, duration });
-            pushUnique({ model: nextModel, prompt, image: image.url, duration });
-            // 2) 带用户比例 + 分辨率阶梯（脆弱中转 I2V 会先 720p）
-            for (const nextResolution of resolutions) {
+            pushUnique({ model: nextModel, prompt, image, duration, aspect_ratio: aspectRatio, resolution });
+            pushUnique({ model: nextModel, prompt, image: image.url, duration, aspect_ratio: aspectRatio, resolution });
+            pushUnique({ model: nextModel, prompt, image_url: image.url, duration, aspect_ratio: aspectRatio, resolution });
+            if (!relay) pushUnique({ model: nextModel, prompt, images: [image.url], duration, aspect_ratio: aspectRatio, resolution });
+        }
+        // 2) 创建失败后再降清晰度（只降不升）
+        for (const nextResolution of resolutions.slice(1)) {
+            for (const nextModel of models) {
                 pushUnique({ model: nextModel, prompt, image, duration, aspect_ratio: aspectRatio, resolution: nextResolution });
             }
+        }
+        // 3) 有比例但无分辨率
+        for (const nextModel of models) {
             pushUnique({ model: nextModel, prompt, image, duration, aspect_ratio: aspectRatio });
-            pushUnique({ model: nextModel, prompt, image: image.url, duration, aspect_ratio: aspectRatio, resolution: preferredResolution });
             pushUnique({ model: nextModel, prompt, image_url: image.url, duration, aspect_ratio: aspectRatio });
+        }
+        // 4) 最小成功面兜底——放最后
+        for (const nextModel of models) {
+            pushUnique({ model: nextModel, prompt, image, duration });
+            pushUnique({ model: nextModel, prompt, image: image.url, duration });
             pushUnique({ model: nextModel, prompt, image_url: image.url, duration });
-            if (!relay) pushUnique({ model: nextModel, prompt, images: [image.url], duration, aspect_ratio: aspectRatio });
         }
     } else {
         // 多图参考生视频 = multi-reference generation（POST /videos/generations），不是 video edits
-        // 保留用户时长与比例；大 body 失败再由 retry 换字段，不再静默截断到 8s
-        // 顺序：① 完整 reference_images 对象 + 分辨率阶梯（脆弱中转 1080→先 720）
-        //      ② 其它多图字段风格（urls / images / image_urls）
-        //      ③ 无比例/无分辨率兜底
+        // 顺序：① 完整用户规格 + 全量参考图（多种字段写法）
+        //      ② 创建失败后降清晰度
+        //      ③ 无分辨率 / 无比例兜底
         // 双模型仍用 round-robin interleave，避免某一模型把 slice 配额吃光
         const labeledPrompt = buildGrokReferencePrompt(prompt, imageInputs.length);
         const urls = imageInputs.map((item) => item.url);
-        const preferredResolution = resolutions[0] || resolution;
         const perModel = models.map((nextModel) => {
             const payloads: Array<Record<string, unknown>> = [];
             const push = (payload: Record<string, unknown>) => {
                 const key = JSON.stringify(payload);
                 if (!payloads.some((item) => JSON.stringify(item) === key)) payloads.push(payload);
             };
-            // 1) 完整 reference_images 先走分辨率阶梯，保证 720p 全图候选不会被字段变体挤出 slice
-            for (const nextResolution of resolutions) {
+            // 1) 用户所选清晰度 + 全量参考图（字段变体）
+            push({
+                model: nextModel,
+                prompt: labeledPrompt,
+                reference_images: imageInputs,
+                duration,
+                aspect_ratio: aspectRatio,
+                resolution,
+            });
+            push({ model: nextModel, prompt: labeledPrompt, reference_images: urls, duration, aspect_ratio: aspectRatio, resolution });
+            push({ model: nextModel, prompt: labeledPrompt, images: urls, duration, aspect_ratio: aspectRatio, resolution });
+            push({ model: nextModel, prompt: labeledPrompt, image_urls: urls, duration, aspect_ratio: aspectRatio, resolution });
+            push({ model: nextModel, prompt: labeledPrompt, images: imageInputs, duration, aspect_ratio: aspectRatio, resolution });
+            // 2) 创建失败后再降清晰度（只降不升），仍保留全量参考图
+            for (const nextResolution of resolutions.slice(1)) {
                 push({
                     model: nextModel,
                     prompt: labeledPrompt,
@@ -2019,17 +2320,12 @@ export async function buildGrokPayloadCandidates(config: AiConfig, model: string
                     resolution: nextResolution,
                 });
             }
-            // 2) 其它多图字段风格（中转兼容）
-            push({ model: nextModel, prompt: labeledPrompt, reference_images: urls, duration, aspect_ratio: aspectRatio, resolution: preferredResolution });
-            push({ model: nextModel, prompt: labeledPrompt, images: urls, duration, aspect_ratio: aspectRatio, resolution: preferredResolution });
-            push({ model: nextModel, prompt: labeledPrompt, image_urls: urls, duration, aspect_ratio: aspectRatio, resolution: preferredResolution });
-            push({ model: nextModel, prompt: labeledPrompt, images: imageInputs, duration, aspect_ratio: aspectRatio, resolution: preferredResolution });
             // 3) 无分辨率 / 无比例兜底
             push({ model: nextModel, prompt: labeledPrompt, reference_images: imageInputs, duration, aspect_ratio: aspectRatio });
             push({ model: nextModel, prompt: labeledPrompt, reference_images: imageInputs, duration });
             if (!relay) {
-                push({ model: nextModel, prompt: labeledPrompt, image: imageInputs, duration, aspect_ratio: aspectRatio });
-                push({ model: nextModel, prompt: labeledPrompt, image: urls, duration, aspect_ratio: aspectRatio });
+                push({ model: nextModel, prompt: labeledPrompt, image: imageInputs, duration, aspect_ratio: aspectRatio, resolution });
+                push({ model: nextModel, prompt: labeledPrompt, image: urls, duration, aspect_ratio: aspectRatio, resolution });
             }
             return payloads;
         });
@@ -2042,8 +2338,9 @@ export async function buildGrokPayloadCandidates(config: AiConfig, model: string
         }
     }
 
-    // multi relay 略抬高到 14，保证双模型 + 分辨率阶梯后全图 720p 仍在 slice 内
-    const limit = imageInputs.length > 1 ? (relay ? 14 : 16) : relay ? 10 : 6;
+    // multi relay 14：双模型 + 用户规格字段变体 + 降档后全图仍在。
+    // 单图 relay 14：双模型用户规格（约 6）+ 降档 + 去字段/最小 body 兜底不被 slice 裁掉。
+    const limit = imageInputs.length > 1 ? (relay ? 14 : 16) : relay ? 14 : 10;
     return candidates.slice(0, limit);
 }
 
@@ -2169,19 +2466,33 @@ async function resolveReferenceBinaryDataUrl(image: ReferenceImage) {
 }
 
 /**
- * Grok 分辨率候选顺序。
- * - 纯文生：用户选择优先，再降 720/480
- * - 图生 + 脆弱中转（codex2api / lan-ai）：若用户选 1080p，优先 720p。
- *   中转常对 1080p I2V 返回成功任务但丢参考图；首个 200 会短路后续候选。
- * - 官方 xAI 等：仍优先用户 1080p
+ * Grok 分辨率候选顺序：始终用户选择优先，再**只降不升**。
+ * - 选 1080p → [1080p, 720p, 480p]
+ * - 选 720p  → [720p, 480p]（不会再试 1080）
+ * - 选 480p  → [480p]（不会升到 720）
+ * 不再在脆弱中转图生时静默把 1080p 改成先发 720p。
+ * 降档仅在创建请求失败后发生；若中转“成功但实际低清”，靠结果分辨率校验提示。
  */
 export function grokResolutionCandidates(resolution: string, imageCount: number, baseUrl = "") {
+    void imageCount;
+    void baseUrl;
     const primary = normalizeGrokResolution(resolution);
-    const fragileRelay = isCodex2apiBaseUrl(baseUrl) || isLanAiBaseUrl(baseUrl);
-    if (imageCount > 0 && fragileRelay && primary === "1080p") {
-        return ["720p", "1080p", "480p"];
-    }
-    return Array.from(new Set([primary, "720p", "480p"].filter(Boolean)));
+    if (primary === "1080p") return ["1080p", "720p", "480p"];
+    if (primary === "480p") return ["480p"];
+    return ["720p", "480p"];
+}
+
+function readPayloadResolution(payload: Record<string, unknown> | null | undefined) {
+    if (!payload || typeof payload !== "object") return undefined;
+    const raw = payload.resolution;
+    if (typeof raw === "string" && raw.trim()) return normalizeGrokResolution(raw);
+    return undefined;
+}
+
+function readFormDataResolution(body: FormData) {
+    const raw = body.get("resolution");
+    if (typeof raw === "string" && raw.trim()) return normalizeGrokResolution(raw);
+    return undefined;
 }
 
 function openAiVideoSizeFromGrok(aspectRatio: string, resolution: string) {
@@ -2508,8 +2819,192 @@ function normalizeVideoResolution(value: string) {
     return `${resolution}p`;
 }
 
-function unwrapVideoResponse(payload: ApiVideoResponse) {
-    return unwrapEnvelope(payload, "接口没有返回视频任务");
+type UnwrapVideoOptions = {
+    /** 轮询响应常不回 id，允许用 fallbackId */
+    allowMissingId?: boolean;
+    fallbackId?: string;
+};
+
+function unwrapVideoResponse(payload: ApiVideoResponse, options?: UnwrapVideoOptions): VideoResponse {
+    if (!payload) throw new Error("接口没有返回视频任务");
+
+    // 对齐可用脚本 veo-sora：响应可能是
+    // {id} / {code,data:{id}} / {data:{data:{id,status,video_url}}}
+    // 关键：外层只有 id/request_id，status/video_url 在 data 里 —— 必须合并嵌套字段，
+    // 否则轮询会一直 pending 直到超时。
+    // 只给 OpenAI/Sora/Veo 用；Seedance/Agnes/Grok 各自有解析器
+    const layers: Record<string, unknown>[] = [];
+    let node: unknown = payload;
+    for (let depth = 0; depth < 6; depth += 1) {
+        if (!node || typeof node !== "object" || Array.isArray(node)) break;
+        const record = node as Record<string, unknown>;
+        layers.push(record);
+
+        if ("code" in record && record.code !== undefined) {
+            const code = String(record.code).toLowerCase();
+            if (code !== "0" && code !== "200" && code !== "ok" && code !== "success" && code !== "null" && code !== "") {
+                // 有的轮询用 code 表示业务失败；排队/处理中文案不要当失败
+                const errText = readErrorPayload(record);
+                if (errText && !/success|ok|pending|processing|running|queued|queue|in[_ ]?progress|waiting|生成中|排队|处理中/i.test(errText)) {
+                    throw new Error(errText || "视频任务创建失败");
+                }
+            }
+        }
+
+        const nested =
+            (record.data && typeof record.data === "object" && !Array.isArray(record.data) && record.data) ||
+            (record.result && typeof record.result === "object" && !Array.isArray(record.result) && record.result) ||
+            (record.task && typeof record.task === "object" && !Array.isArray(record.task) && record.task) ||
+            (record.response && typeof record.response === "object" && !Array.isArray(record.response) && record.response) ||
+            (record.payload && typeof record.payload === "object" && !Array.isArray(record.payload) && record.payload) ||
+            null;
+        if (nested) {
+            node = nested;
+            continue;
+        }
+        break;
+    }
+
+    if (!layers.length) throw new Error("接口没有返回视频任务");
+
+    // 从外到内合并：内层 status/url 覆盖外层；id 取第一个非空
+    const merged: Record<string, unknown> = {};
+    for (const layer of layers) {
+        for (const [key, value] of Object.entries(layer)) {
+            if (value === undefined || value === null || value === "") continue;
+            // 不把外层空壳 data 盖住内层已展开字段
+            if (key === "data" || key === "result" || key === "task" || key === "response" || key === "payload") continue;
+            merged[key] = value;
+        }
+    }
+
+    const id =
+        pickOpenAiVideoTaskId(merged) ||
+        layers.map((layer) => pickOpenAiVideoTaskId(layer)).find(Boolean) ||
+        (options?.fallbackId || "").trim() ||
+        "";
+    if (!id) {
+        // 创建必须有 id；轮询可仅有 status/url
+        const hasPollSignal = Boolean(pickOpenAiVideoStatus(merged) || pickOpenAiVideoUrlFromRecord(merged));
+        if (!(options?.allowMissingId && hasPollSignal)) {
+            throw new Error("视频接口没有返回任务 ID");
+        }
+    }
+    return normalizeOpenAiVideoResponse(merged, id || options?.fallbackId || "unknown");
+}
+
+/** 单测：嵌套 envelope / 无 id 轮询体解包 */
+export function unwrapOpenAiVideoResponseForTest(payload: unknown, options?: UnwrapVideoOptions): VideoResponse {
+    return unwrapVideoResponse(payload as ApiVideoResponse, options);
+}
+
+function pickOpenAiVideoTaskId(record: Record<string, unknown>): string {
+    for (const key of ["id", "task_id", "request_id", "video_id", "job_id", "taskId", "requestId"]) {
+        const value = record[key];
+        if (typeof value === "string" && value.trim()) return value.trim();
+        if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    }
+    return "";
+}
+
+function pickOpenAiVideoStatus(record: Record<string, unknown>): string | undefined {
+    for (const key of ["status", "state", "task_status", "taskStatus", "video_status", "phase", "job_status", "jobStatus"]) {
+        const value = record[key];
+        if (typeof value === "string" && value.trim()) return value.trim();
+        if (typeof value === "number" && Number.isFinite(value)) {
+            // 少数中转：1 成功 0 排队 2 失败；也有 100 表示进度完成
+            if (value === 1 || value === 100) return "completed";
+            if (value === 2 || value === -1 || value === 3) return "failed";
+            if (value === 0) return "pending";
+        }
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+            const nested = value as Record<string, unknown>;
+            for (const nestedKey of ["status", "state", "name", "value", "label"]) {
+                const nestedValue = nested[nestedKey];
+                if (typeof nestedValue === "string" && nestedValue.trim()) return nestedValue.trim();
+            }
+        }
+    }
+    // progress 字段：100 → completed
+    const progress = record.progress ?? record.percent ?? record.percentage;
+    if (typeof progress === "number" && progress >= 100) return "completed";
+    if (typeof progress === "string" && /^\d+(\.\d+)?%?$/.test(progress.trim())) {
+        const num = Number(progress.replace("%", ""));
+        if (Number.isFinite(num) && num >= 100) return "completed";
+    }
+    return undefined;
+}
+
+function pickOpenAiVideoUrlFromRecord(record: Record<string, unknown>): string {
+    const directKeys = ["video_url", "result_url", "output_url", "download_url", "url", "video", "output", "file_url", "mp4_url"];
+    for (const key of directKeys) {
+        const value = record[key];
+        if (typeof value === "string" && (isPublicMediaUrl(value) || /\.mp4(\?|#|$)/i.test(value) || value.startsWith("blob:"))) {
+            return value;
+        }
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+            const nested = value as Record<string, unknown>;
+            for (const nestedKey of directKeys) {
+                const nestedValue = nested[nestedKey];
+                if (typeof nestedValue === "string" && (isPublicMediaUrl(nestedValue) || /\.mp4(\?|#|$)/i.test(nestedValue))) {
+                    return nestedValue;
+                }
+            }
+        }
+        if (Array.isArray(value)) {
+            for (const item of value) {
+                if (typeof item === "string" && (isPublicMediaUrl(item) || /\.mp4(\?|#|$)/i.test(item))) return item;
+                if (item && typeof item === "object") {
+                    const nested = item as Record<string, unknown>;
+                    for (const nestedKey of directKeys) {
+                        const nestedValue = nested[nestedKey];
+                        if (typeof nestedValue === "string" && (isPublicMediaUrl(nestedValue) || /\.mp4(\?|#|$)/i.test(nestedValue))) {
+                            return nestedValue;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (record.content && typeof record.content === "object") {
+        const content = record.content as Record<string, unknown>;
+        for (const key of ["video_url", "url", "download_url", "result_url"]) {
+            const value = content[key];
+            if (typeof value === "string" && (isPublicMediaUrl(value) || /\.mp4(\?|#|$)/i.test(value))) return value;
+        }
+    }
+    return "";
+}
+
+function normalizeOpenAiVideoResponse(record: Record<string, unknown>, id: string): VideoResponse {
+    const status = pickOpenAiVideoStatus(record);
+    const pickedUrl = pickOpenAiVideoUrlFromRecord(record);
+    // message 在排队时常是 "ok"/"success"，不能当 error；仅明确失败词才收
+    const messageLooksFailed = typeof record.message === "string" && /fail|error|invalid|cancel|拒绝|失败/i.test(record.message) && !/success|ok|pending|processing|queued|running/i.test(record.message);
+    const error =
+        record.error && typeof record.error === "object"
+            ? (record.error as { message?: string })
+            : typeof record.error === "string"
+              ? { message: record.error }
+              : messageLooksFailed
+                ? { message: String(record.message) }
+                : undefined;
+    const content =
+        record.content && typeof record.content === "object"
+            ? (record.content as { video_url?: string; url?: string })
+            : null;
+    const progressRaw = record.progress ?? record.percent ?? record.percentage;
+    const progress = typeof progressRaw === "number" ? progressRaw : typeof progressRaw === "string" ? Number(String(progressRaw).replace("%", "")) : undefined;
+    return {
+        id,
+        status,
+        error,
+        url: typeof record.url === "string" ? record.url : pickedUrl || undefined,
+        result_url: typeof record.result_url === "string" ? record.result_url : undefined,
+        video_url: typeof record.video_url === "string" ? record.video_url : pickedUrl || undefined,
+        content,
+        ...(typeof progress === "number" && Number.isFinite(progress) ? { progress } : {}),
+    } as VideoResponse;
 }
 
 function unwrapSeedanceTask(payload: ApiEnvelope<SeedanceTask>) {
@@ -2712,7 +3207,13 @@ function unwrapEnvelope<T>(payload: ApiEnvelope<T>, emptyMessage: string): T {
 /** OpenAI / Seedance 兼容：从任务响应里尽量抠可播 URL（不碰 Grok 专用解析） */
 function openAiCompatibleVideoUrl(payload: VideoResponse | SeedanceTask) {
     const candidates = [payload.video_url, payload.result_url, payload.url, payload.content?.video_url, payload.content?.url];
-    return candidates.find((url) => typeof url === "string" && (isPublicMediaUrl(url) || /\.mp4(\?|#|$)/i.test(url))) || "";
+    const hit = candidates.find((url) => typeof url === "string" && (isPublicMediaUrl(url) || /\.mp4(\?|#|$)/i.test(url) || url.startsWith("blob:")));
+    if (hit) return hit;
+    // 兜底：整包再扫一遍（兼容 normalize 漏掉的别名字段）
+    if (payload && typeof payload === "object") {
+        return pickOpenAiVideoUrlFromRecord(payload as unknown as Record<string, unknown>);
+    }
+    return "";
 }
 
 function readAxiosError(error: unknown, fallback: string) {

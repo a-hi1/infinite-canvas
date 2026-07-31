@@ -1,5 +1,9 @@
 import localforage from "localforage";
 
+import { isLocalParserPromptSourceId, type PromptSource } from "@/services/api/prompt-source-presets";
+import { runPromptSource, type RawPrompt } from "@/services/api/prompt-source-runtime";
+import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
+
 export type Prompt = {
     id: string;
     title: string;
@@ -17,6 +21,8 @@ export type Prompt = {
     qualityScore?: number;
     hasCover?: boolean;
     topic?: string;
+    /** 配置页「提示词来源」id；内置源与 category 相同 */
+    sourceId?: string;
 };
 
 type PromptCategory = {
@@ -52,6 +58,7 @@ export function clearBrokenPromptCovers() {
 
 export type PromptQualityMode = (typeof PROMPT_QUALITY_MODES)[number]["value"];
 
+/** 浏览页失败横幅用的来源摘要（兼容旧字段） */
 export type PromptSourceStatus = {
     category: string;
     label: string;
@@ -59,6 +66,26 @@ export type PromptSourceStatus = {
     count: number;
     ok: boolean;
     error?: string;
+};
+
+/** 配置页「提示词来源」状态 */
+export type PromptSourceRuntimeStatus = {
+    sourceId: string;
+    count: number;
+    lastSuccessAt: string;
+    lastError: string;
+};
+
+export type PromptSourceRefreshResult = PromptSourceRuntimeStatus & {
+    sourceName: string;
+    success: boolean;
+};
+
+export type PromptSourceRefreshSummary = {
+    results: PromptSourceRefreshResult[];
+    total: number;
+    successCount: number;
+    failureCount: number;
 };
 
 export type PromptListResponse = {
@@ -71,6 +98,12 @@ export type PromptListResponse = {
     sources: PromptSourceStatus[];
     fetchedAt: number;
     fromCache: boolean;
+};
+
+type SourceCache = PromptSourceRuntimeStatus & {
+    items: Prompt[];
+    fetchedAt: number;
+    signature: string;
 };
 
 const awesomeGptImageRawBase = "https://raw.githubusercontent.com/ZeroLu/awesome-gpt-image/main";
@@ -92,17 +125,187 @@ export const MY_PROMPTS_CATEGORY = "my-prompts";
 export const FAVORITES_CATEGORY = "favorites";
 
 const categories: PromptCategory[] = [
-    { category: "awesome-gpt-image", label: "GPT 图像精选", githubUrl: "https://github.com/ZeroLu/awesome-gpt-image", build: buildAwesomeGptImagePrompts },
-    { category: "awesome-gpt4o-image-prompts", label: "GPT-4o 图像", githubUrl: "https://github.com/ImgEdify/Awesome-GPT4o-Image-Prompts", build: buildAwesomeGpt4oImagePrompts },
-    { category: "youmind-gpt-image-2", label: "GPT Image 2", githubUrl: "https://github.com/YouMind-OpenLab/awesome-gpt-image-2", build: () => buildYouMindPrompts(youMindGptImage2RawBase, "youmind-gpt-image-2", "gpt-image-2") },
-    { category: "youmind-nano-banana-pro", label: "Nano Banana Pro", githubUrl: "https://github.com/YouMind-OpenLab/awesome-nano-banana-pro-prompts", build: () => buildYouMindPrompts(youMindNanoBananaProRawBase, "youmind-nano-banana-pro", "nano-banana-pro") },
-    { category: "davidwu-gpt-image2-prompts", label: "GPT Image2 合集", githubUrl: "https://github.com/davidwuw0811-boop/awesome-gpt-image2-prompts", build: buildDavidWuGptImage2Prompts },
+    { category: "awesome-gpt-image", label: "Awesome GPT Image", githubUrl: "https://github.com/ZeroLu/awesome-gpt-image", build: buildAwesomeGptImagePrompts },
+    { category: "awesome-gpt4o-image-prompts", label: "Awesome GPT-4o", githubUrl: "https://github.com/ImgEdify/Awesome-GPT4o-Image-Prompts", build: buildAwesomeGpt4oImagePrompts },
+    { category: "youmind-gpt-image-2", label: "YouMind GPT Image 2", githubUrl: "https://github.com/YouMind-OpenLab/awesome-gpt-image-2", build: () => buildYouMindPrompts(youMindGptImage2RawBase, "youmind-gpt-image-2", "gpt-image-2") },
+    { category: "youmind-nano-banana-pro", label: "YouMind Nano Banana Pro", githubUrl: "https://github.com/YouMind-OpenLab/awesome-nano-banana-pro-prompts", build: () => buildYouMindPrompts(youMindNanoBananaProRawBase, "youmind-nano-banana-pro", "nano-banana-pro") },
+    { category: "davidwu-gpt-image2-prompts", label: "DavidWu GPT Image 2", githubUrl: "https://github.com/davidwuw0811-boop/awesome-gpt-image2-prompts", build: buildDavidWuGptImage2Prompts },
 ];
 
 const categoryLabelMap = Object.fromEntries(categories.map((item) => [item.category, item.label]));
+const builtinCategoryById = Object.fromEntries(categories.map((item) => [item.category, item]));
+const loadingSources = new Map<string, Promise<PromptSourceRefreshResult>>();
 
 let loadingPrompts: Promise<{ items: Prompt[]; sources: PromptSourceStatus[]; fetchedAt: number; fromCache: boolean }> | null = null;
 let memoryBundle: { items: Prompt[]; sources: PromptSourceStatus[]; fetchedAt: number; fromCache: boolean } | null = null;
+
+function enabledPromptSources() {
+    return usePromptSourceStore.getState().sources.filter((source) => source.enabled);
+}
+
+function sourceCacheKey(sourceId: string) {
+    return `prompt-source:${sourceId}`;
+}
+
+function sourceSignature(source: PromptSource) {
+    const value = `${source.name}\n${source.url}\n${source.homepage}`;
+    let hash = 0;
+    for (let i = 0; i < value.length; i += 1) hash = (hash * 31 + value.charCodeAt(i)) | 0;
+    return `${value.length}:${hash}`;
+}
+
+function withSourceMeta(source: PromptSource, items: Array<Omit<Prompt, "category" | "githubUrl"> | RawPrompt | Prompt>): Prompt[] {
+    return items.map((item) => {
+        const raw = item as Prompt & RawPrompt;
+        return enrichPrompt({
+            id: raw.id,
+            title: raw.title,
+            coverUrl: raw.coverUrl || "",
+            prompt: raw.prompt,
+            tags: Array.isArray(raw.tags) ? raw.tags : [],
+            category: source.id,
+            githubUrl: raw.githubUrl || raw.sourceUrl || source.homepage || source.url || "",
+            preview: raw.preview || "",
+            createdAt: raw.createdAt || "",
+            updatedAt: raw.updatedAt || "",
+            summary: raw.summary || raw.description || undefined,
+            qualityScore: raw.qualityScore,
+            hasCover: raw.hasCover,
+            topic: raw.topic,
+            sourceId: source.id,
+        });
+    });
+}
+
+async function readSourceCache(sourceId: string) {
+    return promptCacheStore.getItem<SourceCache>(sourceCacheKey(sourceId));
+}
+
+async function writeSourceCache(cache: SourceCache) {
+    await promptCacheStore.setItem(sourceCacheKey(cache.sourceId), cache);
+}
+
+async function buildLocalParserSourceItems(source: PromptSource) {
+    const category = builtinCategoryById[source.id];
+    if (!category) throw new Error(`内置来源「${source.name}」不可用`);
+    const items = await category.build();
+    return withSourceMeta(source, items);
+}
+
+async function buildJsonSourceItems(source: PromptSource) {
+    return withSourceMeta(source, await runPromptSource(source));
+}
+
+/**
+ * 拉取策略（适配上游 registry + 本地解析器）：
+ * 1. 有 URL → 优先 registry / 自定义 JSON；
+ * 2. JSON 失败且存在本地 markdown 解析器 → 回退本地解析；
+ * 3. 无 URL 的内置源 → 仅本地解析。
+ */
+async function buildSourceItems(source: PromptSource) {
+    const hasUrl = Boolean(source.url.trim());
+    const hasLocalParser = isLocalParserPromptSourceId(source.id) || Boolean(builtinCategoryById[source.id]);
+
+    if (hasUrl) {
+        try {
+            return await buildJsonSourceItems(source);
+        } catch (error) {
+            if (!hasLocalParser) throw error;
+            return await buildLocalParserSourceItems(source);
+        }
+    }
+
+    if (hasLocalParser) return buildLocalParserSourceItems(source);
+    throw new Error(`来源「${source.name}」缺少 JSON URL，且没有本地解析器`);
+}
+
+async function refreshSourceRecord(source: PromptSource): Promise<PromptSourceRefreshResult> {
+    const previous = await readSourceCache(source.id);
+    try {
+        const items = await buildSourceItems(source);
+        const lastSuccessAt = new Date().toISOString();
+        const cache: SourceCache = {
+            sourceId: source.id,
+            items,
+            count: items.length,
+            fetchedAt: Date.now(),
+            lastSuccessAt,
+            lastError: "",
+            signature: sourceSignature(source),
+        };
+        await writeSourceCache(cache);
+        return { sourceId: source.id, sourceName: source.name, count: items.length, lastSuccessAt, lastError: "", success: true };
+    } catch (error) {
+        const lastError = error instanceof Error ? error.message : String(error);
+        const cache: SourceCache = {
+            sourceId: source.id,
+            items: previous?.items || [],
+            count: previous?.items?.length || 0,
+            fetchedAt: previous?.fetchedAt || 0,
+            lastSuccessAt: previous?.lastSuccessAt || "",
+            lastError,
+            signature: previous?.signature || sourceSignature(source),
+        };
+        await writeSourceCache(cache);
+        return { sourceId: source.id, sourceName: source.name, count: cache.count, lastSuccessAt: cache.lastSuccessAt, lastError, success: false };
+    }
+}
+
+function getOrStartSourceRefresh(source: PromptSource) {
+    const current = loadingSources.get(source.id);
+    if (current) return current;
+    const loading = refreshSourceRecord(source).finally(() => loadingSources.delete(source.id));
+    loadingSources.set(source.id, loading);
+    return loading;
+}
+
+async function getSourcePromptItems(source: PromptSource, forceRefresh = false): Promise<{ items: Prompt[]; status: PromptSourceStatus }> {
+    if (!forceRefresh) {
+        const cached = await readSourceCache(source.id);
+        if (cached?.items?.length && cached.signature === sourceSignature(source) && Date.now() - cached.fetchedAt < cacheTtlMs) {
+            return {
+                items: withSourceMeta(source, cached.items),
+                status: {
+                    category: source.id,
+                    label: source.name,
+                    githubUrl: source.homepage || source.url,
+                    count: cached.items.length,
+                    ok: !cached.lastError,
+                    error: cached.lastError || undefined,
+                },
+            };
+        }
+        if (cached?.items?.length && !forceRefresh) {
+            // 过期：先返回缓存，后台刷新
+            void getOrStartSourceRefresh(source).catch(() => undefined);
+            return {
+                items: withSourceMeta(source, cached.items),
+                status: {
+                    category: source.id,
+                    label: source.name,
+                    githubUrl: source.homepage || source.url,
+                    count: cached.items.length,
+                    ok: !cached.lastError,
+                    error: cached.lastError || undefined,
+                },
+            };
+        }
+    }
+
+    const result = await getOrStartSourceRefresh(source);
+    const cache = await readSourceCache(source.id);
+    return {
+        items: cache?.items || [],
+        status: {
+            category: source.id,
+            label: source.name,
+            githubUrl: source.homepage || source.url,
+            count: result.count,
+            ok: result.success,
+            error: result.success ? undefined : result.lastError,
+        },
+    };
+}
 
 export async function fetchPrompts({
     keyword = "",
@@ -130,12 +333,14 @@ export async function fetchPrompts({
     const withoutTagFilter = filterPrompts(enriched, { keyword: normalizedKeyword, category, tags: [], qualityMode });
     const filtered = sortPrompts(filterPrompts(enriched, { keyword: normalizedKeyword, category, tags: tag, qualityMode }));
     const featuredTotal = enriched.filter((item) => matchesQualityMode(item, "featured")).length;
+    const enabled = enabledPromptSources();
+    const categoryLabels = Object.fromEntries(enabled.map((source) => [source.id, source.name]));
 
     return {
         items: filtered.slice((normalizedPage - 1) * normalizedPageSize, normalizedPage * normalizedPageSize),
         tags: collectTags(withoutTagFilter).slice(0, 40),
-        categories: categories.map((item) => item.category),
-        categoryLabels: categoryLabelMap,
+        categories: enabled.map((source) => source.id),
+        categoryLabels: { ...categoryLabelMap, ...categoryLabels },
         total: filtered.length,
         featuredTotal,
         sources: bundle.sources,
@@ -148,6 +353,8 @@ export function getCategoryLabel(category: string) {
     if (!category || category === ALL_PROMPTS_OPTION) return ALL_PROMPTS_OPTION;
     if (category === MY_PROMPTS_CATEGORY) return "我的提示词";
     if (category === FAVORITES_CATEGORY) return "收藏夹";
+    const fromStore = usePromptSourceStore.getState().sources.find((item) => item.id === category || item.name === category);
+    if (fromStore) return fromStore.name;
     return categoryLabelMap[category] || category;
 }
 
@@ -167,7 +374,75 @@ export async function refreshPromptLibrary() {
     clearBrokenPromptCovers();
     memoryBundle = null;
     loadingPrompts = null;
+    await refreshAllSources().catch(() => undefined);
     return fetchPrompts({ page: 1, pageSize: 1, forceRefresh: true });
+}
+
+export async function fetchSourcePrompts(sourceId: string): Promise<Prompt[]> {
+    const source = usePromptSourceStore.getState().sources.find((item) => item.id === sourceId);
+    if (!source) throw new Error("提示词来源不存在");
+    const result = await getSourcePromptItems(source, false);
+    return result.items;
+}
+
+export async function refreshSource(sourceId: string): Promise<PromptSourceRefreshResult> {
+    const source = usePromptSourceStore.getState().sources.find((item) => item.id === sourceId);
+    if (!source) throw new Error("提示词来源不存在");
+    memoryBundle = null;
+    loadingPrompts = null;
+    const result = await getOrStartSourceRefresh(source);
+    if (!result.success) throw new Error(result.lastError || "更新失败");
+    return result;
+}
+
+export async function refreshAllSources(): Promise<PromptSourceRefreshSummary> {
+    memoryBundle = null;
+    loadingPrompts = null;
+    const results = await Promise.all(enabledPromptSources().map(getOrStartSourceRefresh));
+    return summarizeRefresh(results);
+}
+
+export async function refreshDueSources(maxAgeMs: number): Promise<PromptSourceRefreshSummary> {
+    const sources = await Promise.all(
+        enabledPromptSources().map(async (source) => {
+            const cached = await readSourceCache(source.id);
+            const lastSuccess = cached?.lastSuccessAt ? new Date(cached.lastSuccessAt).getTime() : 0;
+            return !lastSuccess || Boolean(cached?.lastError) || Date.now() - lastSuccess >= maxAgeMs || cached?.signature !== sourceSignature(source) ? source : null;
+        }),
+    );
+    const due = sources.filter((source): source is PromptSource => Boolean(source));
+    if (!due.length) return { results: [], total: 0, successCount: 0, failureCount: 0 };
+    memoryBundle = null;
+    loadingPrompts = null;
+    const results = await Promise.all(due.map(getOrStartSourceRefresh));
+    return summarizeRefresh(results);
+}
+
+export async function fetchPromptSourceStatuses(): Promise<Record<string, PromptSourceRuntimeStatus>> {
+    const entries = await Promise.all(
+        usePromptSourceStore.getState().sources.map(async (source) => {
+            const cache = await readSourceCache(source.id);
+            return [
+                source.id,
+                {
+                    sourceId: source.id,
+                    count: cache?.items?.length || 0,
+                    lastSuccessAt: cache?.lastSuccessAt || "",
+                    lastError: cache?.lastError || "",
+                },
+            ] as const;
+        }),
+    );
+    return Object.fromEntries(entries);
+}
+
+function summarizeRefresh(results: PromptSourceRefreshResult[]): PromptSourceRefreshSummary {
+    return {
+        results,
+        total: results.reduce((total, item) => total + item.count, 0),
+        successCount: results.filter((item) => item.success).length,
+        failureCount: results.filter((item) => !item.success).length,
+    };
 }
 
 export async function getRecentPrompts() {
@@ -328,7 +603,11 @@ export async function savePromptToMine(prompt: Prompt) {
 }
 
 export function listPromptSources() {
-    return categories.map((item) => ({ category: item.category, label: item.label, githubUrl: item.githubUrl }));
+    return usePromptSourceStore.getState().sources.map((item) => ({
+        category: item.id,
+        label: item.name,
+        githubUrl: item.homepage || item.url,
+    }));
 }
 
 async function getPromptBundle(forceRefresh = false) {
@@ -336,9 +615,12 @@ async function getPromptBundle(forceRefresh = false) {
 
     const cached = await promptCacheStore.getItem<{ items?: Prompt[]; sources?: PromptSourceStatus[]; fetchedAt?: number }>(promptCacheKey);
     if (!forceRefresh && cached?.items?.length && cached.fetchedAt && Date.now() - cached.fetchedAt < cacheTtlMs) {
+        // 旧缓存可能含已关闭来源；按当前启用源过滤
+        const enabledIds = new Set(enabledPromptSources().map((source) => source.id));
+        const items = cached.items.filter((item) => enabledIds.has(item.category) || enabledIds.has(item.sourceId || ""));
         memoryBundle = {
-            items: cached.items,
-            sources: cached.sources || buildFallbackSources(cached.items),
+            items,
+            sources: (cached.sources || buildFallbackSources(items)).filter((source) => enabledIds.has(source.category)),
             fetchedAt: cached.fetchedAt,
             fromCache: true,
         };
@@ -346,7 +628,7 @@ async function getPromptBundle(forceRefresh = false) {
     }
 
     if (loadingPrompts) return loadingPrompts;
-    loadingPrompts = loadPromptBundle()
+    loadingPrompts = loadPromptBundle(forceRefresh)
         .then(async (bundle) => {
             if (bundle.items.length) {
                 await promptCacheStore.setItem(promptCacheKey, {
@@ -358,9 +640,11 @@ async function getPromptBundle(forceRefresh = false) {
                 return memoryBundle;
             }
             if (cached?.items?.length) {
+                const enabledIds = new Set(enabledPromptSources().map((source) => source.id));
+                const items = cached.items.filter((item) => enabledIds.has(item.category) || enabledIds.has(item.sourceId || ""));
                 memoryBundle = {
-                    items: cached.items,
-                    sources: cached.sources || buildFallbackSources(cached.items),
+                    items,
+                    sources: (cached.sources || buildFallbackSources(items)).filter((source) => enabledIds.has(source.category)),
                     fetchedAt: cached.fetchedAt || Date.now(),
                     fromCache: true,
                 };
@@ -375,23 +659,24 @@ async function getPromptBundle(forceRefresh = false) {
     return loadingPrompts;
 }
 
-async function loadPromptBundle() {
+async function loadPromptBundle(forceRefresh = false) {
+    const sources = enabledPromptSources();
+    if (!sources.length) {
+        return { items: [] as Prompt[], sources: [] as PromptSourceStatus[], fetchedAt: Date.now(), fromCache: false };
+    }
+
     const settled = await Promise.all(
-        categories.map(async (category) => {
+        sources.map(async (source) => {
             try {
-                const items = await category.build();
-                const mapped = items.map((item) => enrichPrompt({ ...item, category: category.category, githubUrl: category.githubUrl }));
-                return {
-                    items: mapped,
-                    source: { category: category.category, label: category.label, githubUrl: category.githubUrl, count: mapped.length, ok: true } satisfies PromptSourceStatus,
-                };
+                const result = await getSourcePromptItems(source, forceRefresh);
+                return { items: result.items, source: result.status };
             } catch (error) {
                 return {
                     items: [] as Prompt[],
                     source: {
-                        category: category.category,
-                        label: category.label,
-                        githubUrl: category.githubUrl,
+                        category: source.id,
+                        label: source.name,
+                        githubUrl: source.homepage || source.url,
                         count: 0,
                         ok: false,
                         error: error instanceof Error ? error.message : "同步失败",
@@ -410,12 +695,13 @@ async function loadPromptBundle() {
 }
 
 function buildFallbackSources(items: Prompt[]): PromptSourceStatus[] {
-    return categories.map((category) => {
-        const count = items.filter((item) => item.category === category.category).length;
+    const sources = usePromptSourceStore.getState().sources;
+    return sources.map((source) => {
+        const count = items.filter((item) => item.category === source.id || item.sourceId === source.id).length;
         return {
-            category: category.category,
-            label: category.label,
-            githubUrl: category.githubUrl,
+            category: source.id,
+            label: source.name,
+            githubUrl: source.homepage || source.url,
             count,
             ok: count > 0,
             error: count > 0 ? undefined : "缓存中无数据",

@@ -13,6 +13,8 @@ import {
     readGrokTaskId,
     resolveVideoModelForReferences,
     unwrapGrokVideoResponse,
+    unwrapOpenAiVideoResponseForTest,
+    videoPollBudget,
 } from "@/services/api/video";
 import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS } from "@/lib/grok-video";
 import { defaultConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
@@ -316,11 +318,13 @@ describe("Grok video model routing", () => {
         expect(multiCandidates.every((payload) => payload.duration !== 8)).toBe(true);
     });
 
-    it("prefers 720p before 1080p for I2V on fragile relays so reference images are not dropped", async () => {
-        expect(grokResolutionCandidates("1080p", 1, "https://www.codex2api.com/v1")).toEqual(["720p", "1080p", "480p"]);
+    it("prefers selected 1080p first for I2V and T2V (user spec before demotion)", async () => {
+        expect(grokResolutionCandidates("1080p", 1, "https://www.codex2api.com/v1")).toEqual(["1080p", "720p", "480p"]);
         expect(grokResolutionCandidates("1080p", 0, "https://www.codex2api.com/v1")[0]).toBe("1080p");
         expect(grokResolutionCandidates("1080p", 1, "https://api.x.ai/v1")[0]).toBe("1080p");
-        expect(grokResolutionCandidates("720p", 2, "https://www.codex2api.com/v1")[0]).toBe("720p");
+        expect(grokResolutionCandidates("720p", 2, "https://www.codex2api.com/v1")).toEqual(["720p", "480p"]);
+        // 只降不升：选 480 不得再试 720
+        expect(grokResolutionCandidates("480p", 1, "https://www.codex2api.com/v1")).toEqual(["480p"]);
 
         const channel: ModelChannel = {
             id: "relay",
@@ -346,17 +350,29 @@ describe("Grok video model routing", () => {
             },
         ];
         const candidates = await buildGrokPayloadCandidates(config, config.videoModel, "跟图走", references);
-        // 单图 I2V 最小 body 优先，无 resolution；带分辨率的候选里 720p 须早于 1080p
-        const firstWithResolution = candidates.find((payload) => payload.resolution && (payload.image || payload.image_url || payload.images || payload.reference_images));
-        expect(firstWithResolution).toBeTruthy();
-        expect(firstWithResolution?.resolution).toBe("720p");
-        expect(candidates.some((payload) => payload.resolution === "1080p" && (payload.image || payload.image_url || payload.images || payload.reference_images))).toBe(true);
+        // 单图 I2V：首包必须是完整用户规格，禁止无分辨率/降档抢先
+        expect(candidates[0]).toMatchObject({ duration: 8, aspect_ratio: "16:9", resolution: "1080p" });
+        expect(candidates[0].image || candidates[0].image_url || candidates[0].images || candidates[0].reference_images).toBeTruthy();
+        // 用户规格字段变体都走完后，才允许 720p 降档
+        const first1080 = candidates.findIndex((payload) => payload.resolution === "1080p");
+        const first720 = candidates.findIndex((payload) => payload.resolution === "720p");
+        const firstBare = candidates.findIndex((payload) => !payload.resolution && !payload.aspect_ratio && (payload.image || payload.image_url));
+        expect(first1080).toBe(0);
+        if (first720 >= 0) expect(first720).toBeGreaterThan(first1080);
+        if (firstBare >= 0) expect(firstBare).toBeGreaterThan(first1080);
+        // 所有 1080 候选应排在任何 720 之前
+        const last1080 = candidates.reduce((last, payload, index) => (payload.resolution === "1080p" ? index : last), -1);
+        if (first720 >= 0) expect(last1080).toBeLessThan(first720);
 
         const textCandidates = await buildGrokPayloadCandidates(config, config.videoModel, "纯文生", []);
-        expect(textCandidates[0]?.resolution).toBe("1080p");
+        expect(textCandidates[0]).toMatchObject({ duration: 8, aspect_ratio: "16:9", resolution: "1080p" });
+        // 文生不得硬塞 720p 到用户 1080 之前
+        const textFirst720 = textCandidates.findIndex((payload) => payload.resolution === "720p");
+        const textLast1080 = textCandidates.reduce((last, payload, index) => (payload.resolution === "1080p" ? index : last), -1);
+        if (textFirst720 >= 0) expect(textLast1080).toBeLessThan(textFirst720);
     });
 
-    it("puts minimal single-image body first so full-field 400 can fall back", async () => {
+    it("puts full single-image user-spec body first and keeps demotion/minimal as fallback only", async () => {
         const channel: ModelChannel = {
             id: "relay",
             name: "codex2api",
@@ -385,22 +401,20 @@ describe("Grok video model routing", () => {
 
         const longCandidates = await buildGrokPayloadCandidates(config, config.videoModel, longPrompt, references);
         expect(longCandidates.length).toBeGreaterThan(1);
-        // 首包：最小成功面（有 image + duration，无 aspect_ratio/resolution）
-        expect(longCandidates[0]).toMatchObject({ duration: 4 });
+        // 首包：完整用户规格（清晰度 + 比例 + 时长）
+        expect(longCandidates[0]).toMatchObject({ duration: 4, aspect_ratio: "16:9", resolution: "720p" });
         expect(longCandidates[0].image || longCandidates[0].image_url).toBeTruthy();
-        expect(longCandidates[0].aspect_ratio).toBeUndefined();
-        expect(longCandidates[0].resolution).toBeUndefined();
-        // 仍保留带比例/分辨率的候选
-        expect(longCandidates.some((payload) => payload.aspect_ratio === "16:9" && payload.duration === 4 && payload.resolution === "720p")).toBe(true);
+        // 仍保留无分辨率/最小 body 兜底，且在用户规格之后
+        const firstBare = longCandidates.findIndex((payload) => payload.duration === 4 && !payload.resolution && !payload.aspect_ratio && (payload.image || payload.image_url));
+        expect(firstBare).toBeGreaterThan(0);
         // 不静默丢掉参考图
         expect(longCandidates.every((payload) => payload.image || payload.image_url || payload.images || payload.reference_images)).toBe(true);
 
-        // 短提示词单图同样最小 body 优先（对齐同事可用路径）；比例/分辨率在后续候选
+        // 短提示词单图同样：用户规格优先，最小 body 兜底
         const shortCandidates = await buildGrokPayloadCandidates(config, config.videoModel, "短提示词跟图", references);
-        expect(shortCandidates[0]).toMatchObject({ duration: 4 });
-        expect(shortCandidates[0].aspect_ratio).toBeUndefined();
-        expect(shortCandidates[0].resolution).toBeUndefined();
+        expect(shortCandidates[0]).toMatchObject({ duration: 4, aspect_ratio: "16:9", resolution: "720p" });
         expect(shortCandidates.some((payload) => payload.aspect_ratio === "16:9" && payload.resolution === "720p" && payload.duration === 4)).toBe(true);
+        expect(shortCandidates.some((payload) => !payload.resolution && !payload.aspect_ratio && (payload.image || payload.image_url))).toBe(true);
     });
 
     it("treats HTTP 200 embedded xAI 400 as create failure and retries next payload", () => {
@@ -433,7 +447,7 @@ describe("Grok video model routing", () => {
         ).toThrow(/rate limit/i);
     });
 
-    it("ladders multi-ref resolution before field-style variants so full-ref 720p is not sliced away", async () => {
+    it("ladders multi-ref resolution with user selection first so full-ref 1080p is not sliced away", async () => {
         const channel: ModelChannel = {
             id: "relay",
             name: "codex2api",
@@ -459,26 +473,33 @@ describe("Grok video model routing", () => {
         expect(candidates.length).toBeGreaterThan(0);
         expect(candidates.every((payload) => payloadKeepsAllGrokVideoReferences(payload, 2))).toBe(true);
 
-        const fullRef720Index = candidates.findIndex(
-            (payload) =>
-                payload.resolution === "720p" &&
-                Array.isArray(payload.reference_images) &&
-                (payload.reference_images as unknown[]).length === 2,
-        );
-        expect(fullRef720Index).toBeGreaterThanOrEqual(0);
-        expect(fullRef720Index).toBeLessThan(4);
-
-        // 完整对象 1080p 也应在字段风格变体之前出现
         const fullRef1080Index = candidates.findIndex(
             (payload) =>
                 payload.resolution === "1080p" &&
                 Array.isArray(payload.reference_images) &&
-                (payload.reference_images as unknown[]).length === 2,
+                (payload.reference_images as unknown[]).length === 2 &&
+                typeof (payload.reference_images as unknown[])[0] === "object",
         );
+        expect(fullRef1080Index).toBe(0);
+
+        const fullRef720Index = candidates.findIndex(
+            (payload) =>
+                payload.resolution === "720p" &&
+                Array.isArray(payload.reference_images) &&
+                (payload.reference_images as unknown[]).length === 2 &&
+                typeof (payload.reference_images as unknown[])[0] === "object",
+        );
+        // 用户 1080 规格（含字段变体）必须全部排在 720 降档之前
+        const last1080 = candidates.reduce((last, payload, index) => (payload.resolution === "1080p" ? index : last), -1);
+        expect(fullRef720Index).toBeGreaterThanOrEqual(0);
+        expect(last1080).toBeLessThan(fullRef720Index);
+        expect(fullRef720Index).toBeGreaterThan(fullRef1080Index);
+
+        // 完整对象 1080p 应在字段风格变体之前出现
         const firstFieldStyleIndex = candidates.findIndex(
             (payload) => Array.isArray(payload.images) || Array.isArray(payload.image_urls) || (Array.isArray(payload.reference_images) && typeof (payload.reference_images as unknown[])[0] === "string"),
         );
-        if (fullRef1080Index >= 0 && firstFieldStyleIndex >= 0) {
+        if (firstFieldStyleIndex >= 0) {
             expect(fullRef1080Index).toBeLessThan(firstFieldStyleIndex);
         }
 
@@ -512,7 +533,12 @@ describe("Grok video model routing", () => {
         };
         const candidates = await buildGrokEditPayloadCandidates(config, config.videoModel, "改成竖屏夜晚", video);
         const jsonCandidates = candidates.filter((item): item is Record<string, unknown> => !(item instanceof FormData));
-        expect(jsonCandidates[0]).toMatchObject({ duration: 10, aspect_ratio: "9:16" });
+        // 首包必须完整用户规格：时长 + 比例 + 清晰度
+        expect(jsonCandidates[0]).toMatchObject({ duration: 10, aspect_ratio: "9:16", resolution: "720p" });
+        const firstWithResolution = jsonCandidates.findIndex((payload) => payload.resolution === "720p");
+        const firstWithoutResolution = jsonCandidates.findIndex((payload) => payload.resolution == null);
+        expect(firstWithResolution).toBe(0);
+        if (firstWithoutResolution >= 0) expect(firstWithoutResolution).toBeGreaterThan(firstWithResolution);
     });
 
     it("uses only /videos/edits for Grok single-video edit path candidates", () => {
@@ -680,5 +706,64 @@ describe("Grok video model routing", () => {
         expect(readGrokTaskId({ result: { id: "job_c" } })).toBe("job_c");
         expect(readGrokTaskId({ data: { task: { task_id: "task_d" } } })).toBe("task_d");
         expect(readGrokTaskId({})).toBe("");
+    });
+});
+
+describe("Sora/Veo poll unwrap + budget (timeout fix)", () => {
+    it("merges nested data layers so status/video_url are not lost when outer only has id", () => {
+        // 对齐 veo-sora 脚本：state.data.data.status / video_url
+        const video = unwrapOpenAiVideoResponseForTest({
+            code: 0,
+            data: {
+                id: "task_outer",
+                data: {
+                    status: "completed",
+                    video_url: "https://cdn.example.com/out.mp4",
+                },
+            },
+        });
+        expect(video.id).toBe("task_outer");
+        expect(video.status).toBe("completed");
+        expect(video.video_url).toBe("https://cdn.example.com/out.mp4");
+    });
+
+    it("allows poll responses without id when fallbackId is provided", () => {
+        const video = unwrapOpenAiVideoResponseForTest(
+            { code: "success", data: { status: "succeeded", url: "https://cdn.example.com/a.mp4" } },
+            { allowMissingId: true, fallbackId: "created_id_1" },
+        );
+        expect(video.id).toBe("created_id_1");
+        expect(video.status).toBe("succeeded");
+        expect(video.url || video.video_url).toBe("https://cdn.example.com/a.mp4");
+    });
+
+    it("treats progress 100 as completed status signal", () => {
+        const video = unwrapOpenAiVideoResponseForTest({
+            id: "p1",
+            progress: 100,
+            result_url: "https://cdn.example.com/p.mp4",
+        });
+        expect(video.status).toBe("completed");
+        expect(video.result_url || video.video_url || video.url).toContain("cdn.example.com");
+    });
+
+    it("gives Sora/Veo ~15min budget and keeps Grok shorter cadence", () => {
+        const sora = videoPollBudget({ provider: "openai", model: "sora-2", requestModel: "sora-2" });
+        expect(sora.isSoraVeo).toBe(true);
+        expect(sora.maxAttempts).toBe(300);
+        expect(sora.delayMs).toBe(3000);
+
+        const veo = videoPollBudget({ provider: "openai", model: "channel::veo-3.1", requestModel: "veo-3.1" });
+        expect(veo.isSoraVeo).toBe(true);
+        expect(veo.maxAttempts).toBeGreaterThanOrEqual(200);
+
+        const grok = videoPollBudget({ provider: "grok", model: "grok-imagine-video" });
+        expect(grok.isSoraVeo).toBe(false);
+        expect(grok.maxAttempts).toBe(120);
+        expect(grok.delayMs).toBe(5000);
+
+        const generic = videoPollBudget({ provider: "openai", model: "some-other-video" });
+        expect(generic.isSoraVeo).toBe(false);
+        expect(generic.maxAttempts).toBe(120);
     });
 });

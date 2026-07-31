@@ -6,8 +6,14 @@ import { App, ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 
 import { ClientRootInit } from "@/components/layout/client-root-init";
+import { usePromptSourceScheduler } from "@/hooks/use-prompt-source-scheduler";
 import { getAntThemeConfig } from "@/lib/app-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
+
+function PromptSourceSchedulerHost() {
+    usePromptSourceScheduler();
+    return null;
+}
 
 const queryClient = new QueryClient({
     defaultOptions: {
@@ -34,6 +40,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
                 {/* top 下移到顶栏下方，避免挡住“我的资产”等导航点击 */}
                 <App message={{ top: 72, duration: 2.2 }} notification={{ placement: "bottomRight" }}>
                     <QueryClientProvider client={queryClient}>
+                        <PromptSourceSchedulerHost />
                         <ClientRootInit>{children}</ClientRootInit>
                     </QueryClientProvider>
                 </App>

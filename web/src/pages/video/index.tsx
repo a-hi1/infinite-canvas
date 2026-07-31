@@ -1,7 +1,7 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImageIcon, LoaderCircle, Music2, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon, WandSparkles } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 import { useSearchParams } from "react-router-dom";
-import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Segmented, Switch, Tag, Typography } from "antd";
+import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Segmented, Switch, Tag, Typography } from "antd";
 import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { saveAs } from "file-saver";
@@ -9,29 +9,27 @@ import { saveAs } from "file-saver";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
-import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSettingsSummary } from "@/components/video-settings-panel";
-import { AGNES_VIDEO_SIZE, agnesVideoModeHint, agnesVideoRequestError, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
+import { VideoSettingsPanel, normalizeVideoResolutionValue, videoSettingsSummary } from "@/components/video-settings-panel";
+import { agnesVideoModeHint, agnesVideoRequestError, isAgnesVideoConfig } from "@/lib/agnes-video";
 import { suggestAssetCategory } from "@/lib/asset-category";
+import { assetTitleFromPrompt } from "@/lib/asset-display";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS, grokVideoModeHint, isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
+import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS, grokResolutionShortfallMessage, grokVideoModeHint, isGrokVideoConfig, normalizeGrokResolution } from "@/lib/grok-video";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import {
     isSoraOrVeoVideoConfig,
     isSoraVideoConfig,
     isVeoVideoConfig,
-    normalizeSoraSeconds,
-    normalizeSoraSize,
-    normalizeVeoSeconds,
-    normalizeVeoSize,
     soraVeoModeHint,
     soraVeoReferenceImageLimit,
     soraVeoReferenceImageMaxBytes,
 } from "@/lib/openai-compatible-video";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
-import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
+import { clampVideoConfigToCapability } from "@/lib/model-capability";
+import { boolConfig, isSeedanceVideoConfig, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
-import { createVideoGenerationTask, pollVideoGenerationTask, rewritePrivateVideoUrlToLanRelay, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
+import { createVideoGenerationTask, pollVideoGenerationTask, rewritePrivateVideoUrlToLanRelay, storeGeneratedVideo, videoPollBudget, type VideoGenerationTask } from "@/services/api/video";
 import { CloudHistoryPanel } from "@/components/cloud-history-panel";
 import { cloudSyncColor, cloudSyncLabel, normalizeCloudSyncStatus, type CloudSyncStatus } from "@/lib/cloud-sync";
 import { formatYuanFromCents, hasEnoughCredits, isPlatformVideoReady, platformVideoPriceCents } from "@/lib/platform-credits";
@@ -99,6 +97,7 @@ export default function VideoPage() {
     const { message } = App.useApp();
     const [searchParams, setSearchParams] = useSearchParams();
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const dragDepthRef = useRef(0);
     const activeLogIdsRef = useRef<Set<string>>(new Set());
     const effectiveConfig = useEffectiveConfig();
     const updateConfig = useConfigStore((state) => state.updateConfig);
@@ -120,6 +119,7 @@ export default function VideoPage() {
     const [promptDialogOpen, setPromptDialogOpen] = useState(false);
     const [assetPickerOpen, setAssetPickerOpen] = useState(false);
     const [optimizingPrompt, setOptimizingPrompt] = useState(false);
+    const [referenceDragTarget, setReferenceDragTarget] = useState<"image" | "video" | "audio" | null>(null);
     const [startedAt, setStartedAt] = useState(0);
     const [elapsedMs, setElapsedMs] = useState(0);
     const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
@@ -263,6 +263,25 @@ export default function VideoPage() {
         setReferences((value) => [...value, ...nextReferences].slice(0, imageMax));
         setVideoReferences((value) => [...value, ...nextVideoReferences].slice(0, videoMax));
         setAudioReferences((value) => [...value, ...nextAudioReferences].slice(0, audioMax));
+    };
+
+    const handleReferenceDragEnter = (event: DragEvent<HTMLDivElement>, target: "image" | "video" | "audio") => {
+        event.preventDefault();
+        dragDepthRef.current += 1;
+        if (event.dataTransfer.types.includes("Files")) setReferenceDragTarget(target);
+    };
+
+    const handleReferenceDragLeave = (event: DragEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (!dragDepthRef.current) setReferenceDragTarget(null);
+    };
+
+    const handleReferenceDrop = (event: DragEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        dragDepthRef.current = 0;
+        setReferenceDragTarget(null);
+        void addReferences(event.dataTransfer.files);
     };
 
     const addReferencesFromClipboard = async () => {
@@ -453,16 +472,17 @@ export default function VideoPage() {
     };
 
     const saveResultToAssets = (video: GeneratedVideo) => {
-        const title = "生成视频";
+        const generationPrompt = prompt.trim();
+        const title = assetTitleFromPrompt(generationPrompt, "生成视频");
         addAsset({
             kind: "video",
             title,
             coverUrl: "",
-            category: suggestAssetCategory({ title, source: "视频创作台", prompt, kind: "video" }),
+            category: suggestAssetCategory({ title, source: "视频创作台", prompt: generationPrompt, kind: "video" }),
             tags: [],
             source: "视频创作台",
             data: { url: video.url, storageKey: video.storageKey, width: video.width, height: video.height, bytes: video.bytes, mimeType: video.mimeType },
-            metadata: { source: "video-page", prompt },
+            metadata: { source: "video-page", prompt: generationPrompt },
         });
         message.success("已加入我的资产");
     };
@@ -539,7 +559,8 @@ export default function VideoPage() {
         try {
             const warning = getVideoReadinessWarning(pollingConfig, log.task.model || log.model);
             if (warning) throw new Error(`无法继续查询历史任务：${warning}`);
-            for (let attempt = 0; attempt < 120; attempt += 1) {
+            const budget = videoPollBudget(log.task);
+            for (let attempt = 0; attempt < budget.maxAttempts; attempt += 1) {
                 const state = await pollVideoGenerationTask(pollingConfig, log.task);
                 if (state.status === "completed") {
                     const stored = await storeGeneratedVideo(state.result, pollingConfig);
@@ -566,7 +587,19 @@ export default function VideoPage() {
                     };
                     await saveLog(successLog);
                     setLogs((value) => value.map((item) => (item.id === successLog.id ? successLog : item)));
-                    message.success(stored.storageKey ? "视频已生成" : "视频已生成（经代理预览）");
+                    const shortfall = isGrokVideoConfig(pollingConfig)
+                        ? grokResolutionShortfallMessage(
+                              log.task?.requestedResolution || pollingConfig.vquality || log.config?.vquality || "",
+                              nextVideo.width,
+                              nextVideo.height,
+                              log.task?.acceptedResolution,
+                          )
+                        : "";
+                    if (shortfall) {
+                        message.warning(shortfall, 8);
+                    } else {
+                        message.success(stored.storageKey ? "视频已生成" : "视频已生成（经代理预览）");
+                    }
                     if (loggedIn) {
                         void syncVideoLogToCloud(successLog).then(async (next) => {
                             await saveLog(next);
@@ -590,8 +623,12 @@ export default function VideoPage() {
                     return;
                 }
                 if (state.status === "failed") throw new Error(state.error);
-                if (attempt === 119) throw new Error("视频生成超时，请稍后重试");
-                await delay(log.task.provider === "seedance" || log.task.provider === "agnes" || log.task.provider === "grok" ? 5000 : 2500);
+                if (attempt === budget.maxAttempts - 1) {
+                    throw new Error(
+                        `${budget.timeoutLabel}视频生成超时，请稍后重试` + (budget.isSoraVeo ? "（中转排队较慢时可到历史记录里继续查询）" : ""),
+                    );
+                }
+                await delay(budget.delayMs);
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "生成失败";
@@ -704,30 +741,41 @@ export default function VideoPage() {
                                         </Button>
                                     </div>
                                 </div>
-                                <div className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700">
+                                <div
+                                    className={`hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed p-2 pb-3 overscroll-x-contain transition-colors ${referenceDragTarget === "image" ? "border-stone-900 bg-stone-100/80 dark:border-stone-100 dark:bg-stone-900/80" : "border-stone-300 dark:border-stone-700"}`}
+                                    onDragEnter={(event) => handleReferenceDragEnter(event, "image")}
+                                    onDragOver={(event) => {
+                                        event.preventDefault();
+                                        event.dataTransfer.dropEffect = "copy";
+                                    }}
+                                    onDragLeave={handleReferenceDragLeave}
+                                    onDrop={handleReferenceDrop}
+                                >
                                     {references.map((item, index) => (
                                         <div key={item.id} className="group relative size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
                                             {item.dataUrl ? (
-                                                <img src={item.dataUrl} alt={item.name} className="size-full object-cover" />
+                                                <Image src={item.dataUrl} alt={item.name} className="size-full object-cover" preview={{ mask: "预览" }} />
                                             ) : (
                                                 <div className="flex size-full items-center justify-center bg-stone-100 text-stone-400 dark:bg-stone-900 dark:text-stone-500">
                                                     <ImageIcon className="size-5" />
                                                 </div>
                                             )}
-                                            <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{seedanceReferenceLabel("image", index)}</span>
+                                            <span className="pointer-events-none absolute left-1 top-1 z-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{seedanceReferenceLabel("image", index)}</span>
                                             <ReferenceOrderButtons index={index} total={references.length} onMove={(offset) => setReferences((value) => moveListItem(value, index, offset))} />
-                                            <button type="button" className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label="移除参考图">
+                                            <button type="button" className="absolute right-1 top-1 z-2 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label="移除参考图">
                                                 <Trash2 className="size-3.5" />
                                             </button>
                                         </div>
                                     ))}
                                     {!references.length ? (
                                         <div className="flex min-w-full items-center justify-center text-sm text-stone-500">
-                                            {soraVeoMode
-                                                ? veoMode
-                                                    ? `暂无参考图；Veo 图生最多 ${soraVeoImageMax} 张`
-                                                    : "暂无参考图；Sora 图生仅 1 张首帧"
-                                                : "暂无参考图，最多 9 张"}
+                                            {referenceDragTarget === "image"
+                                                ? "松开即可上传参考资产"
+                                                : soraVeoMode
+                                                  ? veoMode
+                                                      ? `暂无参考图，可拖入文件；Veo 图生最多 ${soraVeoImageMax} 张`
+                                                      : "暂无参考图，可拖入文件；Sora 图生仅 1 张首帧"
+                                                  : "暂无参考图，可拖入文件，最多 9 张"}
                                         </div>
                                     ) : null}
                                 </div>
@@ -740,7 +788,16 @@ export default function VideoPage() {
                                         上传
                                     </Button>
                                 </div>
-                                <div className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700">
+                                <div
+                                    className={`hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed p-2 pb-3 overscroll-x-contain transition-colors ${referenceDragTarget === "video" ? "border-stone-900 bg-stone-100/80 dark:border-stone-100 dark:bg-stone-900/80" : "border-stone-300 dark:border-stone-700"}`}
+                                    onDragEnter={(event) => handleReferenceDragEnter(event, "video")}
+                                    onDragOver={(event) => {
+                                        event.preventDefault();
+                                        event.dataTransfer.dropEffect = "copy";
+                                    }}
+                                    onDragLeave={handleReferenceDragLeave}
+                                    onDrop={handleReferenceDrop}
+                                >
                                     {videoReferences.map((item, index) => (
                                         <div key={item.id} className="group relative h-20 w-32 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-black dark:border-stone-800">
                                             {item.url ? (
@@ -757,7 +814,11 @@ export default function VideoPage() {
                                             </button>
                                         </div>
                                     ))}
-                                    {!videoReferences.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">暂无参考视频，最多 {grokMode ? 1 : 3} 个{grokMode ? "（Grok edits）" : ""}</div> : null}
+                                    {!videoReferences.length ? (
+                                        <div className="flex min-w-full items-center justify-center text-sm text-stone-500">
+                                            {referenceDragTarget === "video" ? "松开即可上传参考资产" : `暂无参考视频，可拖入文件，最多 ${grokMode ? 1 : 3} 个${grokMode ? "（Grok edits）" : ""}`}
+                                        </div>
+                                    ) : null}
                                 </div>
                             </div>
 
@@ -768,7 +829,16 @@ export default function VideoPage() {
                                         上传
                                     </Button>
                                 </div>
-                                <div className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700">
+                                <div
+                                    className={`hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed p-2 pb-3 overscroll-x-contain transition-colors ${referenceDragTarget === "audio" ? "border-stone-900 bg-stone-100/80 dark:border-stone-100 dark:bg-stone-900/80" : "border-stone-300 dark:border-stone-700"}`}
+                                    onDragEnter={(event) => handleReferenceDragEnter(event, "audio")}
+                                    onDragOver={(event) => {
+                                        event.preventDefault();
+                                        event.dataTransfer.dropEffect = "copy";
+                                    }}
+                                    onDragLeave={handleReferenceDragLeave}
+                                    onDrop={handleReferenceDrop}
+                                >
                                     {audioReferences.map((item, index) => (
                                         <div key={item.id} className="group relative flex h-20 w-48 shrink-0 flex-col justify-center gap-2 rounded-md border border-stone-200 bg-stone-50 px-2 dark:border-stone-800 dark:bg-stone-900">
                                             <div className="flex min-w-0 items-center gap-2 text-xs text-stone-500 dark:text-stone-400">
@@ -783,7 +853,11 @@ export default function VideoPage() {
                                             </button>
                                         </div>
                                     ))}
-                                    {!audioReferences.length ? <div className="flex min-w-full items-center justify-center text-center text-sm text-stone-500">暂无参考音频，最多 3 个，mp3/wav，单个 15MB 内</div> : null}
+                                    {!audioReferences.length ? (
+                                        <div className="flex min-w-full items-center justify-center text-center text-sm text-stone-500">
+                                            {referenceDragTarget === "audio" ? "松开即可上传参考资产" : "暂无参考音频，可拖入文件，最多 3 个，mp3/wav，单个 15MB 内"}
+                                        </div>
+                                    ) : null}
                                 </div>
                             </div>
 
@@ -890,11 +964,21 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const videoConfig = { ...config, model, videoModel: model };
 
+    const onModelChange = (value: string) => {
+        updateConfig("videoModel", value);
+        const clamped = clampVideoConfigToCapability({ ...config, model: value, videoModel: value });
+        if (clamped.size !== undefined) updateConfig("size", clamped.size);
+        if (clamped.videoSeconds !== undefined) updateConfig("videoSeconds", clamped.videoSeconds);
+        if (clamped.vquality !== undefined) updateConfig("vquality", clamped.vquality);
+        if (clamped.videoGenerateAudio !== undefined) updateConfig("videoGenerateAudio", clamped.videoGenerateAudio);
+        if (clamped.videoWatermark !== undefined) updateConfig("videoWatermark", clamped.videoWatermark);
+    };
+
     return (
         <>
             <label className="col-span-2 block min-w-0 sm:col-span-1">
                 <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">模型</span>
-                <ModelPicker config={config} value={model} onChange={(value) => updateConfig("videoModel", value)} capability="video" fullWidth onMissingConfig={() => openConfigDialog(false)} />
+                <ModelPicker config={config} value={model} onChange={onModelChange} capability="video" fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </label>
             <div className="col-span-2">
                 <VideoSettingsPanel config={videoConfig} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
@@ -1232,7 +1316,7 @@ function moveListItem<T>(items: T[], index: number, offset: number) {
 function ReferenceOrderButtons({ index, total, onMove }: { index: number; total: number; onMove: (offset: number) => void }) {
     if (total <= 1) return null;
     return (
-        <div className="absolute inset-x-1 bottom-1 flex justify-between">
+        <div className="absolute inset-x-1 bottom-1 z-2 flex justify-between">
             <Button size="small" className="!h-6 !w-6 !min-w-6 !rounded-full !bg-white/85 !p-0 !shadow-sm" icon={<ArrowLeft className="size-3" />} disabled={index <= 0} onClick={() => onMove(-1)} />
             <Button size="small" className="!h-6 !w-6 !min-w-6 !rounded-full !bg-white/85 !p-0 !shadow-sm" icon={<ArrowRight className="size-3" />} disabled={index >= total - 1} onClick={() => onMove(1)} />
         </div>
@@ -1349,57 +1433,20 @@ function getVideoReadinessWarning(config: AiConfig, model: string) {
 
 function buildVideoConfig(config: AiConfig, model: string): AiConfig {
     const partial = { ...config, model, videoModel: model };
-    if (isAgnesVideoConfig(partial)) {
-        return {
-            ...config,
-            model,
-            videoModel: model,
-            size: AGNES_VIDEO_SIZE,
-            videoSeconds: String(normalizeAgnesDuration(config.videoSeconds)),
-            vquality: normalizeResolution(config.vquality),
-            videoGenerateAudio: "false",
-            videoWatermark: "false",
-        };
-    }
-    const seedance = isSeedanceVideoConfig(partial);
+    const clamped = clampVideoConfigToCapability(partial);
+    // Grok 请求层仍吃 "720p" 形式；能力注册表 UI 用 "720"，这里统一回写请求兼容值
     const grok = isGrokVideoConfig(partial);
-    const sora = isSoraVideoConfig(partial);
-    const veo = isVeoVideoConfig(partial);
-    const modelName = modelOptionName(model);
+    const vquality = grok ? normalizeGrokResolution(clamped.vquality || config.vquality) : clamped.vquality || normalizeResolution(config.vquality);
     return {
         ...config,
         model,
         videoModel: model,
-        size: seedance
-            ? normalizeSeedanceRatio(config.size)
-            : grok
-              ? normalizeGrokAspectRatio(config.size)
-              : sora
-                ? normalizeSoraSize(config.size, modelName)
-                : veo
-                  ? normalizeVeoSize(config.size)
-                  : normalizeVideoSize(config.size),
-        videoSeconds: grok
-            ? String(normalizeGrokDuration(config.videoSeconds))
-            : sora
-              ? normalizeSoraSeconds(config.videoSeconds)
-              : veo
-                ? normalizeVeoSeconds(config.videoSeconds)
-                : normalizeVideoSeconds(config.videoSeconds),
-        vquality: grok ? normalizeGrokResolution(config.vquality) : normalizeResolution(config.vquality),
-        videoGenerateAudio: String(boolConfig(config.videoGenerateAudio, true)),
-        videoWatermark: String(boolConfig(config.videoWatermark, false)),
+        size: clamped.size ?? config.size,
+        videoSeconds: clamped.videoSeconds ?? config.videoSeconds,
+        vquality,
+        videoGenerateAudio: clamped.videoGenerateAudio ?? String(boolConfig(config.videoGenerateAudio, true)),
+        videoWatermark: clamped.videoWatermark ?? String(boolConfig(config.videoWatermark, false)),
     };
-}
-
-function normalizeVideoSeconds(value: string) {
-    if (String(value).trim() === "-1") return "-1";
-    const seconds = Math.floor(Number(value) || 6);
-    return String(Math.max(1, Math.min(20, seconds)));
-}
-
-function normalizeVideoSize(value: string) {
-    return normalizeVideoSizeValue(value);
 }
 
 function normalizeResolution(value: string) {

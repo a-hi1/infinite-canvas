@@ -20,6 +20,7 @@ import {
     standardAssetCategoryOptions,
     suggestAssetCategory,
 } from "@/lib/asset-category";
+import { assetDisplayTitle, assetGenerationPrompt, assetPromptSnippet } from "@/lib/asset-display";
 import { cn } from "@/lib/utils";
 import {
     getAssetCloudBadge,
@@ -486,7 +487,7 @@ export default function AssetsPage() {
                             disabled={!hydrated}
                             prefix={<Search className="size-4 text-stone-400" />}
                             value={keyword}
-                            placeholder={hydrated ? "搜索标题、内容、标签、分类或来源" : "正在加载我的资产..."}
+                            placeholder={hydrated ? "搜索标题、提示词、内容、标签、分类或来源" : "正在加载我的资产..."}
                             onChange={(event) => {
                                 setPage(1);
                                 setKeyword(event.target.value);
@@ -842,6 +843,7 @@ function AssetCard({
 }) {
     const cover = asset.coverUrl || (asset.kind === "image" ? asset.data.dataUrl : "");
     const summary = assetSummary(asset);
+    const displayTitle = assetDisplayTitle(asset);
     const categoryValue = resolveAssetCategoryForSave(asset.category);
     const selectOptions = categoryOptions.length ? categoryOptions : standardAssetCategoryOptions();
     return (
@@ -854,7 +856,7 @@ function AssetCard({
                     {asset.kind === "video" && asset.data.url ? (
                         <video src={asset.data.url} muted playsInline preload="metadata" className="aspect-[4/3] w-full bg-black object-cover" />
                     ) : cover ? (
-                        <img src={cover} alt={asset.title} className="aspect-[4/3] w-full object-cover" />
+                        <img src={cover} alt={displayTitle} className="aspect-[4/3] w-full object-cover" />
                     ) : (
                         <div className="flex aspect-[4/3] items-center justify-center bg-stone-100 p-5 text-center text-sm leading-6 text-stone-600 dark:bg-stone-900 dark:text-stone-300">{asset.kind === "text" ? asset.data.content : "暂无封面"}</div>
                     )}
@@ -868,7 +870,9 @@ function AssetCard({
                 <div className="p-4 pb-2">
                     <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                            <h2 className="line-clamp-1 text-sm font-semibold text-stone-950 dark:text-stone-100">{asset.title}</h2>
+                            <h2 className="line-clamp-2 text-sm font-semibold text-stone-950 dark:text-stone-100" title={displayTitle}>
+                                {displayTitle}
+                            </h2>
                             <Typography.Text type="secondary" className="mt-1 block text-xs">
                                 {asset.source || "未标注来源"}
                             </Typography.Text>
@@ -944,6 +948,8 @@ function AssetCard({
 
 function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | null; onClose: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void }) {
     const cover = asset ? asset.coverUrl || (asset.kind === "image" ? asset.data.dataUrl : "") : "";
+    const generationPrompt = asset ? assetGenerationPrompt(asset) : "";
+    const displayTitle = asset ? assetDisplayTitle(asset) : "";
     return (
         <Drawer title="资产详情" open={Boolean(asset)} size="large" onClose={onClose}>
             {asset ? (
@@ -951,7 +957,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                     {asset.kind === "video" && asset.data.url ? (
                         <video src={asset.data.url} controls className="w-full rounded-lg bg-black" />
                     ) : cover ? (
-                        <Image src={cover} alt={asset.title} className="rounded-lg" />
+                        <Image src={cover} alt={displayTitle} className="rounded-lg" />
                     ) : (
                         <div className="rounded-lg border border-stone-200 bg-stone-50 p-5 text-sm leading-6 text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">{asset.kind === "text" ? asset.data.content : "暂无封面"}</div>
                     )}
@@ -963,26 +969,61 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                         <Tag className="m-0" color={assetCloudBadgeColor(getAssetCloudBadge(asset))}>
                             {assetCloudBadgeLabel(getAssetCloudBadge(asset))}
                         </Tag>
+                        {asset.source ? <Tag className="m-0">{asset.source}</Tag> : null}
                     </div>
                     <div>
                         <Typography.Title level={4} className="!mb-2">
-                            {asset.title}
+                            {displayTitle}
                         </Typography.Title>
+                        {displayTitle !== asset.title ? (
+                            <Typography.Text type="secondary" className="mb-2 block text-xs">
+                                原标题：{asset.title}
+                            </Typography.Text>
+                        ) : null}
                         <Space size={[4, 4]} wrap>
-                            <Tag>{asset.kind === "image" ? "图片" : asset.kind === "video" ? "视频" : "文本"}</Tag>
                             {(asset.tags || []).map((tag) => (
                                 <Tag key={tag}>{tag}</Tag>
                             ))}
                         </Space>
                     </div>
+                    {generationPrompt ? (
+                        <div className="rounded-lg border border-stone-200 p-4 dark:border-stone-800">
+                            <div className="flex items-center justify-between gap-2">
+                                <Typography.Text type="secondary" className="block text-xs">
+                                    生成提示词
+                                </Typography.Text>
+                                <Button
+                                    size="small"
+                                    type="text"
+                                    icon={<Copy className="size-3.5" />}
+                                    onClick={() => {
+                                        void onCopy({
+                                            ...asset,
+                                            kind: "text",
+                                            data: { content: generationPrompt },
+                                        } as Asset);
+                                    }}
+                                >
+                                    复制
+                                </Button>
+                            </div>
+                            <Typography.Paragraph className="mt-2 mb-0! whitespace-pre-wrap text-sm leading-6">{generationPrompt}</Typography.Paragraph>
+                        </div>
+                    ) : asset.kind !== "text" ? (
+                        <div className="rounded-lg border border-dashed border-stone-200 p-4 text-xs text-stone-500 dark:border-stone-800 dark:text-stone-400">
+                            该资产未记录生成提示词。新从工作台/画布加入的图视频会自动保存提示词。
+                        </div>
+                    ) : null}
                     <div className="rounded-lg border border-stone-200 p-4 dark:border-stone-800">
                         <Typography.Text type="secondary" className="block text-xs">
-                            内容
+                            {asset.kind === "text" ? "文本内容" : "媒体信息"}
                         </Typography.Text>
                         {asset.kind === "text" ? (
                             <Typography.Paragraph className="mt-2 whitespace-pre-wrap">{asset.data.content}</Typography.Paragraph>
                         ) : asset.kind === "video" ? (
-                            <video src={asset.data.url} controls className="mt-2 aspect-video w-full rounded-lg bg-black" />
+                            <Typography.Text className="mt-2 block">
+                                {asset.data.width}x{asset.data.height} · {formatBytes(asset.data.bytes)} · {asset.data.mimeType}
+                            </Typography.Text>
                         ) : (
                             <Typography.Text className="mt-2 block">
                                 {asset.data.width}x{asset.data.height} · {formatBytes(asset.data.bytes)} · {asset.data.mimeType}
@@ -1014,12 +1055,18 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
 }
 
 function assetSummary(asset: Asset) {
+    const prompt = assetGenerationPrompt(asset);
+    if (prompt) {
+        if (asset.kind === "text") return assetPromptSnippet(prompt, 120);
+        return `${assetPromptSnippet(prompt, 88)} · ${asset.data.width}x${asset.data.height}`;
+    }
     if (asset.kind === "text") return asset.data.content;
     return `${asset.data.width}x${asset.data.height} · ${formatBytes(asset.data.bytes)} · ${asset.data.mimeType}`;
 }
 
 function assetSearchText(asset: Asset) {
-    return [asset.title, asset.category || "", asset.source || "", asset.note || "", (asset.tags || []).join(" "), asset.kind === "text" ? asset.data.content : asset.data.mimeType].join(" ").toLowerCase();
+    const prompt = assetGenerationPrompt(asset);
+    return [asset.title, asset.category || "", asset.source || "", asset.note || "", prompt, (asset.tags || []).join(" "), asset.kind === "text" ? asset.data.content : asset.data.mimeType].join(" ").toLowerCase();
 }
 
 function fileNameWithoutExtension(name: string) {

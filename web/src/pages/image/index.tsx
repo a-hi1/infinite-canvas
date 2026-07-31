@@ -10,10 +10,12 @@ import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { suggestAssetCategory } from "@/lib/asset-category";
+import { assetTitleFromPrompt } from "@/lib/asset-display";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { resolveImageReferenceLimit } from "@/lib/image-reference-limits";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { describeImageRequestMode, IMAGE_EDIT_DEGRADED_DEFAULT } from "@/lib/image-request-mode";
+import { clampImageConfigToCapability } from "@/lib/model-capability";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
 import { getImageCompatStrategy, modelOptionLabel, resolveModelChannel, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -85,6 +87,7 @@ export default function ImagePage() {
     const { message } = App.useApp();
     const [searchParams, setSearchParams] = useSearchParams();
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const dragDepthRef = useRef(0);
     const config = useConfigStore((state) => state.config);
     const effectiveConfig = useEffectiveConfig();
     const updateConfig = useConfigStore((state) => state.updateConfig);
@@ -104,6 +107,7 @@ export default function ImagePage() {
     const [promptDialogOpen, setPromptDialogOpen] = useState(false);
     const [assetPickerOpen, setAssetPickerOpen] = useState(false);
     const [optimizingPrompt, setOptimizingPrompt] = useState(false);
+    const [isReferenceDragActive, setIsReferenceDragActive] = useState(false);
     const [startedAt, setStartedAt] = useState(0);
     const [elapsedMs, setElapsedMs] = useState(0);
     const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
@@ -419,8 +423,11 @@ export default function ImagePage() {
 
     const saveResultToAssets = async (image: GeneratedImage, index: number) => {
         try {
-            const title = `生成结果 ${index + 1}`;
-            const category = suggestAssetCategory({ title, source: "生图工作台", prompt, kind: "image" });
+            const generationPrompt = prompt.trim();
+            // 用提示词摘要作标题，避免批量「生成结果 1」无法区分；完整提示词进 metadata
+            const title = assetTitleFromPrompt(generationPrompt, `生成结果 ${index + 1}`);
+            const category = suggestAssetCategory({ title, source: "生图工作台", prompt: generationPrompt, kind: "image" });
+            const metadata = { source: "image-page", prompt: generationPrompt, resultIndex: index + 1 };
             // 1) 已有本地副本：直接进本机资产，与是否上云无关
             if (image.storageKey) {
                 const localUrl = await resolveImageUrl(image.storageKey, image.dataUrl);
@@ -439,7 +446,7 @@ export default function ImagePage() {
                         bytes: image.bytes,
                         mimeType: image.mimeType || "image/png",
                     },
-                    metadata: { source: "image-page", prompt },
+                    metadata,
                 });
                 message.success("已加入我的资产（本机）");
                 return;
@@ -459,7 +466,7 @@ export default function ImagePage() {
                 tags: [],
                 source: "生图工作台",
                 data: { dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType },
-                metadata: { source: "image-page", prompt },
+                metadata,
             });
             message.success("已加入我的资产（本机）");
         } catch (error) {
@@ -828,16 +835,40 @@ export default function ImagePage() {
                                 ) : null}
                                 <div
                                     ref={referencesScrollerRef}
-                                    className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700"
+                                    className={`hover-scrollbar hover-scrollbar-hint relative flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed p-2 pb-3 overscroll-x-contain transition-colors ${isReferenceDragActive ? "border-stone-900 bg-stone-100/80 dark:border-stone-100 dark:bg-stone-900/80" : "border-stone-300 dark:border-stone-700"}`}
+                                    onDragEnter={(event) => {
+                                        event.preventDefault();
+                                        dragDepthRef.current += 1;
+                                        if (event.dataTransfer.types.includes("Files")) setIsReferenceDragActive(true);
+                                    }}
+                                    onDragOver={(event) => {
+                                        event.preventDefault();
+                                        event.dataTransfer.dropEffect = "copy";
+                                    }}
+                                    onDragLeave={(event) => {
+                                        event.preventDefault();
+                                        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+                                        if (!dragDepthRef.current) setIsReferenceDragActive(false);
+                                    }}
+                                    onDrop={(event) => {
+                                        event.preventDefault();
+                                        dragDepthRef.current = 0;
+                                        setIsReferenceDragActive(false);
+                                        void addReferences(event.dataTransfer.files);
+                                    }}
                                 >
                                     {references.map((item, index) => (
                                         <div key={item.id} className="group relative size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
-                                            <img src={item.dataUrl} alt={item.name} className="size-full object-cover" />
-                                            <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{imageReferenceLabel(index)}</span>
+                                            {item.dataUrl ? (
+                                                <Image src={item.dataUrl} alt={item.name} className="size-full object-cover" preview={{ mask: "预览" }} />
+                                            ) : (
+                                                <div className="flex size-full items-center justify-center bg-stone-100 text-xs text-stone-400 dark:bg-stone-900 dark:text-stone-500">无预览</div>
+                                            )}
+                                            <span className="pointer-events-none absolute left-1 top-1 z-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{imageReferenceLabel(index)}</span>
                                             <ReferenceOrderButtons index={index} total={references.length} onMove={(offset) => setReferences((value) => moveListItem(value, index, offset))} />
                                             <button
                                                 type="button"
-                                                className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
+                                                className="absolute right-1 top-1 z-2 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
                                                 onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))}
                                                 aria-label="移除参考图"
                                             >
@@ -845,7 +876,7 @@ export default function ImagePage() {
                                             </button>
                                         </div>
                                     ))}
-                                    {!references.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">暂无参考图</div> : null}
+                                    {!references.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{isReferenceDragActive ? "松开即可添加参考图" : "暂无参考图，可将图片拖到这里"}</div> : null}
                                 </div>
                             </div>
 
@@ -997,15 +1028,24 @@ function GenerationSettings({
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
 
+    const onModelChange = (value: string) => {
+        updateConfig("imageModel", value);
+        const clamped = clampImageConfigToCapability({ ...config, model: value, imageModel: value });
+        if (clamped.quality !== undefined) updateConfig("quality", clamped.quality);
+        if (clamped.size !== undefined) updateConfig("size", clamped.size);
+        if (clamped.count !== undefined) updateConfig("count", clamped.count);
+        if (clamped.background !== undefined) updateConfig("background", clamped.background);
+    };
+
     return (
         <>
             <label className="col-span-2 block min-w-0 sm:col-span-1">
                 <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">模型</span>
-                <ModelPicker config={config} value={model} onChange={(value) => updateConfig("imageModel", value)} capability="image" fullWidth onMissingConfig={() => openConfigDialog(false)} />
+                <ModelPicker config={config} value={model} onChange={onModelChange} capability="image" fullWidth onMissingConfig={() => openConfigDialog(false)} />
                 {modelHint ? <div className="mt-1.5 text-xs leading-5 text-stone-500 dark:text-stone-400">{modelHint}</div> : null}
             </label>
             <div className="col-span-2">
-                <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} />
+                <ImageSettingsPanel config={{ ...config, model, imageModel: model }} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} />
             </div>
         </>
     );
@@ -1339,7 +1379,7 @@ function moveListItem<T>(items: T[], index: number, offset: number) {
 function ReferenceOrderButtons({ index, total, onMove }: { index: number; total: number; onMove: (offset: number) => void }) {
     if (total <= 1) return null;
     return (
-        <div className="absolute inset-x-1 bottom-1 flex justify-between">
+        <div className="absolute inset-x-1 bottom-1 z-2 flex justify-between">
             <Button size="small" className="!h-6 !w-6 !min-w-6 !rounded-full !bg-white/85 !p-0 !shadow-sm" icon={<ArrowLeft className="size-3" />} disabled={index <= 0} onClick={() => onMove(-1)} />
             <Button size="small" className="!h-6 !w-6 !min-w-6 !rounded-full !bg-white/85 !p-0 !shadow-sm" icon={<ArrowRight className="size-3" />} disabled={index >= total - 1} onClick={() => onMove(1)} />
         </div>

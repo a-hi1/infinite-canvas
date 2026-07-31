@@ -1,11 +1,12 @@
 import { App, Button, Form, Input, Modal, Progress, Select, Tabs, Tag } from "antd";
-import { Cloud, Code2, Pencil, Plus, RefreshCw, Trash2, Wifi } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Cloud, Download, Pencil, Plus, RefreshCw, Trash2, Upload, Wifi } from "lucide-react";
+import { useRef, useState } from "react";
 
 import { ChannelEditorDrawer } from "@/components/layout/channel-editor-drawer";
-import { ModelScriptEditor } from "@/components/layout/model-script-editor";
+import { ConfigPromptSources } from "@/components/layout/config-prompt-sources";
 import { ModelPicker } from "@/components/model-picker";
 import { fetchChannelModels } from "@/services/api/image";
+import { exportAppConfig, importAppConfig } from "@/services/config-file";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
@@ -13,21 +14,15 @@ import {
     AI_PROXY_BASE_URL,
     CHANNEL_COMPAT_OPTIONS,
     createModelChannel,
+    deriveCapabilityModelLists,
     encodeChannelModel,
-    filterModelsByCapability,
     isAiProxyBaseUrl,
     isLanAiBaseUrl,
     isSameOriginRelayBaseUrl,
     LAN_AI_BASE_URL,
-    listConfiguredModelScripts,
-    modelOptionLabel,
-    modelOptionName,
-    modelOptionsFromChannels,
     normalizeCompatProfile,
-    normalizeModelOptionValue,
     pruneModelScripts,
     resolveChannelCompatProfile,
-    resolveModelScript,
     setModelScript,
     useConfigStore,
     type AiConfig,
@@ -39,9 +34,7 @@ import {
 type ModelGroup = {
     capability: ModelCapability;
     modelKey: "imageModel" | "videoModel" | "textModel" | "audioModel";
-    modelsKey: "imageModels" | "videoModels" | "textModels" | "audioModels";
     defaultLabel: string;
-    optionsLabel: string;
 };
 
 type WebdavDomainProgress = {
@@ -53,10 +46,10 @@ type WebdavDomainProgress = {
 };
 
 const modelGroups: ModelGroup[] = [
-    { capability: "image", modelKey: "imageModel", modelsKey: "imageModels", defaultLabel: "默认生图模型", optionsLabel: "生图模型可选项" },
-    { capability: "video", modelKey: "videoModel", modelsKey: "videoModels", defaultLabel: "默认视频模型", optionsLabel: "视频模型可选项" },
-    { capability: "text", modelKey: "textModel", modelsKey: "textModels", defaultLabel: "默认文本模型", optionsLabel: "文本模型可选项" },
-    { capability: "audio", modelKey: "audioModel", modelsKey: "audioModels", defaultLabel: "默认音频模型", optionsLabel: "音频模型可选项" },
+    { capability: "image", modelKey: "imageModel", defaultLabel: "默认生图模型" },
+    { capability: "video", modelKey: "videoModel", defaultLabel: "默认视频模型" },
+    { capability: "text", modelKey: "textModel", defaultLabel: "默认文本模型" },
+    { capability: "audio", modelKey: "audioModel", defaultLabel: "默认音频模型" },
 ];
 
 const webdavDomainKeys: AppSyncDomainKey[] = ["canvas", "assets", "image-workbench", "video-workbench"];
@@ -65,13 +58,6 @@ const webdavDomainLabels: Record<AppSyncDomainKey, string> = {
     assets: "我的资产",
     "image-workbench": "生图工作台",
     "video-workbench": "视频创作台",
-};
-
-const capabilityShortLabel: Record<ModelCapability, string> = {
-    image: "生图",
-    video: "视频",
-    text: "文本",
-    audio: "音频",
 };
 
 function createWebdavDomainProgress(): Record<AppSyncDomainKey, WebdavDomainProgress> {
@@ -86,6 +72,7 @@ function createWebdavDomainProgress(): Record<AppSyncDomainKey, WebdavDomainProg
 
 export function AppConfigModal() {
     const { message } = App.useApp();
+    const configInputRef = useRef<HTMLInputElement>(null);
     const [activeTab, setActiveTab] = useState("channels");
     const [editingChannelId, setEditingChannelId] = useState("");
     const [loadingChannelId, setLoadingChannelId] = useState("");
@@ -93,9 +80,6 @@ export function AppConfigModal() {
     const [syncingWebdav, setSyncingWebdav] = useState(false);
     const [webdavSyncStatus, setWebdavSyncStatus] = useState("");
     const [webdavDomainProgress, setWebdavDomainProgress] = useState(createWebdavDomainProgress);
-    const [scriptEditor, setScriptEditor] = useState<{ capability: ModelCapability; modelValue: string } | null>(null);
-    /** Per-capability model currently selected in the script manager UI (not the default model). */
-    const [scriptTargetByCapability, setScriptTargetByCapability] = useState<Partial<Record<ModelCapability, string>>>({});
     const config = useConfigStore((state) => state.config);
     const webdav = useConfigStore((state) => state.webdav);
     const updateConfig = useConfigStore((state) => state.updateConfig);
@@ -104,47 +88,12 @@ export function AppConfigModal() {
     const shouldPromptContinue = useConfigStore((state) => state.shouldPromptContinue);
     const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
     const clearPromptContinue = useConfigStore((state) => state.clearPromptContinue);
-    const modelOptions = config.models.map((model) => ({ label: modelOptionLabel(config, model), value: model }));
-    const configuredScripts = useMemo(() => listConfiguredModelScripts(config), [config]);
     const editingChannel = config.channels.find((channel) => channel.id === editingChannelId) || null;
-    const scriptModelOptionsByCapability = useMemo(() => {
-        const scripted = configuredScripts.map((item) => item.key);
-        return Object.fromEntries(
-            modelGroups.map((group) => {
-                const capabilityModels = config[group.modelsKey] || [];
-                const defaultModel = config[group.modelKey];
-                const capabilityNames = new Set(capabilityModels.map((value) => modelOptionName(value)));
-                if (defaultModel) capabilityNames.add(modelOptionName(defaultModel));
-                const relatedScripted = scripted.filter((key) => {
-                    if (capabilityModels.includes(key) || key === defaultModel) return true;
-                    return capabilityNames.has(modelOptionName(key));
-                });
-                const values = Array.from(new Set([defaultModel, ...capabilityModels, ...relatedScripted].map((value) => (value || "").trim()).filter(Boolean)));
-                return [
-                    group.capability,
-                    values.map((value) => ({
-                        value,
-                        label: `${modelOptionLabel(config, value)}${resolveModelScript(config, value) ? " · 已自定义" : ""}`,
-                    })),
-                ];
-            }),
-        ) as Record<ModelCapability, Array<{ value: string; label: string }>>;
-    }, [config, configuredScripts]);
     const webdavReady = Boolean(webdav.url.trim());
 
     const saveConfig = (nextConfig: AiConfig) => {
         const pruned = pruneModelScripts(nextConfig);
         (Object.keys(pruned) as Array<keyof AiConfig>).forEach((key) => updateConfig(key, pruned[key]));
-    };
-
-    const clearModelScript = (modelValue: string) => {
-        try {
-            const next = setModelScript(config, modelValue, "");
-            updateConfig("modelScripts", next.modelScripts);
-            message.success("已清除该模型的自定义脚本");
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : "清除脚本失败");
-        }
     };
 
     const finishConfig = () => {
@@ -153,6 +102,17 @@ export function AppConfigModal() {
         if (!ready) return;
         message.success(shouldPromptContinue ? "配置已保存，请继续刚才的请求" : "配置已保存");
         clearPromptContinue();
+    };
+
+    const loadConfigFile = async (file: File) => {
+        try {
+            await importAppConfig(file);
+            message.success("配置与用户偏好已导入");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "配置文件读取失败");
+        } finally {
+            if (configInputRef.current) configInputRef.current.value = "";
+        }
     };
 
     const updateChannels = (channels: ModelChannel[]) => {
@@ -164,8 +124,15 @@ export function AppConfigModal() {
         const channels = exists ? config.channels.map((item) => (item.id === channel.id ? channel : item)) : [...config.channels, channel];
         updateChannels(channels);
         message.success(exists ? "渠道已保存" : "渠道已添加");
-        if (channel.models.length) {
-            message.info({ content: "记得到「模型」Tab 把需要的模型加入可选项", duration: 3 });
+    };
+
+    const saveChannelModelScript = (modelValue: string, script: string) => {
+        try {
+            const next = setModelScript(config, modelValue, script);
+            updateConfig("modelScripts", next.modelScripts);
+            message.success(script.trim() ? "模型调用脚本已保存" : "已恢复系统默认调用");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "保存脚本失败");
         }
     };
 
@@ -182,11 +149,10 @@ export function AppConfigModal() {
         const agnesModel = encodeChannelModel(proxyChannel.id, "agnes-video-v2.0");
         saveConfig({
             ...nextConfig,
-            videoModels: uniqueModels([...nextConfig.videoModels, agnesModel]),
-            videoModel: agnesModel,
+            videoModel: nextConfig.videoModels.includes(agnesModel) ? agnesModel : nextConfig.videoModel,
         });
         setEditingChannelId(proxyChannel.id);
-        message.success("已添加服务器代理渠道，并已把 agnes-video-v2.0 设为默认视频模型");
+        message.success("已添加服务器代理渠道；agnes-video-v2.0 已进入视频下拉，可在偏好设置里设为默认");
     };
 
     const addLanAiChannel = () => {
@@ -224,18 +190,12 @@ export function AppConfigModal() {
             const entries = await Promise.all(runnable.map(async (channel) => [channel.id, uniqueModels(await fetchChannelModels(channel))] as const));
             const modelMap = new Map(entries);
             updateChannels(config.channels.map((channel) => (modelMap.has(channel.id) ? { ...channel, models: modelMap.get(channel.id) || [] } : channel)));
-            message.success("模型列表已更新；请到「模型」Tab 确认可选项");
+            message.success("模型列表已更新；各工作台下拉会按渠道模型自动同步");
         } catch (error) {
             message.error(error instanceof Error ? error.message : "读取模型失败");
         } finally {
             setLoadingChannelId("");
         }
-    };
-
-    const updateCapabilityModels = (group: ModelGroup, models: string[]) => {
-        const next = uniqueModels(models.map((model) => normalizeModelOptionValue(model, config.channels)).filter(Boolean));
-        updateConfig(group.modelsKey, next);
-        if (!next.includes(config[group.modelKey])) updateConfig(group.modelKey, next[0] || "");
     };
 
     const testWebdav = async () => {
@@ -294,7 +254,7 @@ export function AppConfigModal() {
             title={
                 <div>
                     <div className="text-lg font-semibold">配置与用户偏好</div>
-                    <div className="mt-1 text-xs font-normal text-stone-500">渠道列表、模型可选项与同步偏好</div>
+                    <div className="mt-1 text-xs font-normal text-stone-500">渠道聚合、默认模型和同步偏好</div>
                 </div>
             }
             open={isConfigOpen}
@@ -308,6 +268,18 @@ export function AppConfigModal() {
                 </Button>
             }
         >
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 pb-3 dark:border-stone-800">
+                <div className="text-xs text-stone-500">JSON 文件包含 API Key 和 WebDAV 凭据，请妥善保管。</div>
+                <div className="flex gap-2">
+                    <Button icon={<Upload className="size-4" />} onClick={() => configInputRef.current?.click()}>
+                        导入配置
+                    </Button>
+                    <Button icon={<Download className="size-4" />} onClick={exportAppConfig}>
+                        导出配置
+                    </Button>
+                    <input ref={configInputRef} type="file" accept="application/json,.json" className="hidden" onChange={(event) => event.target.files?.[0] && void loadConfigFile(event.target.files[0])} />
+                </div>
+            </div>
             <Tabs
                 activeKey={activeTab}
                 onChange={setActiveTab}
@@ -319,9 +291,11 @@ export function AppConfigModal() {
                             <div>
                                 <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
                                     <div className="min-w-0 flex-1 space-y-1">
-                                        <div className="text-xs leading-5 text-stone-500">列表仅展示摘要；点「编辑」修改密钥与模型。新增或拉取后，请到「模型」Tab 选择可选项才会出现在各处下拉框。</div>
-                                        <Button type="link" size="small" className="h-auto p-0 text-xs" onClick={() => setActiveTab("models")}>
-                                            去模型设置 →
+                                        <div className="text-xs leading-5 text-stone-500">
+                                            每个渠道选择协议并拉取模型；编辑抽屉里可选模型、配置调用脚本。渠道已保存的模型会按名称自动进入对应能力的下拉框，默认模型可在「偏好设置」调整。
+                                        </div>
+                                        <Button type="link" size="small" className="h-auto p-0 text-xs" onClick={() => setActiveTab("preferences")}>
+                                            去偏好设置 →
                                         </Button>
                                     </div>
                                     <div className="flex shrink-0 flex-wrap gap-2">
@@ -379,187 +353,66 @@ export function AppConfigModal() {
                         ),
                     },
                     {
-                        key: "models",
-                        label: "模型",
+                        key: "preferences",
+                        label: "偏好设置",
                         children: (
                             <Form layout="vertical" requiredMark={false}>
-                                <section className="mb-4 rounded-lg border border-stone-200 p-4 dark:border-stone-800">
-                                    <div className="mb-3">
-                                        <div className="text-sm font-semibold">可选项</div>
-                                        <div className="mt-1 text-xs leading-5 text-stone-500">决定各处下拉框展示哪些模型；同名模型会以括号里的渠道名区分。请先在渠道里保存模型名。</div>
-                                    </div>
-                                    <div className="grid gap-4 md:grid-cols-2">
-                                        {modelGroups.map((group) => (
-                                            <Form.Item key={group.modelsKey} label={group.optionsLabel} className="mb-0">
-                                                <Select
-                                                    mode="tags"
-                                                    showSearch
-                                                    allowClear
-                                                    maxTagCount="responsive"
-                                                    placeholder={config.models.length ? `请选择或输入${group.optionsLabel}` : "先到渠道里填写或拉取模型"}
-                                                    value={config[group.modelsKey]}
-                                                    options={modelOptions}
-                                                    onChange={(models) => updateCapabilityModels(group, models)}
-                                                />
-                                            </Form.Item>
-                                        ))}
-                                    </div>
-                                </section>
+                                <div className="mb-2 text-sm font-semibold">默认模型</div>
+                                <div className="mb-1 text-xs leading-5 text-stone-500">
+                                    下拉选项直接来自各渠道已保存的模型（按名称自动识别生图/视频/文本/音频）。请先在「渠道」里选择模型；新建任务默认用这里的选择，单个节点/工作台仍可临时覆盖。
+                                </div>
+                                <div className="mb-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                                    {modelGroups.map((group) => (
+                                        <Form.Item key={group.modelKey} label={group.defaultLabel} className="mb-0">
+                                            <ModelPicker config={config} value={config[group.modelKey]} onChange={(model) => updateConfig(group.modelKey, model)} capability={group.capability} fullWidth />
+                                        </Form.Item>
+                                    ))}
+                                </div>
 
-                                <section className="mb-4 rounded-lg border border-stone-200 p-4 dark:border-stone-800">
-                                    <div className="mb-3">
-                                        <div className="text-sm font-semibold">默认模型</div>
-                                        <div className="mt-1 text-xs leading-5 text-stone-500">新建任务时的默认选择；单个节点/工作台仍可临时覆盖。</div>
-                                    </div>
-                                    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                                        {modelGroups.map((group) => (
-                                            <Form.Item key={group.modelKey} label={group.defaultLabel} className="mb-0">
-                                                <ModelPicker config={config} value={config[group.modelKey]} onChange={(model) => updateConfig(group.modelKey, model)} capability={group.capability} fullWidth />
-                                            </Form.Item>
-                                        ))}
-                                    </div>
-                                </section>
-
-                                <section className="rounded-lg border border-stone-200 p-4 dark:border-stone-800">
-                                    <div className="mb-3">
-                                        <div className="text-sm font-semibold">调用脚本（可选）</div>
-                                        <div className="mt-1 text-xs leading-5 text-stone-500">
-                                            为任意可选模型写自定义调用脚本，键优先 <code className="mx-0.5">渠道::模型</code>；留空走系统默认。仅保存在本机。
-                                        </div>
-                                    </div>
-                                    <div className="grid gap-3 md:grid-cols-2">
-                                        {modelGroups.map((group) => {
-                                            const options = scriptModelOptionsByCapability[group.capability] || [];
-                                            const selected = scriptTargetByCapability[group.capability];
-                                            const modelValue = (selected && options.some((item) => item.value === selected) ? selected : "") || config[group.modelKey] || options[0]?.value || "";
-                                            const hasScript = Boolean(modelValue && resolveModelScript(config, modelValue));
-                                            const isDefaultModel = Boolean(modelValue && modelValue === config[group.modelKey]);
-                                            return (
-                                                <div key={`script-${group.modelKey}`} className="space-y-2 rounded-md border border-stone-200 p-3 dark:border-stone-800">
-                                                    <div className="flex items-center justify-between gap-2">
-                                                        <div className="min-w-0 text-sm font-medium">{capabilityShortLabel[group.capability]}脚本</div>
-                                                        <div className="flex shrink-0 items-center gap-1.5">
-                                                            {isDefaultModel ? <Tag className="m-0">默认</Tag> : null}
-                                                            {hasScript ? (
-                                                                <Tag className="m-0" color="blue">
-                                                                    已自定义
-                                                                </Tag>
-                                                            ) : (
-                                                                <Tag className="m-0">系统默认</Tag>
-                                                            )}
-                                                        </div>
-                                                    </div>
-                                                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                                                        <Select
-                                                            className="min-w-0 flex-1"
-                                                            showSearch
-                                                            allowClear={false}
-                                                            placeholder={options.length ? "选择要配置脚本的模型" : "先添加模型可选项"}
-                                                            value={modelValue || undefined}
-                                                            options={options}
-                                                            optionFilterProp="label"
-                                                            onChange={(value) => setScriptTargetByCapability((current) => ({ ...current, [group.capability]: value }))}
-                                                        />
-                                                        <Button
-                                                            size="middle"
-                                                            icon={<Code2 className="size-3.5" />}
-                                                            disabled={!modelValue}
-                                                            onClick={() => modelValue && setScriptEditor({ capability: group.capability, modelValue })}
-                                                        >
-                                                            编辑脚本
-                                                        </Button>
-                                                    </div>
-                                                    {!options.length ? <div className="text-xs text-stone-500">该能力还没有可选模型。</div> : null}
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                    {configuredScripts.length ? (
-                                        <div className="mt-3 rounded-md border border-stone-200 p-3 dark:border-stone-800">
-                                            <div className="mb-2 flex items-center justify-between gap-2">
-                                                <div className="text-sm font-medium">已配置脚本（{configuredScripts.length}）</div>
-                                                <div className="text-xs text-stone-500">仅列出有自定义脚本的模型</div>
-                                            </div>
-                                            <div className="space-y-2">
-                                                {configuredScripts.map((item) => (
-                                                    <div key={item.key} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-stone-50 px-2.5 py-2 dark:bg-stone-900/40">
-                                                        <div className="min-w-0">
-                                                            <div className="truncate text-sm font-medium">{item.label}</div>
-                                                            <div className="truncate font-mono text-[11px] text-stone-500">{item.key}</div>
-                                                        </div>
-                                                        <div className="flex shrink-0 gap-2">
-                                                            <Button
-                                                                size="small"
-                                                                icon={<Code2 className="size-3.5" />}
-                                                                onClick={() => {
-                                                                    const capability = resolveScriptEditorCapability(config, item.key);
-                                                                    setScriptTargetByCapability((current) => ({ ...current, [capability]: item.key }));
-                                                                    setScriptEditor({ capability, modelValue: item.key });
-                                                                }}
-                                                            >
-                                                                编辑
-                                                            </Button>
-                                                            <Button size="small" danger onClick={() => clearModelScript(item.key)}>
-                                                                清除
-                                                            </Button>
-                                                        </div>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    ) : null}
-                                </section>
+                                <div className="mb-2 text-sm font-semibold">生成偏好</div>
+                                <div className="mb-1 text-xs leading-5 text-stone-500">影响画布与工作台的初始默认值，单个任务仍可覆盖。</div>
+                                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                                    <Form.Item label="画布默认生图张数" extra="新建画布生图和配置节点默认使用。" className="mb-0">
+                                        <Input
+                                            type="number"
+                                            min={1}
+                                            max={15}
+                                            value={config.canvasImageCount}
+                                            onChange={(event) => updateConfig("canvasImageCount", event.target.value)}
+                                            onBlur={(event) => updateConfig("canvasImageCount", normalizeImageCount(event.target.value))}
+                                        />
+                                    </Form.Item>
+                                    <Form.Item label="默认音频声音" className="mb-0">
+                                        <Select value={config.audioVoice} options={audioVoiceOptions} onChange={(value) => updateConfig("audioVoice", value)} />
+                                    </Form.Item>
+                                    <Form.Item label="默认音频格式" className="mb-0">
+                                        <Select value={config.audioFormat} options={audioFormatOptions} onChange={(value) => updateConfig("audioFormat", value)} />
+                                    </Form.Item>
+                                    <Form.Item label="默认音频语速" className="mb-0">
+                                        <Input
+                                            type="number"
+                                            min={0.25}
+                                            max={4}
+                                            step={0.05}
+                                            value={config.audioSpeed}
+                                            onChange={(event) => updateConfig("audioSpeed", event.target.value)}
+                                            onBlur={(event) => updateConfig("audioSpeed", normalizeAudioSpeedValue(event.target.value))}
+                                        />
+                                    </Form.Item>
+                                </div>
+                                <Form.Item label="默认音频指令" className="mb-4 mt-4">
+                                    <Input.TextArea rows={2} value={config.audioInstructions} placeholder="例如：自然、温暖、适合旁白。" onChange={(event) => updateConfig("audioInstructions", event.target.value)} />
+                                </Form.Item>
+                                <Form.Item label="系统提示词" className="mb-0">
+                                    <Input.TextArea rows={4} value={config.systemPrompt} placeholder="例如：你是一位擅长电影感写实摄影的视觉导演。" onChange={(event) => updateConfig("systemPrompt", event.target.value)} />
+                                </Form.Item>
                             </Form>
                         ),
                     },
                     {
-                        key: "preferences",
-                        label: "生成偏好",
-                        children: (
-                            <Form layout="vertical" requiredMark={false}>
-                                <section className="rounded-lg border border-stone-200 p-4 dark:border-stone-800">
-                                    <div className="mb-3">
-                                        <div className="text-sm font-semibold">默认生成参数</div>
-                                        <div className="mt-1 text-xs leading-5 text-stone-500">影响画布与工作台的初始默认值，单个任务仍可覆盖。</div>
-                                    </div>
-                                    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                                        <Form.Item label="画布默认生图张数" extra="新建画布生图和配置节点默认使用。" className="mb-0">
-                                            <Input
-                                                type="number"
-                                                min={1}
-                                                max={15}
-                                                value={config.canvasImageCount}
-                                                onChange={(event) => updateConfig("canvasImageCount", event.target.value)}
-                                                onBlur={(event) => updateConfig("canvasImageCount", normalizeImageCount(event.target.value))}
-                                            />
-                                        </Form.Item>
-                                        <Form.Item label="默认音频声音" className="mb-0">
-                                            <Select value={config.audioVoice} options={audioVoiceOptions} onChange={(value) => updateConfig("audioVoice", value)} />
-                                        </Form.Item>
-                                        <Form.Item label="默认音频格式" className="mb-0">
-                                            <Select value={config.audioFormat} options={audioFormatOptions} onChange={(value) => updateConfig("audioFormat", value)} />
-                                        </Form.Item>
-                                        <Form.Item label="默认音频语速" className="mb-0">
-                                            <Input
-                                                type="number"
-                                                min={0.25}
-                                                max={4}
-                                                step={0.05}
-                                                value={config.audioSpeed}
-                                                onChange={(event) => updateConfig("audioSpeed", event.target.value)}
-                                                onBlur={(event) => updateConfig("audioSpeed", normalizeAudioSpeedValue(event.target.value))}
-                                            />
-                                        </Form.Item>
-                                    </div>
-                                    <Form.Item label="默认音频指令" className="mb-4 mt-4">
-                                        <Input.TextArea rows={2} value={config.audioInstructions} placeholder="例如：自然、温暖、适合旁白。" onChange={(event) => updateConfig("audioInstructions", event.target.value)} />
-                                    </Form.Item>
-                                    <Form.Item label="系统提示词" className="mb-0">
-                                        <Input.TextArea rows={4} value={config.systemPrompt} placeholder="例如：你是一位擅长电影感写实摄影的视觉导演。" onChange={(event) => updateConfig("systemPrompt", event.target.value)} />
-                                    </Form.Item>
-                                </section>
-                            </Form>
-                        ),
+                        key: "prompt-sources",
+                        label: "提示词来源",
+                        children: <ConfigPromptSources />,
                     },
                     {
                         key: "webdav",
@@ -607,77 +460,28 @@ export function AppConfigModal() {
                     },
                 ]}
             />
-            <ChannelEditorDrawer open={Boolean(editingChannel)} channel={editingChannel} onSave={saveChannel} onClose={() => setEditingChannelId("")} />
-            <ModelScriptEditor
-                open={Boolean(scriptEditor)}
-                capability={scriptEditor?.capability || "image"}
-                modelName={scriptEditor ? modelOptionName(scriptEditor.modelValue) : ""}
-                value={scriptEditor ? resolveModelScript(config, scriptEditor.modelValue) : ""}
-                onSave={(script) => {
-                    if (!scriptEditor) return;
-                    try {
-                        const next = setModelScript(config, scriptEditor.modelValue, script);
-                        updateConfig("modelScripts", next.modelScripts);
-                        message.success(script.trim() ? "模型调用脚本已保存" : "已恢复系统默认调用");
-                    } catch (error) {
-                        message.error(error instanceof Error ? error.message : "保存脚本失败");
-                    }
-                }}
-                onClose={() => setScriptEditor(null)}
+            <ChannelEditorDrawer
+                open={Boolean(editingChannel)}
+                channel={editingChannel}
+                modelScripts={config.modelScripts}
+                onSave={saveChannel}
+                onSaveScript={saveChannelModelScript}
+                onClose={() => setEditingChannelId("")}
             />
         </Modal>
     );
 }
 
-/** Prefer capability lists / defaults over name regex when opening a configured script. */
-function resolveScriptEditorCapability(config: AiConfig, modelKey: string): ModelCapability {
-    const exact = modelGroups.find((group) => config[group.modelKey] === modelKey || (config[group.modelsKey] || []).includes(modelKey));
-    if (exact) return exact.capability;
-    const name = modelOptionName(modelKey);
-    const byName = modelGroups.find((group) => {
-        if (modelOptionName(config[group.modelKey] || "") === name) return true;
-        return (config[group.modelsKey] || []).some((value) => modelOptionName(value) === name);
-    });
-    if (byName) return byName.capability;
-    if (name.match(/video|sora|veo|seedance|agnes|kling|wan|hailuo/i)) return "video";
-    if (name.match(/tts|audio|speech|voice|music|sound/i)) return "audio";
-    if (name.match(/image|dall|seedream|flux|imagen|sdxl|gpt-image/i)) return "image";
-    return "text";
-}
-
 function withChannels(config: AiConfig, channels: ModelChannel[]): AiConfig {
-    const models = modelOptionsFromChannels(channels);
-    const imageModels = keepOrSuggest(config.imageModels, filterModelsByCapability(models, "image"), models);
-    const videoModels = keepOrSuggest(config.videoModels, filterModelsByCapability(models, "video"), models);
-    const textModels = keepOrSuggest(config.textModels, filterModelsByCapability(models, "text"), models);
-    const audioModels = keepOrSuggest(config.audioModels, filterModelsByCapability(models, "audio"), models);
+    const derived = deriveCapabilityModelLists(channels, config);
     return pruneModelScripts({
         ...config,
         channels,
-        models,
+        ...derived,
         baseUrl: channels[0]?.baseUrl || config.baseUrl,
         apiKey: channels[0]?.apiKey || config.apiKey,
         apiFormat: channels[0]?.apiFormat || config.apiFormat,
-        imageModels,
-        videoModels,
-        textModels,
-        audioModels,
-        imageModel: normalizeDefaultModel(config.imageModel, imageModels),
-        videoModel: normalizeDefaultModel(config.videoModel, videoModels),
-        textModel: normalizeDefaultModel(config.textModel, textModels),
-        audioModel: normalizeDefaultModel(config.audioModel, audioModels),
     });
-}
-
-function keepOrSuggest(current: string[], suggested: string[], allModels: string[]) {
-    const available = new Set(allModels);
-    const kept = uniqueModels(current).filter((model) => available.has(model));
-    return kept.length ? kept : suggested;
-}
-
-function normalizeDefaultModel(value: string, options: string[]) {
-    if (options.includes(value)) return value;
-    return options[0] || value;
 }
 
 function normalizeImageCount(value: string) {

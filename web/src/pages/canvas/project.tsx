@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { BookOpen, Bot, Download, Group, Home, ImageIcon, Images, List, Menu, Music2, Plus, Redo2, Settings2, Trash2, Undo2, Upload, Video } from "lucide-react";
+import { BookOpen, Bot, Download, Group, Home, ImageIcon, Images, List, Menu, Music2, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Settings2, Trash2, Undo2, Upload, Video } from "lucide-react";
 import { saveAs } from "file-saver";
 
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
@@ -14,7 +14,9 @@ import { resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { agnesVideoRequestError, isAgnesVideoConfig } from "@/lib/agnes-video";
+import { grokResolutionShortfallMessage, isGrokVideoConfig } from "@/lib/grok-video";
 import { suggestAssetCategory } from "@/lib/asset-category";
+import { assetTitleFromPrompt } from "@/lib/asset-display";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { useAssetStore } from "@/stores/use-asset-store";
@@ -24,7 +26,7 @@ import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-i
 import { exportCanvasNodes, exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { mergeCanvasNodeAiConfig } from "@/lib/canvas/canvas-node-ai-config";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
-import { App, Button, Dropdown, Modal } from "antd";
+import { App, Button, Dropdown, Modal, Tooltip } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -39,7 +41,7 @@ import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
-import { CanvasNodeListPanel } from "@/components/canvas/canvas-node-list-panel";
+import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
 import { InfiniteCanvas } from "@/components/canvas/infinite-canvas";
 import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNode } from "@/components/canvas/canvas-node";
@@ -53,8 +55,8 @@ import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { applyCanvasAgentOps, type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import { buildCanvasResourceReferences, buildNodeMentionReferences } from "@/lib/canvas/canvas-resource-references";
 import { shortGenerationTitle } from "@/lib/canvas/node-title";
-import { centerViewportOnNode } from "@/lib/canvas/canvas-node-list";
 import type { CanvasAgentMode } from "@/components/canvas/canvas-agent-chat-ui";
+import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import {
     CanvasNodeType,
     type CanvasAssistantImage,
@@ -362,6 +364,7 @@ function InfiniteCanvasPage() {
     const connectionsRef = useRef(connections);
     const selectedNodeIdsRef = useRef(selectedNodeIds);
     const viewportRef = useRef(viewport);
+    const focusAnimRef = useRef<number | null>(null);
     const generateNodeRef = useRef<((nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => Promise<void>) | null>(null);
     const connectingParamsRef = useRef(connectingParams);
     const connectionTargetNodeIdRef = useRef(connectionTargetNodeId);
@@ -1727,44 +1730,47 @@ function InfiniteCanvasPage() {
             if (node.type === CanvasNodeType.Text) {
                 const content = node.metadata?.content?.trim();
                 if (!content) return message.error("没有可保存的文本");
-                const title = node.metadata?.prompt?.slice(0, 24) || "画布文本";
+                const generationPrompt = node.metadata?.prompt?.trim() || "";
+                const title = assetTitleFromPrompt(generationPrompt || content, "画布文本");
                 addAsset({
                     kind: "text",
                     title,
                     coverUrl: "",
-                    category: suggestAssetCategory({ title, source: "Canvas", content, prompt: node.metadata?.prompt, kind: "text" }),
+                    category: suggestAssetCategory({ title, source: "Canvas", content, prompt: generationPrompt, kind: "text" }),
                     tags: [],
                     source: "Canvas",
                     data: { content },
-                    metadata: { source: "canvas", nodeId: node.id },
+                    metadata: { source: "canvas", nodeId: node.id, prompt: generationPrompt || content },
                 });
                 message.success("已加入我的资产");
                 return;
             }
             if (node.type === CanvasNodeType.Video) {
                 if (!node.metadata?.content) return message.error("没有可保存的视频");
-                const title = node.metadata?.prompt?.slice(0, 24) || "画布视频";
+                const generationPrompt = node.metadata?.prompt?.trim() || "";
+                const title = assetTitleFromPrompt(generationPrompt, "画布视频");
                 addAsset({
                     kind: "video",
                     title,
                     coverUrl: "",
-                    category: suggestAssetCategory({ title, source: "Canvas", prompt: node.metadata?.prompt, kind: "video" }),
+                    category: suggestAssetCategory({ title, source: "Canvas", prompt: generationPrompt, kind: "video" }),
                     tags: [],
                     source: "Canvas",
                     data: { url: node.metadata.content, storageKey: node.metadata.storageKey, width: node.width, height: node.height, bytes: node.metadata.bytes || 0, mimeType: node.metadata.mimeType || "video/mp4" },
-                    metadata: { source: "canvas", nodeId: node.id, prompt: node.metadata?.prompt },
+                    metadata: { source: "canvas", nodeId: node.id, prompt: generationPrompt },
                 });
                 message.success("已加入我的资产");
                 return;
             }
             if (!node.metadata?.content) return message.error("没有可保存的图片");
             const dataUrl = node.metadata.storageKey ? "" : node.metadata.content;
-            const title = node.metadata?.prompt?.slice(0, 24) || "画布图片";
+            const generationPrompt = node.metadata?.prompt?.trim() || "";
+            const title = assetTitleFromPrompt(generationPrompt, "画布图片");
             addAsset({
                 kind: "image",
                 title,
                 coverUrl: node.metadata.content,
-                category: suggestAssetCategory({ title, source: "Canvas", prompt: node.metadata?.prompt, kind: "image" }),
+                category: suggestAssetCategory({ title, source: "Canvas", prompt: generationPrompt, kind: "image" }),
                 tags: [],
                 source: "Canvas",
                 data: {
@@ -1775,7 +1781,7 @@ function InfiniteCanvasPage() {
                     bytes: node.metadata.bytes || getDataUrlByteSize(dataUrl),
                     mimeType: node.metadata.mimeType || "image/png",
                 },
-                metadata: { source: "canvas", nodeId: node.id, prompt: node.metadata?.prompt },
+                metadata: { source: "canvas", nodeId: node.id, prompt: generationPrompt },
             });
             message.success("已加入我的资产");
         },
@@ -2372,6 +2378,10 @@ function InfiniteCanvasPage() {
                         const video = await storeGeneratedVideo(await requestVideoGeneration(generationConfig, effectivePrompt, generationContext.referenceImages, generationContext.referenceVideos, generationContext.referenceAudios, { signal: controller.signal }));
                         const videoSize = fitNodeSize(video.width || spec.width, video.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
                         setNodes((prev) => prev.map((node) => (node.id === videoId ? { ...node, width: videoSize.width, height: videoSize.height, position: { x: node.position.x + node.width / 2 - videoSize.width / 2, y: node.position.y + node.height / 2 - videoSize.height / 2 }, metadata: { ...node.metadata, ...videoMetadata(video), prompt: effectivePrompt, model: generationConfig.model, size: generationConfig.size, seconds: generationConfig.videoSeconds, vquality: generationConfig.vquality, generateAudio: generationConfig.videoGenerateAudio, watermark: generationConfig.videoWatermark, references: generationReferenceUrls(generationContext) } } : node)));
+                        const shortfall = isGrokVideoConfig(generationConfig)
+                            ? grokResolutionShortfallMessage(generationConfig.vquality || "", video.width, video.height)
+                            : "";
+                        if (shortfall) message.warning(shortfall, 8);
                     } finally {
                         finishGenerationRequest(videoId, controller);
                     }
@@ -2541,6 +2551,10 @@ function InfiniteCanvasPage() {
                     const video = await storeGeneratedVideo(await requestVideoGeneration(generationConfig, prompt, retryImages, context?.referenceVideos || [], context?.referenceAudios || [], { signal: controller.signal }));
                     const videoSize = fitNodeSize(video.width || node.width, video.height || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
                     setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, width: videoSize.width, height: videoSize.height, position: { x: item.position.x + item.width / 2 - videoSize.width / 2, y: item.position.y + item.height / 2 - videoSize.height / 2 }, metadata: { ...item.metadata, ...videoMetadata(video), prompt, model: generationConfig.model, size: generationConfig.size, seconds: generationConfig.videoSeconds, vquality: generationConfig.vquality, generateAudio: generationConfig.videoGenerateAudio, watermark: generationConfig.videoWatermark } } : item)));
+                    const shortfall = isGrokVideoConfig(generationConfig)
+                        ? grokResolutionShortfallMessage(generationConfig.vquality || "", video.width, video.height)
+                        : "";
+                    if (shortfall) message.warning(shortfall, 8);
                     return;
                 }
                 if (node.type === CanvasNodeType.Audio) {
@@ -2645,11 +2659,11 @@ function InfiniteCanvasPage() {
     );
 
     const insertAssistantText = useCallback(
-        (text: string) => {
+        (text: string, title?: string) => {
             const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
             const node = {
                 ...createCanvasNode(CanvasNodeType.Text, center, { content: text, status: NODE_STATUS_SUCCESS }),
-                title: text.slice(0, 32) || "Assistant Text",
+                title: (title || text).slice(0, 32) || "Assistant Text",
             };
 
             setNodes((prev) => [...prev, node]);
@@ -2662,7 +2676,7 @@ function InfiniteCanvasPage() {
     const handleAssetInsert = useCallback(
         (payload: InsertAssetPayload) => {
             if (payload.kind === "text") {
-                insertAssistantText(payload.content);
+                insertAssistantText(payload.content, payload.title);
             } else if (payload.kind === "video") {
                 const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
                 const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
@@ -2699,23 +2713,62 @@ function InfiniteCanvasPage() {
             setAssistantClosing(false);
         }, CANVAS_AGENT_PANEL_MOTION_MS);
     };
-    const focusNodeFromList = useCallback((node: CanvasNodeData, panelRight?: number) => {
-        setSelectedNodeIds(new Set([node.id]));
-        setSelectedConnectionId(null);
-        setContextMenu(null);
-        setNodeCreatePosition(null);
-        setPendingConnectionCreate(null);
-        setConnecting(null);
-        setSelectionBox(null);
-        const canvasLeft = containerRef.current?.getBoundingClientRect().left;
-        const leftInset = typeof panelRight === "number" && typeof canvasLeft === "number" ? panelRight - canvasLeft + 16 : undefined;
-        setViewport((current) => centerViewportOnNode(node, current, size, { left: leftInset }));
-    }, [setConnecting, size]);
+    const focusNodeFromList = useCallback(
+        (nodeId: string) => {
+            const node = nodesRef.current.find((item) => item.id === nodeId);
+            if (!node) return;
+
+            setSelectedNodeIds(new Set([nodeId]));
+            setSelectedConnectionId(null);
+            setContextMenu(null);
+            setNodeCreatePosition(null);
+            setPendingConnectionCreate(null);
+            setConnecting(null);
+            setSelectionBox(null);
+
+            const sidePanelOpen = useCanvasSidePanelStore.getState().panelOpen;
+            const sidePanelWidth = useCanvasSidePanelStore.getState().width;
+            const leftInset = sidePanelOpen ? sidePanelWidth : 0;
+            const viewWidth = Math.max(size.width - leftInset, 120);
+            const worldX = node.position.x + node.width / 2;
+            const worldY = node.position.y + node.height / 2;
+            const k = Math.min(Math.max(Math.min((viewWidth * 0.6) / Math.max(node.width, 1), (size.height * 0.6) / Math.max(node.height, 1)), 0.05), 1.5);
+            const target = {
+                x: leftInset + viewWidth / 2 - worldX * k,
+                y: size.height / 2 - worldY * k,
+                k,
+            };
+
+            if (focusAnimRef.current) cancelAnimationFrame(focusAnimRef.current);
+            const start = { ...viewportRef.current };
+            const duration = 450;
+            const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
+            let startTime: number | null = null;
+            const step = (now: number) => {
+                if (startTime === null) startTime = now;
+                const progress = Math.min((now - startTime) / duration, 1);
+                const t = easeOutCubic(progress);
+                setViewport({
+                    x: start.x + (target.x - start.x) * t,
+                    y: start.y + (target.y - start.y) * t,
+                    k: start.k + (target.k - start.k) * t,
+                });
+                focusAnimRef.current = progress < 1 ? requestAnimationFrame(step) : null;
+            };
+            focusAnimRef.current = requestAnimationFrame(step);
+        },
+        [setConnecting, size.height, size.width],
+    );
+
+    useEffect(() => () => {
+        if (focusAnimRef.current) cancelAnimationFrame(focusAnimRef.current);
+    }, []);
 
     if (!projectLoaded) return <CanvasRefreshShell />;
 
     return (
         <main className="flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
+            <CanvasSidePanel nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNodeFromList} onPreviewNode={setPreviewNodeId} onInsertAsset={handleAssetInsert} />
             <section className="relative min-w-0 flex-1 overflow-hidden">
                 <CanvasTopBar
                     title={currentProject?.title || "未命名画布"}
@@ -2740,12 +2793,6 @@ function InfiniteCanvasPage() {
                     agentOpen={assistantOpen}
                     compactAgentStatus={codexCompactAgent ? { connected: localAgentConnected, enabled: localAgentEnabled, activity: localAgentActivity } : undefined}
                     onToggleAgent={() => (assistantOpen ? closeAgent() : openAgent())}
-                />
-
-                <CanvasNodeListPanel
-                    nodes={nodes}
-                    selectedNodeIds={selectedNodeIds}
-                    onFocusNode={focusNodeFromList}
                 />
 
                 <InfiniteCanvas
@@ -3147,6 +3194,8 @@ function CanvasTopBar({
     const theme = canvasThemes[colorTheme];
     const titleRef = useRef<HTMLDivElement>(null);
     const [shortcutsOpen, setShortcutsOpen] = useState(false);
+    const sidePanelOpen = useCanvasSidePanelStore((state) => state.panelOpen);
+    const toggleSidePanel = useCanvasSidePanelStore((state) => state.togglePanel);
 
     useEffect(() => {
         if (!isTitleEditing) return;
@@ -3159,8 +3208,19 @@ function CanvasTopBar({
 
     return (
         <>
-            <div className="pointer-events-none absolute left-0 right-0 top-0 z-50 flex h-16 items-center justify-between px-4">
-                <div className="pointer-events-auto flex min-w-0 items-center gap-3">
+            <div className="pointer-events-none absolute left-0 right-0 top-0 z-50 flex h-16 items-center justify-between pl-1 pr-4">
+                <div className="pointer-events-auto flex min-w-0 items-center gap-2">
+                    <Tooltip title={sidePanelOpen ? "收起面板" : "展开面板"}>
+                        <button
+                            type="button"
+                            onClick={toggleSidePanel}
+                            aria-label={sidePanelOpen ? "收起面板" : "展开面板"}
+                            className="grid size-7 place-items-center rounded-full transition hover:bg-black/5 dark:hover:bg-white/10"
+                            style={{ color: theme.node.text }}
+                        >
+                            {sidePanelOpen ? <PanelLeftClose className="size-4" /> : <PanelLeftOpen className="size-4" />}
+                        </button>
+                    </Tooltip>
                     <Dropdown
                         trigger={["click"]}
                         menu={{
@@ -3181,8 +3241,8 @@ function CanvasTopBar({
                             ],
                         }}
                     >
-                        <button type="button" className="grid size-9 place-items-center rounded-full transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} aria-label="打开画布菜单">
-                            <Menu className="size-5" />
+                        <button type="button" className="grid size-7 place-items-center rounded-full transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} aria-label="打开画布菜单">
+                            <Menu className="size-4" />
                         </button>
                     </Dropdown>
 

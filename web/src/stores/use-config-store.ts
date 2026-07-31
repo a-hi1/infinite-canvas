@@ -185,13 +185,46 @@ export function filterModelsByCapability(models: string[], capability?: ModelCap
     return capability ? models.filter((model) => modelMatchesCapability(model, capability)) : models;
 }
 
+/**
+ * 下拉可选项直接来自各渠道已保存模型，再按名称推断能力。
+ * imageModels/videoModels 等字段仍会同步写入，兼容导入导出与旧逻辑，但不再作为第二套手选清单。
+ */
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
-    if (!capability) return config.models;
-    return config[modelListKey(capability)];
+    const allModels = config.models?.length ? config.models : modelOptionsFromChannels(config.channels || []);
+    if (!capability) return allModels;
+    const derived = filterModelsByCapability(allModels, capability);
+    if (derived.length) return derived;
+    // 名称推断为空时回退到历史持久化列表，避免旧配置瞬间空白
+    return config[modelListKey(capability)] || [];
 }
 
 function modelListKey(capability: ModelCapability) {
     return `${capability}Models` as "imageModels" | "videoModels" | "textModels" | "audioModels";
+}
+
+/** 渠道模型变更后，同步四类能力列表与默认模型（不手选可选项）。 */
+export function deriveCapabilityModelLists(channels: ModelChannel[], current?: Partial<AiConfig>) {
+    const models = modelOptionsFromChannels(channels);
+    const imageModels = filterModelsByCapability(models, "image");
+    const videoModels = filterModelsByCapability(models, "video");
+    const textModels = filterModelsByCapability(models, "text");
+    const audioModels = filterModelsByCapability(models, "audio");
+    const pickDefault = (value: string | undefined, options: string[], fallback = "") => {
+        const normalized = normalizeModelOptionValue(value, channels);
+        if (normalized && options.includes(normalized)) return normalized;
+        return options[0] || normalized || fallback;
+    };
+    return {
+        models,
+        imageModels,
+        videoModels,
+        textModels,
+        audioModels,
+        imageModel: pickDefault(current?.imageModel || current?.model, imageModels),
+        videoModel: pickDefault(current?.videoModel, videoModels, defaultConfig.videoModel),
+        textModel: pickDefault(current?.textModel || current?.model, textModels),
+        audioModel: pickDefault(current?.audioModel, audioModels, defaultConfig.audioModel),
+    };
 }
 
 function isAiConfigReady(config: AiConfig, model: string) {
@@ -235,22 +268,15 @@ export const useConfigStore = create<ConfigStore>()(
                 const config = { ...defaultConfig, ...persistedConfig };
                 if (!Array.isArray(persistedConfig.channels)) config.channels = [];
                 const channels = normalizeChannels(config);
-                const models = modelOptionsFromChannels(channels);
-                const imageModels = Array.isArray(persistedConfig.imageModels) ? normalizeModelList(config.imageModels, channels) : filterModelsByCapability(models, "image");
-                const videoModels = Array.isArray(persistedConfig.videoModels) ? normalizeModelList(config.videoModels, channels) : filterModelsByCapability(models, "video");
-                const textModels = Array.isArray(persistedConfig.textModels) ? normalizeModelList(config.textModels, channels) : filterModelsByCapability(models, "text");
-                const audioModels = Array.isArray(persistedConfig.audioModels) ? normalizeModelList(config.audioModels, channels) : filterModelsByCapability(models, "audio");
+                // 可选项始终由渠道模型推导，不再保留第二套手选 imageModels/videoModels 清单
+                const derived = deriveCapabilityModelLists(channels, config);
                 // Prune on load so deleted channels/models do not keep dead scripts in localStorage forever.
                 const mergedConfig = pruneModelScripts({
                     ...config,
                     channelMode: "local",
                     apiFormat: normalizeApiFormat(config.apiFormat),
                     channels,
-                    models,
-                    imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
-                    videoModel: normalizeModelOptionValue(config.videoModel || "grok-imagine-video", channels),
-                    textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
-                    audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
+                    ...derived,
                     audioVoice: config.audioVoice || defaultConfig.audioVoice,
                     audioFormat: config.audioFormat || defaultConfig.audioFormat,
                     audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
@@ -260,10 +286,6 @@ export const useConfigStore = create<ConfigStore>()(
                     videoGenerateAudio: config.videoGenerateAudio || "true",
                     videoWatermark: config.videoWatermark || "false",
                     canvasImageCount: config.canvasImageCount || defaultConfig.canvasImageCount,
-                    imageModels,
-                    videoModels,
-                    textModels,
-                    audioModels,
                     modelScripts: normalizeModelScripts(persistedConfig.modelScripts),
                 });
                 return {

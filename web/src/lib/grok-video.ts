@@ -33,6 +33,54 @@ export function normalizeGrokResolution(value: string) {
     return "720p";
 }
 
+/** Pixel height target for a Grok resolution label (480p/720p/1080p). */
+export function grokResolutionPixelHeight(value: string) {
+    const resolution = normalizeGrokResolution(value);
+    if (resolution === "1080p") return 1080;
+    if (resolution === "480p") return 480;
+    return 720;
+}
+
+/**
+ * When the user asked for a higher Grok clarity than the delivered file,
+ * return a Chinese warning. Empty string means dimensions look acceptable
+ * (or cannot be judged). Does not invent pixels — uses measured width/height.
+ *
+ * @param acceptedResolution 创建成功时实际写入请求的 resolution；若低于 requested，说明创建阶段已降档
+ */
+export function grokResolutionShortfallMessage(requested: string, width?: number, height?: number, acceptedResolution?: string) {
+    const requestedLabel = normalizeGrokResolution(requested || "720");
+    const acceptedLabel = acceptedResolution ? normalizeGrokResolution(acceptedResolution) : "";
+    const demotedOnCreate =
+        acceptedLabel &&
+        grokResolutionPixelHeight(acceptedLabel) < grokResolutionPixelHeight(requestedLabel)
+            ? acceptedLabel
+            : "";
+
+    const w = Number(width) || 0;
+    const h = Number(height) || 0;
+    if (w > 0 && h > 0) {
+        // 480p/720p/1080p 指横屏时的竖边（或竖屏时的横边）= 短边。
+        // 用短边判断：1920×1080 / 1080×1920 通过；1280×720、736×400 在选 1080p 时告警。
+        const target = grokResolutionPixelHeight(requestedLabel);
+        const shortSide = Math.min(w, h);
+        const minAcceptable = Math.round(target * 0.9);
+        if (shortSide < minAcceptable) {
+            const actualLabel = shortSide >= 970 ? "约 1080p" : shortSide >= 650 ? "约 720p" : shortSide >= 430 ? "约 480p" : `${w}×${h}`;
+            if (demotedOnCreate) {
+                return `已选 ${requestedLabel}，但 ${requestedLabel} 创建失败后降档为 ${demotedOnCreate} 才成功；源文件实际约 ${w}×${h}（${actualLabel}）。不是导出压画质。可换渠道重试完整 ${requestedLabel}，或以实际分辨率为准。`;
+            }
+            return `已选 ${requestedLabel}，请求也按 ${requestedLabel} 发出，但源文件实际约 ${w}×${h}（${actualLabel}）。多半是当前中转/上游未真正交付该清晰度，不是本地虚标或导出压画质。可换渠道重试，或先以实际分辨率为准。`;
+        }
+    }
+
+    // 尺寸未知但创建阶段已明确降档：仍要提示，不能假装用了用户规格
+    if (demotedOnCreate) {
+        return `已选 ${requestedLabel}，但 ${requestedLabel} 创建失败后降档为 ${demotedOnCreate} 才成功。结果可能低于所选清晰度，请以实际文件为准，可换渠道重试完整 ${requestedLabel}。`;
+    }
+    return "";
+}
+
 /** codex2api and similar OpenAI-compatible relays that proxy xAI video. */
 export function isCodex2apiBaseUrl(baseUrl: string) {
     const value = baseUrl.toLowerCase();
@@ -106,4 +154,4 @@ export function grokEditVideoReferenceError(videos: ReferenceVideo[]) {
 }
 
 export const grokVideoModeHint =
-    "Grok 视频：文生/图生/多参考图走 generation（codex2api: /videos/generations；内网 New API: 只走 /video/generations，不试不存在的 /videos/generations）。单条参考 MP4 + 提示词走 /videos/edits（JSON body：video/video_url data URI 或公网 URL；codex2api 不接受 multipart/415）。New API 常无 edits 路由。建议源文件 ≤40MB、约 1–15 秒，硬顶 100MB。不要图+视频混用。多图压小本地参考图且不静默只发第一张。参考图生视频在中转上优先 720p（1080p 常忽略参考图）；纯文生可用 1080p。";
+    "Grok 视频：文生/图生/多参考图走 generation（codex2api: /videos/generations；内网 New API: 只走 /video/generations，不试不存在的 /videos/generations）。单条参考 MP4 + 提示词走 /videos/edits（JSON body：video/video_url data URI 或公网 URL；codex2api 不接受 multipart/415）。New API 常无 edits 路由。建议源文件 ≤40MB、约 1–15 秒，硬顶 100MB。不要图+视频混用。多图压小本地参考图且不静默只发第一张。规格：选中的清晰度/比例/秒数原样进首个请求；仅创建失败才降档或去字段兜底，不会用无分辨率最小 body 抢先成功。若上游仍返回明显低于所选的源文件，界面会提示实际分辨率，不虚标。";

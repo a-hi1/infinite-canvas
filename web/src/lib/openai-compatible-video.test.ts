@@ -76,12 +76,17 @@ describe("Sora / Veo model detection", () => {
         const text =
             'video submit failed: 422 {"error_code":"validation_error","message":"sora sora-2 is not supported for ModelModality.VIDEO endpoint. Supported models: [\'azure-sora\', \'firefly-video\', \'kling\']"} (status=422)';
         expect(isUnsupportedVideoModelError(new Error(text))).toBe(true);
+        expect(shouldSkipToNextVideoModelName(new Error(text))).toBe(true);
         expect(parseSupportedVideoModelsFromError(text)).toEqual(["azure-sora", "firefly-video", "kling"]);
         // 用户粘贴的截断括号版本
         const truncated =
             "video submit failed: 422 {\"error_code\":\"validation_error\",\"message\":\"sora sora-2 is not supported for ModelModality.VIDEO endpoint. Supported models: ['azure-sora', 'firefly-video', 'kling', 'kling', 'kling', 'kling', 'kling' (status=422)";
         expect(parseSupportedVideoModelsFromError(truncated)).toContain("azure-sora");
         expect(isUnsupportedVideoModelError(new Error(truncated))).toBe(true);
+        expect(shouldSkipToNextVideoModelName(new Error(truncated))).toBe(true);
+        // 只剩外层 submit failed + 422 也应换名，不能当最终错误
+        expect(isUnsupportedVideoModelError(new Error("video submit failed: 422 (status=422)"))).toBe(true);
+        expect(shouldSkipToNextVideoModelName(new Error("video submit failed: 422 (status=422)"))).toBe(true);
     });
 
     it("treats 503 no-distributor as channel-unavailable and skips to next model name", () => {
@@ -174,10 +179,13 @@ describe("buildSoraVeoFormFieldCandidates", () => {
             hasReferences: false,
         });
         expect(candidates.length).toBeGreaterThanOrEqual(6);
+        // 对齐可用脚本：首包仅 model+prompt+seconds，不先塞 size
         expect(candidates[0].encoding).toBe("json");
-        expect(candidates[0].size).toBe("1280x720");
+        expect(candidates[0].label).toBe("json:seconds-only");
         expect(candidates[0].seconds).toBe("8");
+        expect(candidates[0].size).toBeUndefined();
         expect(candidates[0].model).toBe("sora-2");
+        expect(candidates.some((item) => item.size === "1280x720")).toBe(true);
         expect(candidates.some((item) => item.encoding === "multipart")).toBe(true);
         expect(candidates.some((item) => item.secondsAsNumber)).toBe(true);
         expect(candidates.some((item) => item.durationField === "duration")).toBe(true);
@@ -303,8 +311,8 @@ describe("isInvalidVideoRequestBodyError", () => {
 });
 
 describe("soraVeo create path candidates", () => {
-    it("lists official /videos first, then common relay generation paths", () => {
-        expect(soraVeoCreatePathCandidates()).toEqual(["/videos", "/video/generations", "/videos/generations"]);
+    it("lists relay /video/generations first (veo-sora script), then official /videos", () => {
+        expect(soraVeoCreatePathCandidates()).toEqual(["/video/generations", "/videos", "/videos/generations"]);
     });
 
     it("detects missing create paths without treating task-level 404 as path-missing", () => {
