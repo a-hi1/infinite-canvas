@@ -1917,6 +1917,7 @@ function ItemDetailModal({
         <Modal
             open={Boolean(item)}
             title={null}
+            closable={false}
             onCancel={onClose}
             footer={null}
             width={1080}
