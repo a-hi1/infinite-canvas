@@ -14,6 +14,12 @@ import { ShareToWorkspaceModal, type ShareDraft } from "@/components/workspace/s
 import { suggestAssetCategory } from "@/lib/asset-category";
 import { assetTitleFromPrompt } from "@/lib/asset-display";
 import { canvasThemes } from "@/lib/canvas-theme";
+import {
+    clipboardImagesFromPasteEvent,
+    isClipboardAsyncReadAvailable,
+    readClipboardImageBlobs,
+    shouldIgnoreClipboardPasteTarget,
+} from "@/lib/clipboard-images";
 import { resolveImageReferenceLimit } from "@/lib/image-reference-limits";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { describeImageRequestMode, IMAGE_EDIT_DEGRADED_DEFAULT } from "@/lib/image-request-mode";
@@ -230,26 +236,50 @@ export default function ImagePage() {
         appendReferences(nextReferences);
     };
 
+    const addReferenceBlobs = async (blobs: Array<Blob | File>, successPrefix = "已读取") => {
+        if (!blobs.length) {
+            message.error("剪切板里没有可读取的图片");
+            return;
+        }
+        const nextReferences = await Promise.all(
+            blobs.map(async (blob, index) => {
+                const image = await uploadImage(blob);
+                const name = blob instanceof File && blob.name ? blob.name : `clipboard-${index + 1}.png`;
+                return { id: nanoid(), name, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
+            }),
+        );
+        appendReferences(nextReferences);
+        message.success(`${successPrefix} ${nextReferences.length} 张参考图`);
+    };
+
     const addReferencesFromClipboard = async () => {
         try {
-            const items = await navigator.clipboard.read();
-            const blobs = await Promise.all(items.flatMap((item) => item.types.filter((type) => type.startsWith("image/")).map((type) => item.getType(type))));
-            if (!blobs.length) {
-                message.error("剪切板里没有可读取的图片");
+            if (!isClipboardAsyncReadAvailable()) {
+                message.warning("当前为 HTTP 页面，请在参考图区域按 Ctrl+V 粘贴截图，或改用上传/拖拽");
                 return;
             }
-            const nextReferences = await Promise.all(
-                blobs.map(async (blob, index) => {
-                    const image = await uploadImage(blob);
-                    return { id: nanoid(), name: `clipboard-${index + 1}.png`, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
-                }),
-            );
-            appendReferences(nextReferences);
-            message.success(`已读取 ${nextReferences.length} 张参考图`);
-        } catch {
-            message.error("剪切板里没有可读取的图片");
+            const blobs = await readClipboardImageBlobs();
+            await addReferenceBlobs(blobs);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "剪切板里没有可读取的图片");
         }
     };
+
+    // HTTP (server IP:port) cannot use clipboard.read(); paste events still carry images.
+    const addReferenceBlobsRef = useRef(addReferenceBlobs);
+    addReferenceBlobsRef.current = addReferenceBlobs;
+    useEffect(() => {
+        const onPaste = (event: ClipboardEvent) => {
+            const files = clipboardImagesFromPasteEvent(event);
+            if (!files.length) return;
+            // Image paste can target the prompt field; still treat as reference upload.
+            if (shouldIgnoreClipboardPasteTarget(event.target) && event.target instanceof HTMLInputElement) return;
+            event.preventDefault();
+            void addReferenceBlobsRef.current(files, "已粘贴");
+        };
+        window.addEventListener("paste", onPaste);
+        return () => window.removeEventListener("paste", onPaste);
+    }, []);
 
     const optimizePrompt = async () => {
         const text = prompt.trim();
@@ -994,7 +1024,12 @@ export default function ImagePage() {
                                 <div className="mb-2 flex items-center justify-between gap-3">
                                     <span className="text-base font-semibold">参考图（当前最多 {imageReferenceLimit} 张）</span>
                                     <div className="flex gap-2">
-                                        <Button size="small" icon={<ClipboardPaste className="size-3.5" />} onClick={() => void addReferencesFromClipboard()}>
+                                        <Button
+                                            size="small"
+                                            icon={<ClipboardPaste className="size-3.5" />}
+                                            title={isClipboardAsyncReadAvailable() ? "从系统剪切板读取图片" : "HTTP 下请用 Ctrl+V 粘贴到参考图区域"}
+                                            onClick={() => void addReferencesFromClipboard()}
+                                        >
                                             剪切板
                                         </Button>
                                         <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
@@ -1057,7 +1092,13 @@ export default function ImagePage() {
                                             </button>
                                         </div>
                                     ))}
-                                    {!references.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{isReferenceDragActive ? "松开即可添加参考图" : "暂无参考图，可将图片拖到这里"}</div> : null}
+                                    {!references.length ? (
+                                        <div className="flex min-w-full items-center justify-center px-2 text-center text-sm text-stone-500">
+                                            {isReferenceDragActive
+                                                ? "松开即可添加参考图"
+                                                : "暂无参考图，可拖入 / 上传 / Ctrl+V 粘贴截图"}
+                                        </div>
+                                    ) : null}
                                 </div>
                             </div>
 

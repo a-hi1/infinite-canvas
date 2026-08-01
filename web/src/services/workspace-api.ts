@@ -464,41 +464,92 @@ export function deleteWorkspaceTask(workspaceId: string, taskId: string) {
     );
 }
 
-/** Auth-gated blob URL for a workspace media file (caller must revoke). */
-export async function workspaceFileObjectUrl(fileUrl: string) {
-    const url = fileUrl.startsWith("http")
-        ? fileUrl
-        : fileUrl.startsWith("/api/")
-          ? fileUrl
-          : fileUrl.startsWith("/workspace-files/")
-            ? `/api${fileUrl}`
-            : `/api/workspace-files/${fileUrl}`;
-    const response = await fetch(url, { credentials: "include" });
-    if (response.status === 401) {
-        notifyUnauthorized();
-        throw new CloudApiError("请先登录", 401, "auth_required");
-    }
-    if (!response.ok) throw new CloudApiError(`读取工作空间文件失败（${response.status}）`, response.status);
-    const blob = await response.blob();
-    return URL.createObjectURL(blob);
+function normalizeWorkspaceFileUrl(fileUrl: string) {
+    if (fileUrl.startsWith("http")) return fileUrl;
+    if (fileUrl.startsWith("/api/")) return fileUrl;
+    if (fileUrl.startsWith("/workspace-files/")) return `/api${fileUrl}`;
+    return `/api/workspace-files/${fileUrl}`;
 }
 
-/** Auth-gated UTF-8 text for workspace documents (md/txt/csv). */
-export async function workspaceFileText(fileUrl: string) {
-    const url = fileUrl.startsWith("http")
-        ? fileUrl
-        : fileUrl.startsWith("/api/")
-          ? fileUrl
-          : fileUrl.startsWith("/workspace-files/")
-            ? `/api${fileUrl}`
-            : `/api/workspace-files/${fileUrl}`;
-    const response = await fetch(url, { credentials: "include" });
-    if (response.status === 401) {
-        notifyUnauthorized();
-        throw new CloudApiError("请先登录", 401, "auth_required");
+/** Session-scoped blob URL cache — cards/modals share one download; callers should NOT revoke. */
+const OBJECT_URL_CACHE_MAX = 96;
+const objectUrlCache = new Map<string, string>();
+const objectUrlInflight = new Map<string, Promise<string>>();
+const textCache = new Map<string, string>();
+const textInflight = new Map<string, Promise<string>>();
+
+function touchObjectUrlCache(key: string, url: string) {
+    if (objectUrlCache.has(key)) objectUrlCache.delete(key);
+    objectUrlCache.set(key, url);
+    while (objectUrlCache.size > OBJECT_URL_CACHE_MAX) {
+        const oldest = objectUrlCache.keys().next().value as string | undefined;
+        if (!oldest) break;
+        const oldUrl = objectUrlCache.get(oldest);
+        objectUrlCache.delete(oldest);
+        if (oldUrl) URL.revokeObjectURL(oldUrl);
     }
-    if (!response.ok) throw new CloudApiError(`读取工作空间文件失败（${response.status}）`, response.status);
-    return response.text();
+}
+
+/** Auth-gated blob URL for a workspace media file (shared cache; do not revoke). */
+export async function workspaceFileObjectUrl(fileUrl: string) {
+    const url = normalizeWorkspaceFileUrl(fileUrl);
+    const cached = objectUrlCache.get(url);
+    if (cached) {
+        touchObjectUrlCache(url, cached);
+        return cached;
+    }
+    const pending = objectUrlInflight.get(url);
+    if (pending) return pending;
+
+    const promise = (async () => {
+        const response = await fetch(url, { credentials: "include" });
+        if (response.status === 401) {
+            notifyUnauthorized();
+            throw new CloudApiError("请先登录", 401, "auth_required");
+        }
+        if (!response.ok) throw new CloudApiError(`读取工作空间文件失败（${response.status}）`, response.status);
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        touchObjectUrlCache(url, objectUrl);
+        return objectUrl;
+    })();
+    objectUrlInflight.set(url, promise);
+    try {
+        return await promise;
+    } finally {
+        objectUrlInflight.delete(url);
+    }
+}
+
+/** Auth-gated UTF-8 text for workspace documents (md/txt/csv), with short session cache. */
+export async function workspaceFileText(fileUrl: string) {
+    const url = normalizeWorkspaceFileUrl(fileUrl);
+    const cached = textCache.get(url);
+    if (cached != null) return cached;
+    const pending = textInflight.get(url);
+    if (pending) return pending;
+
+    const promise = (async () => {
+        const response = await fetch(url, { credentials: "include" });
+        if (response.status === 401) {
+            notifyUnauthorized();
+            throw new CloudApiError("请先登录", 401, "auth_required");
+        }
+        if (!response.ok) throw new CloudApiError(`读取工作空间文件失败（${response.status}）`, response.status);
+        const text = await response.text();
+        if (textCache.size > 40) {
+            const oldest = textCache.keys().next().value as string | undefined;
+            if (oldest) textCache.delete(oldest);
+        }
+        textCache.set(url, text);
+        return text;
+    })();
+    textInflight.set(url, promise);
+    try {
+        return await promise;
+    } finally {
+        textInflight.delete(url);
+    }
 }
 
 export function memberDisplayName(member: Pick<WorkspaceMember, "display_name" | "email" | "user_id"> | null | undefined) {

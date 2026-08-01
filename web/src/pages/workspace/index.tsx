@@ -1,10 +1,16 @@
 import { App, Button, Empty, Form, Input, Modal, Spin, Tag } from "antd";
 import { LogIn, Plus, Users } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import { AuthModal } from "@/components/layout/auth-modal";
 import { useAuthStore } from "@/stores/use-auth-store";
+import {
+    clearLastWorkspaceId,
+    getLastWorkspaceId,
+    setLastWorkspaceId,
+    shouldStayOnWorkspaceList,
+} from "@/lib/workspace-preference";
 import {
     createWorkspace,
     joinWorkspace,
@@ -16,11 +22,14 @@ import { isCloudApiError } from "@/services/cloud-api";
 export default function WorkspaceListPage() {
     const { message } = App.useApp();
     const navigate = useNavigate();
+    const location = useLocation();
+    const stayOnList = shouldStayOnWorkspaceList(location.search);
     const user = useAuthStore((s) => s.user);
     // Depend on stable identity only — account popover refreshUsage must not reload the list.
     const userId = user?.id || "";
     const [authOpen, setAuthOpen] = useState(false);
     const [loading, setLoading] = useState(false);
+    const [redirecting, setRedirecting] = useState(() => Boolean(userId && !stayOnList && getLastWorkspaceId()));
     const [items, setItems] = useState<WorkspaceSummary[]>([]);
     const [createOpen, setCreateOpen] = useState(false);
     const [joinOpen, setJoinOpen] = useState(false);
@@ -28,21 +37,47 @@ export default function WorkspaceListPage() {
     const [joinForm] = Form.useForm<{ inviteCode: string }>();
     const [busy, setBusy] = useState(false);
 
+    const openWorkspace = useCallback(
+        (workspaceId: string, options?: { replace?: boolean }) => {
+            setLastWorkspaceId(workspaceId);
+            navigate(`/workspace/${workspaceId}`, { replace: Boolean(options?.replace) });
+        },
+        [navigate],
+    );
+
     const load = useCallback(async () => {
         if (!userId) {
             setItems([]);
+            setRedirecting(false);
             return;
         }
         setLoading(true);
         try {
             const data = await listWorkspaces();
-            setItems(data.items || []);
+            const list = data.items || [];
+            setItems(list);
+
+            // Default: re-enter last opened workspace without forcing another pick.
+            if (!stayOnList) {
+                const lastId = getLastWorkspaceId();
+                if (lastId) {
+                    const hit = list.find((ws) => ws.id === lastId);
+                    if (hit) {
+                        setRedirecting(true);
+                        openWorkspace(hit.id, { replace: true });
+                        return;
+                    }
+                    clearLastWorkspaceId();
+                }
+            }
+            setRedirecting(false);
         } catch (error) {
+            setRedirecting(false);
             message.error(error instanceof Error ? error.message : "加载工作空间失败");
         } finally {
             setLoading(false);
         }
-    }, [message, userId]);
+    }, [message, openWorkspace, stayOnList, userId]);
 
     useEffect(() => {
         void load();
@@ -56,7 +91,7 @@ export default function WorkspaceListPage() {
             message.success("工作空间已创建");
             setCreateOpen(false);
             createForm.resetFields();
-            navigate(`/workspace/${ws.id}`);
+            openWorkspace(ws.id);
         } catch (error) {
             if (isCloudApiError(error) || error instanceof Error) {
                 if ((error as { errorFields?: unknown }).errorFields) return;
@@ -75,7 +110,7 @@ export default function WorkspaceListPage() {
             message.success("已加入工作空间");
             setJoinOpen(false);
             joinForm.resetFields();
-            navigate(`/workspace/${ws.id}`);
+            openWorkspace(ws.id);
         } catch (error) {
             if ((error as { errorFields?: unknown }).errorFields) return;
             message.error(error instanceof Error ? error.message : "加入失败");
@@ -108,6 +143,19 @@ export default function WorkspaceListPage() {
         );
     }
 
+    if (redirecting || (loading && !stayOnList && getLastWorkspaceId())) {
+        return (
+            <div className="flex h-full flex-col overflow-hidden bg-background text-stone-900 dark:text-stone-100">
+                <main className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] [background-size:16px_16px] dark:bg-[radial-gradient(rgba(245,245,244,.14)_1px,transparent_1px)]">
+                    <div className="flex flex-col items-center gap-3 text-sm text-stone-500">
+                        <Spin />
+                        <span>正在进入最近使用的工作空间…</span>
+                    </div>
+                </main>
+            </div>
+        );
+    }
+
     return (
         <div className="flex h-full flex-col overflow-hidden bg-background text-stone-900 dark:text-stone-100">
             <main className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] [background-size:16px_16px] dark:bg-[radial-gradient(rgba(245,245,244,.14)_1px,transparent_1px)]">
@@ -117,6 +165,7 @@ export default function WorkspaceListPage() {
                             <h1 className="text-2xl font-semibold text-stone-950 dark:text-stone-100">工作空间</h1>
                             <p className="mt-1 text-sm text-stone-500 dark:text-stone-400">
                                 显式分享素材与生成结果，同步进度。与「我的资产 · 同步云端」相互独立。
+                                {stayOnList ? " 选择后会记住，下次顶栏进入将直接打开。" : ""}
                             </p>
                         </div>
                         <div className="flex flex-wrap gap-2">
@@ -138,7 +187,7 @@ export default function WorkspaceListPage() {
                                     key={ws.id}
                                     type="button"
                                     className="rounded-xl border border-stone-200 bg-card/90 p-4 text-left shadow-sm backdrop-blur-sm transition hover:border-stone-400 dark:border-stone-800 dark:hover:border-stone-600"
-                                    onClick={() => navigate(`/workspace/${ws.id}`)}
+                                    onClick={() => openWorkspace(ws.id)}
                                 >
                                     <div className="flex items-start justify-between gap-2">
                                         <div className="min-w-0">

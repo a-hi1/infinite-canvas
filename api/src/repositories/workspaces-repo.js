@@ -22,6 +22,9 @@ export function createWorkspacesRepo(db) {
         listMembers(workspaceId) {
             return db.listMembers(workspaceId);
         },
+        countMembers(workspaceId) {
+            return db.countMembers(workspaceId);
+        },
         addMember(input) {
             return db.addWorkspaceMember(input);
         },

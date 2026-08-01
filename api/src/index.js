@@ -1683,13 +1683,12 @@ function handleListWorkspaces(req, res) {
     const auth = requireUser(req, res);
     if (!auth) return;
     const rows = workspacesRepo.listForUser(auth.user.id);
-    const items = rows.map(({ workspace, membership }) => {
-        const members = workspacesRepo.listMembers(workspace.id);
-        return publicWorkspace(workspace, membership, {
+    const items = rows.map(({ workspace, membership }) =>
+        publicWorkspace(workspace, membership, {
             includeInvite: membership.role === WORKSPACE_ROLE.OWNER,
-            memberCount: members.length,
-        });
-    });
+            memberCount: workspacesRepo.countMembers(workspace.id),
+        }),
+    );
     json(res, 200, { items, total: items.length });
 }
 
@@ -1729,7 +1728,7 @@ async function handleJoinWorkspace(req, res) {
             200,
             publicWorkspace(workspace, existing, {
                 includeInvite: existing.role === WORKSPACE_ROLE.OWNER,
-                memberCount: workspacesRepo.listMembers(workspace.id).length,
+                memberCount: workspacesRepo.countMembers(workspace.id),
             }),
             "你已在该工作空间中",
         );
@@ -1744,7 +1743,7 @@ async function handleJoinWorkspace(req, res) {
         200,
         publicWorkspace(workspace, membership, {
             includeInvite: false,
-            memberCount: workspacesRepo.listMembers(workspace.id).length,
+            memberCount: workspacesRepo.countMembers(workspace.id),
         }),
         "已加入工作空间",
     );
@@ -1773,7 +1772,7 @@ function handleResetWorkspaceInvite(req, res, workspaceId) {
         200,
         publicWorkspace(workspace, ctx.membership, {
             includeInvite: true,
-            memberCount: workspacesRepo.listMembers(workspaceId).length,
+            memberCount: workspacesRepo.countMembers(workspaceId),
         }),
         "邀请码已重置",
     );

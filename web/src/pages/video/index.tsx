@@ -17,6 +17,12 @@ import { agnesVideoModeGuide, agnesVideoRequestError, isAgnesVideoConfig } from 
 import { suggestAssetCategory } from "@/lib/asset-category";
 import { assetTitleFromPrompt } from "@/lib/asset-display";
 import { canvasThemes } from "@/lib/canvas-theme";
+import {
+    clipboardImagesFromPasteEvent,
+    isClipboardAsyncReadAvailable,
+    readClipboardImageBlobs,
+    shouldIgnoreClipboardPasteTarget,
+} from "@/lib/clipboard-images";
 import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS, grokResolutionShortfallMessage, grokVideoModeGuide, isGrokVideoConfig, normalizeGrokResolution } from "@/lib/grok-video";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import {
@@ -299,27 +305,58 @@ export default function VideoPage() {
         void addReferences(event.dataTransfer.files);
     };
 
+    const addReferenceImageBlobs = async (blobs: Array<Blob | File>, successPrefix = "已读取") => {
+        if (!blobs.length) {
+            message.error("剪切板里没有可读取的图片");
+            return;
+        }
+        const imageMax = soraVeoMode ? soraVeoImageMax : SEEDANCE_REFERENCE_LIMITS.images;
+        const available = Math.max(0, imageMax - references.length);
+        if (!available) {
+            message.warning(`当前最多 ${imageMax} 张参考图`);
+            return;
+        }
+        if (blobs.length > available) message.warning(`当前最多 ${imageMax} 张参考图，超出的图片未加入`);
+        const nextReferences = await Promise.all(
+            blobs.slice(0, available).map(async (blob, index) => {
+                const image = await uploadImage(blob);
+                const name = blob instanceof File && blob.name ? blob.name : `clipboard-${index + 1}.png`;
+                return { id: nanoid(), name, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
+            }),
+        );
+        setReferences((value) => [...value, ...nextReferences].slice(0, imageMax));
+        message.success(`${successPrefix} ${nextReferences.length} 张参考图`);
+    };
+
     const addReferencesFromClipboard = async () => {
         try {
-            const items = await navigator.clipboard.read();
-            const blobs = await Promise.all(items.flatMap((item) => item.types.filter((type) => type.startsWith("image/")).map((type) => item.getType(type))));
-            if (!blobs.length) {
-                message.error("剪切板里没有可读取的图片");
+            if (!isClipboardAsyncReadAvailable()) {
+                message.warning("当前为 HTTP 页面，请在参考图区域按 Ctrl+V 粘贴截图，或改用上传/拖拽");
                 return;
             }
-            const imageMax = soraVeoMode ? soraVeoImageMax : SEEDANCE_REFERENCE_LIMITS.images;
-            const nextReferences = await Promise.all(
-                blobs.slice(0, Math.max(0, imageMax - references.length)).map(async (blob, index) => {
-                    const image = await uploadImage(blob);
-                    return { id: nanoid(), name: `clipboard-${index + 1}.png`, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
-                }),
-            );
-            setReferences((value) => [...value, ...nextReferences].slice(0, imageMax));
-            message.success(`已读取 ${nextReferences.length} 张参考图`);
-        } catch {
-            message.error("剪切板里没有可读取的图片");
+            const blobs = await readClipboardImageBlobs();
+            await addReferenceImageBlobs(blobs);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "剪切板里没有可读取的图片");
         }
     };
+
+    // HTTP (server IP:port) cannot use clipboard.read(); paste events still carry images.
+    const addReferenceImageBlobsRef = useRef(addReferenceImageBlobs);
+    addReferenceImageBlobsRef.current = addReferenceImageBlobs;
+    useEffect(() => {
+        const onPaste = (event: ClipboardEvent) => {
+            const files = clipboardImagesFromPasteEvent(event);
+            if (!files.length) return;
+            // Image paste can target the prompt field; still treat as reference upload.
+            if (shouldIgnoreClipboardPasteTarget(event.target) && event.target instanceof HTMLInputElement) return;
+            event.preventDefault();
+            void addReferenceImageBlobsRef.current(files, "已粘贴");
+        };
+        window.addEventListener("paste", onPaste);
+        return () => window.removeEventListener("paste", onPaste);
+    }, []);
+
     const generate = async () => {
         const snapshot = buildRequestSnapshot();
         if (!snapshot) return;
@@ -908,7 +945,12 @@ export default function VideoPage() {
                                 <div className="mb-2 flex items-center justify-between gap-3">
                                     <span className="text-base font-semibold">参考图</span>
                                     <div className="flex gap-2">
-                                        <Button size="small" icon={<ClipboardPaste className="size-3.5" />} onClick={() => void addReferencesFromClipboard()}>
+                                        <Button
+                                            size="small"
+                                            icon={<ClipboardPaste className="size-3.5" />}
+                                            title={isClipboardAsyncReadAvailable() ? "从系统剪切板读取图片" : "HTTP 下请用 Ctrl+V 粘贴到参考图区域"}
+                                            onClick={() => void addReferencesFromClipboard()}
+                                        >
                                             剪切板
                                         </Button>
                                         <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
@@ -955,9 +997,9 @@ export default function VideoPage() {
                                                 ? "松开即可上传参考资产"
                                                 : soraVeoMode
                                                   ? veoMode
-                                                      ? `暂无参考图，可拖入文件；Veo 图生最多 ${soraVeoImageMax} 张`
-                                                      : "暂无参考图，可拖入文件；Sora 图生仅 1 张首帧"
-                                                  : "暂无参考图，可拖入文件，最多 9 张"}
+                                                      ? `暂无参考图，可拖入 / Ctrl+V；Veo 图生最多 ${soraVeoImageMax} 张`
+                                                      : "暂无参考图，可拖入 / Ctrl+V；Sora 图生仅 1 张首帧"
+                                                  : "暂无参考图，可拖入 / 上传 / Ctrl+V 粘贴，最多 9 张"}
                                         </div>
                                     ) : null}
                                 </div>

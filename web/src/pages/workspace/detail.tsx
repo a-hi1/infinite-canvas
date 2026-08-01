@@ -19,7 +19,7 @@ import {
     Video,
     X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { saveAs } from "file-saver";
 
@@ -44,6 +44,7 @@ import {
     workspaceDocumentExt,
     workspaceDocumentFormat,
 } from "@/lib/workspace-document";
+import { setLastWorkspaceId } from "@/lib/workspace-preference";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useAuthStore } from "@/stores/use-auth-store";
 import { useAssetStore } from "@/stores/use-asset-store";
@@ -192,6 +193,8 @@ export default function WorkspaceDetailPage() {
     const userId = user?.id || "";
     const addAsset = useAssetStore((s) => s.addAsset);
     const [loading, setLoading] = useState(true);
+    const [contentLoading, setContentLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
     const [workspace, setWorkspace] = useState<WorkspaceSummary | null>(null);
     const [members, setMembers] = useState<WorkspaceMember[]>([]);
     const [items, setItems] = useState<WorkspaceItem[]>([]);
@@ -210,6 +213,7 @@ export default function WorkspaceDetailPage() {
     const [genFinalOnly, setGenFinalOnly] = useState(false);
     const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
     const [dragOverStatus, setDragOverStatus] = useState<string | null>(null);
+    const hasShellRef = useRef(false);
 
     const isOwner = workspace?.role === WORKSPACE_ROLE.OWNER || workspace?.owner_id === userId;
     const memberOptions = useMemo(
@@ -226,25 +230,49 @@ export default function WorkspaceDetailPage() {
         return map;
     }, [members]);
 
-    const load = useCallback(async () => {
-        if (!userId || !id) return;
-        setLoading(true);
-        try {
-            const detail = await getWorkspace(id);
-            setWorkspace(detail.workspace);
-            setMembers(detail.members || []);
-            const [itemRes, taskRes] = await Promise.all([listWorkspaceItems(id, { pageSize: 100 }), listWorkspaceTasks(id)]);
-            setItems(itemRes.items || []);
-            setTasks(taskRes.items || []);
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : "加载工作空间失败");
-            navigate("/workspace");
-        } finally {
-            setLoading(false);
-        }
-    }, [id, message, navigate, userId]);
+    const load = useCallback(
+        async (options?: { soft?: boolean }) => {
+            if (!userId || !id) return;
+            const soft = Boolean(options?.soft) && hasShellRef.current;
+            if (soft) setRefreshing(true);
+            else {
+                setLoading(true);
+                setContentLoading(true);
+            }
+            try {
+                // Parallelize metadata + lists; paint shell as soon as workspace returns.
+                const detailPromise = getWorkspace(id);
+                const listsPromise = Promise.all([listWorkspaceItems(id, { pageSize: 100 }), listWorkspaceTasks(id)]);
+
+                const detail = await detailPromise;
+                setWorkspace(detail.workspace);
+                setMembers(detail.members || []);
+                setLastWorkspaceId(detail.workspace.id);
+                hasShellRef.current = true;
+                setLoading(false);
+
+                const [itemRes, taskRes] = await listsPromise;
+                setItems(itemRes.items || []);
+                setTasks(taskRes.items || []);
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : "加载工作空间失败");
+                if (!hasShellRef.current) navigate("/workspace?list=1");
+            } finally {
+                setLoading(false);
+                setContentLoading(false);
+                setRefreshing(false);
+            }
+        },
+        [id, message, navigate, userId],
+    );
 
     useEffect(() => {
+        hasShellRef.current = false;
+        setWorkspace(null);
+        setMembers([]);
+        setItems([]);
+        setTasks([]);
+        setDetailItem(null);
         void load();
     }, [load]);
 
@@ -311,7 +339,7 @@ export default function WorkspaceDetailPage() {
             onOk: async () => {
                 await archiveWorkspace(workspace.id);
                 message.success("已解散");
-                navigate("/workspace");
+                navigate("/workspace?list=1");
             },
         });
     };
@@ -484,8 +512,8 @@ export default function WorkspaceDetailPage() {
                 return;
             }
             const objectUrl = await workspaceFileObjectUrl(item.file_url);
+            // Shared session cache — do not revoke.
             const blob = await fetch(objectUrl).then((r) => r.blob());
-            URL.revokeObjectURL(objectUrl);
             if (isVideoKind(item.kind)) {
                 const { uploadMediaFile } = await import("@/services/file-storage");
                 const uploaded = await uploadMediaFile(blob, "video");
@@ -718,9 +746,9 @@ export default function WorkspaceDetailPage() {
                 <div className="mx-auto max-w-6xl px-6 py-8 pb-12">
                 <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0">
-                        <button type="button" className="mb-2 inline-flex items-center gap-1 text-xs text-stone-500 hover:text-stone-900 dark:hover:text-stone-200" onClick={() => navigate("/workspace")}>
+                        <button type="button" className="mb-2 inline-flex items-center gap-1 text-xs text-stone-500 hover:text-stone-900 dark:hover:text-stone-200" onClick={() => navigate("/workspace?list=1")}>
                             <ArrowLeft className="size-3.5" />
-                            全部工作空间
+                            切换工作空间
                         </button>
                         <h1 className="text-2xl font-semibold text-stone-950 dark:text-stone-100">{workspace.name}</h1>
                         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-stone-500">
@@ -744,7 +772,7 @@ export default function WorkspaceDetailPage() {
                                 上传本地文件
                             </Button>
                         </Upload>
-                        <Button size="small" icon={<RefreshCw className="size-3.5" />} onClick={() => void load()}>
+                        <Button size="small" icon={<RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />} loading={refreshing} onClick={() => void load({ soft: true })}>
                             刷新
                         </Button>
                         {isOwner ? (
@@ -760,9 +788,18 @@ export default function WorkspaceDetailPage() {
                     </div>
                 </div>
 
+                {contentLoading ? (
+                    <div className="mb-4 flex min-h-40 items-center justify-center rounded-xl border border-dashed border-stone-300 bg-card/50 dark:border-stone-700">
+                        <div className="flex flex-col items-center gap-2 text-sm text-stone-500">
+                            <Spin size="small" />
+                            <span>正在加载素材与进度…</span>
+                        </div>
+                    </div>
+                ) : (
                 <Tabs
                     activeKey={tab}
                     onChange={setTab}
+                    destroyOnHidden
                     items={[
                         {
                             key: "assets",
@@ -1077,6 +1114,7 @@ export default function WorkspaceDetailPage() {
                         },
                     ]}
                 />
+                )}
 
                 <ItemDetailModal
                     item={detailItem}
@@ -1235,7 +1273,6 @@ function TaskRow({
 
     useEffect(() => {
         let active = true;
-        const objectUrls: string[] = [];
         const nextUrls: Record<string, string> = {};
         const nextErrors: Record<string, boolean> = {};
         setPreviewUrls({});
@@ -1248,12 +1285,9 @@ function TaskRow({
                 return;
             }
             try {
+                // Shared session cache — do not revoke on unmount.
                 const url = await workspaceFileObjectUrl(item.url);
-                if (!active) {
-                    URL.revokeObjectURL(url);
-                    return;
-                }
-                objectUrls.push(url);
+                if (!active) return;
                 nextUrls[item.file_id] = url;
             } catch {
                 if (active) nextErrors[item.file_id] = true;
@@ -1268,7 +1302,6 @@ function TaskRow({
 
         return () => {
             active = false;
-            for (const url of objectUrls) URL.revokeObjectURL(url);
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps -- re-load when deliverable ids change
     }, [deliverables.map((d) => d.file_id).join("|")]);
@@ -1317,8 +1350,8 @@ function TaskRow({
                 message.warning("没有可下载的交付物");
                 return;
             }
+            // Shared session cache — never revoke object URLs from workspaceFileObjectUrl.
             saveAs(url, item.name || `deliverable-${item.file_id}`);
-            if (!cached) URL.revokeObjectURL(url);
         } catch (error) {
             message.error(error instanceof Error ? error.message : "下载失败");
         }
@@ -1681,30 +1714,47 @@ function WorkspaceItemCard({
     const { message } = App.useApp();
     const [previewUrl, setPreviewUrl] = useState("");
     const [previewError, setPreviewError] = useState(false);
+    const [visible, setVisible] = useState(false);
+    const mediaRootRef = useRef<HTMLButtonElement | null>(null);
+
+    // Lazy-load wall thumbnails only when near viewport — avoids 100 concurrent blob fetches.
+    useEffect(() => {
+        if (!item.file_url || !isMediaKind(item.kind)) return;
+        const node = mediaRootRef.current;
+        if (!node || typeof IntersectionObserver === "undefined") {
+            setVisible(true);
+            return;
+        }
+        const observer = new IntersectionObserver(
+            (entries) => {
+                if (entries.some((entry) => entry.isIntersecting)) {
+                    setVisible(true);
+                    observer.disconnect();
+                }
+            },
+            { rootMargin: "240px 0px" },
+        );
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, [item.file_url, item.kind]);
 
     useEffect(() => {
         let active = true;
-        let objectUrl = "";
         setPreviewUrl("");
         setPreviewError(false);
-        if (!item.file_url || !isMediaKind(item.kind)) return;
+        if (!visible || !item.file_url || !isMediaKind(item.kind)) return;
+        // Shared session cache — do not revoke here.
         void workspaceFileObjectUrl(item.file_url)
             .then((url) => {
-                if (!active) {
-                    URL.revokeObjectURL(url);
-                    return;
-                }
-                objectUrl = url;
-                setPreviewUrl(url);
+                if (active) setPreviewUrl(url);
             })
             .catch(() => {
                 if (active) setPreviewError(true);
             });
         return () => {
             active = false;
-            if (objectUrl) URL.revokeObjectURL(objectUrl);
         };
-    }, [item.file_url, item.kind]);
+    }, [visible, item.file_url, item.kind]);
 
     const handleDownload = async () => {
         if (!isDownloadableKind(item.kind)) {
@@ -1720,7 +1770,6 @@ function WorkspaceItemCard({
                       ? "mp4"
                       : "png";
                 saveAs(url, `${item.title || item.id}.${ext}`);
-                URL.revokeObjectURL(url);
             } catch (error) {
                 message.error(error instanceof Error ? error.message : "下载失败");
             }
@@ -1751,7 +1800,13 @@ function WorkspaceItemCard({
                     : "border-stone-200 hover:border-stone-300 dark:border-stone-800 dark:hover:border-stone-600"
             }`}
         >
-            <button type="button" className={`relative block w-full cursor-zoom-in border-0 bg-stone-100 p-0 text-left dark:bg-stone-900 ${isVideoKind(item.kind) ? "aspect-video" : "aspect-square"}`} onClick={onOpen} title="点击查看详情">
+            <button
+                ref={mediaRootRef}
+                type="button"
+                className={`relative block w-full cursor-zoom-in border-0 bg-stone-100 p-0 text-left dark:bg-stone-900 ${isVideoKind(item.kind) ? "aspect-video" : "aspect-square"}`}
+                onClick={onOpen}
+                title="点击查看详情"
+            >
                 {item.kind === WORKSPACE_ITEM_KIND.ASSET_TEXT ? (
                     <div className="flex size-full items-start overflow-hidden p-3 text-xs leading-5 text-stone-700 dark:text-stone-200">{item.text_content || "（空文本）"}</div>
                 ) : isDocumentKind(item.kind) ? (
@@ -1896,25 +1951,19 @@ function ItemDetailModal({
 
     useEffect(() => {
         let active = true;
-        let objectUrl = "";
         setPreviewUrl("");
         setPreviewError(false);
         if (!item?.file_url || !isMediaKind(item.kind)) return;
+        // Shared session cache — do not revoke.
         void workspaceFileObjectUrl(item.file_url)
             .then((url) => {
-                if (!active) {
-                    URL.revokeObjectURL(url);
-                    return;
-                }
-                objectUrl = url;
-                setPreviewUrl(url);
+                if (active) setPreviewUrl(url);
             })
             .catch(() => {
                 if (active) setPreviewError(true);
             });
         return () => {
             active = false;
-            if (objectUrl) URL.revokeObjectURL(objectUrl);
         };
     }, [item?.file_url, item?.kind, item?.id]);
 
@@ -1991,8 +2040,8 @@ function ItemDetailModal({
                 : isVideoKind(item.kind)
                   ? "mp4"
                   : "png";
+            // Shared session cache — never revoke object URLs from workspaceFileObjectUrl.
             saveAs(url, `${item.title || item.id}.${ext}`);
-            if (!previewUrl) URL.revokeObjectURL(url);
         } catch (error) {
             message.error(error instanceof Error ? error.message : "下载失败");
         }

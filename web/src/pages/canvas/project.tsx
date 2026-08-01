@@ -18,6 +18,11 @@ import { grokResolutionShortfallMessage, isGrokVideoConfig } from "@/lib/grok-vi
 import { suggestAssetCategory } from "@/lib/asset-category";
 import { assetTitleFromPrompt } from "@/lib/asset-display";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
+import {
+    clipboardImagesFromPasteEvent,
+    isClipboardAsyncReadAvailable,
+    shouldIgnoreClipboardPasteTarget,
+} from "@/lib/clipboard-images";
 import { AuthModal } from "@/components/layout/auth-modal";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { draftsFromCanvasNodes, isCanvasNodeShareable, ShareToWorkspaceModal, type ShareDraft } from "@/components/workspace/share-to-workspace-modal";
@@ -1559,22 +1564,53 @@ function InfiniteCanvasPage() {
     );
 
     const pasteSystemClipboard = useCallback(async () => {
-        if (!navigator.clipboard) return;
-
-        const items = await navigator.clipboard.read();
-        const imageItem = items.find((item) => item.types.some((type) => type.startsWith("image/")));
-        if (imageItem) {
-            const imageType = imageItem.types.find((type) => type.startsWith("image/"));
-            if (!imageType) return;
-            const blob = await imageItem.getType(imageType);
-            const file = new File([blob], "clipboard-image.png", { type: imageType });
-            void createImageFileNode(file, getCanvasCenter());
-            message.success("已从剪切板添加图片");
+        // Secure context only: plain http://IP:port (server deploy) cannot clipboard.read().
+        if (!isClipboardAsyncReadAvailable()) {
+            message.warning("当前为 HTTP 页面，请直接 Ctrl+V 粘贴截图到画布，或拖入文件");
             return;
         }
+        try {
+            const items = await navigator.clipboard.read();
+            const imageItem = items.find((item) => item.types.some((type) => type.startsWith("image/")));
+            if (imageItem) {
+                const imageType = imageItem.types.find((type) => type.startsWith("image/"));
+                if (!imageType) return;
+                const blob = await imageItem.getType(imageType);
+                const file = new File([blob], "clipboard-image.png", { type: imageType });
+                void createImageFileNode(file, getCanvasCenter());
+                message.success("已从剪切板添加图片");
+                return;
+            }
 
-        const text = await navigator.clipboard.readText();
-        if (createTextNodeFromClipboard(text)) message.success("已从剪切板添加文本");
+            const text = await navigator.clipboard.readText();
+            if (createTextNodeFromClipboard(text)) message.success("已从剪切板添加文本");
+        } catch {
+            message.warning("无法读取系统剪切板，请再试 Ctrl+V 或拖入文件");
+        }
+    }, [createImageFileNode, createTextNodeFromClipboard, getCanvasCenter, message]);
+
+    // HTTP paste fallback: use clipboardData from the native paste event (works without secure context).
+    useEffect(() => {
+        const onPaste = (event: ClipboardEvent) => {
+            if (shouldIgnoreClipboardPasteTarget(event.target)) return;
+            const target = event.target instanceof Element ? event.target : null;
+            if (target?.closest("[data-canvas-no-zoom]")) return;
+
+            const files = clipboardImagesFromPasteEvent(event);
+            if (files.length) {
+                event.preventDefault();
+                void createImageFileNode(files[0], getCanvasCenter());
+                message.success("已从剪切板添加图片");
+                return;
+            }
+            const text = event.clipboardData?.getData("text/plain") || "";
+            if (text.trim() && createTextNodeFromClipboard(text)) {
+                event.preventDefault();
+                message.success("已从剪切板添加文本");
+            }
+        };
+        window.addEventListener("paste", onPaste);
+        return () => window.removeEventListener("paste", onPaste);
     }, [createImageFileNode, createTextNodeFromClipboard, getCanvasCenter, message]);
 
     useEffect(() => {
@@ -1614,8 +1650,17 @@ function InfiniteCanvasPage() {
             }
 
             if (isModifierShortcut && !event.altKey && key === "v") {
-                event.preventDefault();
-                if (!pasteCopiedNodes()) void pasteSystemClipboard();
+                // Prefer internal node clipboard; only then touch system clipboard.
+                if (pasteCopiedNodes()) {
+                    event.preventDefault();
+                    return;
+                }
+                if (isClipboardAsyncReadAvailable()) {
+                    event.preventDefault();
+                    void pasteSystemClipboard();
+                    return;
+                }
+                // Insecure HTTP: do NOT preventDefault — let paste event deliver clipboardData.
                 return;
             }
 

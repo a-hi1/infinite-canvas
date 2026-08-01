@@ -643,6 +643,15 @@ export function createDb(dataDir) {
                 });
         },
 
+        /** Count only — avoids user lookups when list endpoint only needs member_count. */
+        countMembers(workspaceId) {
+            let count = 0;
+            for (const m of state.workspace_members) {
+                if (m.workspace_id === workspaceId) count += 1;
+            }
+            return count;
+        },
+
         addWorkspaceMember({ workspaceId, userId, role = WORKSPACE_ROLE.MEMBER }) {
             const existing = this.findMembership(workspaceId, userId);
             if (existing) return existing;
