@@ -15,6 +15,7 @@ import {
     createWorkspace,
     joinWorkspace,
     listWorkspaces,
+    peekWorkspaceListCache,
     type WorkspaceSummary,
 } from "@/services/workspace-api";
 import { isCloudApiError } from "@/services/cloud-api";
@@ -51,7 +52,14 @@ export default function WorkspaceListPage() {
             setRedirecting(false);
             return;
         }
-        setLoading(true);
+        // Instant paint from session cache when reopening list.
+        const cached = peekWorkspaceListCache();
+        if (cached?.items?.length) {
+            setItems(cached.items);
+            setLoading(false);
+        } else {
+            setLoading(true);
+        }
         try {
             const data = await listWorkspaces();
             const list = data.items || [];

@@ -6,6 +6,8 @@ import {
     WORKSPACE_ITEM_SOURCE,
     createWorkspaceItem,
     listWorkspaces,
+    mapPool,
+    peekWorkspaceListCache,
     type ShareWorkspaceItemInput,
     type WorkspaceSummary,
 } from "@/services/workspace-api";
@@ -16,6 +18,7 @@ import type { Asset } from "@/stores/use-asset-store";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 import { assetTitleFromPrompt } from "@/lib/asset-display";
 import { resolveCategoryOrSuggest, suggestAssetCategory } from "@/lib/asset-category";
+import { getLastWorkspaceId, setLastWorkspaceId } from "@/lib/workspace-preference";
 
 export type ShareDraft = {
     kind: string;
@@ -93,6 +96,17 @@ function resolveShareCategory(draft: ShareDraft): string | undefined {
     });
 }
 
+
+function pickDefaultWorkspaceId(list: WorkspaceSummary[], current?: string) {
+    if (current && list.some((ws) => ws.id === current)) return current;
+    const last = getLastWorkspaceId();
+    if (last && list.some((ws) => ws.id === last)) return last;
+    return list[0]?.id;
+}
+
+/** Concurrent share uploads — enough to cut multi-select latency, low enough for small API. */
+const SHARE_CONCURRENCY = 3;
+
 export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) {
     const { message } = App.useApp();
     const user = useAuthStore((s) => s.user);
@@ -100,24 +114,39 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
     const [sharing, setSharing] = useState(false);
     const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
     const [workspaceId, setWorkspaceId] = useState<string>();
+    const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
     const load = useCallback(async () => {
         if (!open || !user) return;
-        setLoading(true);
+        // Paint cached list immediately so the modal is usable without waiting.
+        const cached = peekWorkspaceListCache();
+        if (cached?.items?.length) {
+            setWorkspaces(cached.items);
+            setWorkspaceId((prev) => pickDefaultWorkspaceId(cached.items, prev));
+            setLoading(false);
+        } else {
+            setLoading(true);
+        }
         try {
             const data = await listWorkspaces();
-            setWorkspaces(data.items || []);
-            if (data.items?.length && !workspaceId) setWorkspaceId(data.items[0].id);
+            const list = data.items || [];
+            setWorkspaces(list);
+            setWorkspaceId((prev) => pickDefaultWorkspaceId(list, prev));
         } catch (error) {
             message.error(error instanceof Error ? error.message : "加载工作空间失败");
         } finally {
             setLoading(false);
         }
-    }, [message, open, user, workspaceId]);
+    }, [message, open, user]);
 
     useEffect(() => {
+        if (!open) {
+            setProgress(null);
+            setSharing(false);
+            return;
+        }
         void load();
-    }, [load]);
+    }, [load, open]);
 
     const handleOk = async () => {
         if (!user) {
@@ -133,10 +162,12 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
             return;
         }
         setSharing(true);
+        setProgress({ done: 0, total: drafts.length });
         let ok = 0;
         let failed = 0;
         try {
-            for (const draft of drafts) {
+            // Resolve blob + upload with limited concurrency (was fully serial).
+            await mapPool(drafts, SHARE_CONCURRENCY, async (draft) => {
                 try {
                     const isText = draft.kind === WORKSPACE_ITEM_KIND.ASSET_TEXT;
                     let file: Blob | undefined;
@@ -144,7 +175,7 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
                         const blob = await resolveBlob(draft);
                         if (!blob) {
                             failed += 1;
-                            continue;
+                            return;
                         }
                         file = blob;
                     }
@@ -170,14 +201,25 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
                     ok += 1;
                 } catch {
                     failed += 1;
+                } finally {
+                    setProgress((prev) => {
+                        const total = prev?.total || drafts.length;
+                        const done = Math.min(total, (prev?.done || 0) + 1);
+                        return { done, total };
+                    });
                 }
+            });
+            if (ok) {
+                setLastWorkspaceId(workspaceId);
+                message.success(`已分享 ${ok} 项到工作空间${failed ? `，失败 ${failed} 项` : ""}`);
+            } else {
+                message.error("分享失败，请确认文件可读且已加入空间");
             }
-            if (ok) message.success(`已分享 ${ok} 项到工作空间${failed ? `，失败 ${failed} 项` : ""}`);
-            else message.error("分享失败，请确认文件可读且已加入空间");
             onDone?.({ ok, failed });
             if (ok) onClose();
         } finally {
             setSharing(false);
+            setProgress(null);
         }
     };
 
@@ -187,14 +229,21 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
             open={open}
             onCancel={onClose}
             onOk={() => void handleOk()}
-            okText={drafts.length > 1 ? `分享 ${drafts.length} 项` : "分享"}
+            okText={
+                sharing && progress
+                    ? `分享中 ${progress.done}/${progress.total}`
+                    : drafts.length > 1
+                      ? `分享 ${drafts.length} 项`
+                      : "分享"
+            }
             confirmLoading={sharing}
+            okButtonProps={{ disabled: loading && !workspaces.length }}
             destroyOnHidden
         >
             <p className="mb-3 text-xs text-stone-500 dark:text-stone-400">
                 仅上传你选中的内容副本；不会自动同步全部本地资产。对方可预览/下载，并另存到自己的「我的资产」。无分类时会按标题/提示词自动推断分区，可在空间详情再改。
             </p>
-            {loading ? (
+            {loading && !workspaces.length ? (
                 <div className="flex justify-center py-8">
                     <Spin />
                 </div>
@@ -203,14 +252,23 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
                     className="w-full"
                     placeholder="选择工作空间"
                     value={workspaceId}
-                    onChange={setWorkspaceId}
+                    onChange={(value) => {
+                        setWorkspaceId(value);
+                        if (value) setLastWorkspaceId(value);
+                    }}
                     options={workspaces.map((ws) => ({ label: ws.name, value: ws.id }))}
+                    disabled={sharing}
                 />
             ) : (
                 <div className="rounded-lg border border-dashed border-stone-300 p-4 text-sm text-stone-500 dark:border-stone-700">
                     你还没有工作空间。请先到「工作空间」页创建或用邀请码加入。
                 </div>
             )}
+            {sharing && progress ? (
+                <p className="mt-3 text-xs text-stone-500 dark:text-stone-400">
+                    正在上传 {progress.done}/{progress.total}…
+                </p>
+            ) : null}
         </Modal>
     );
 }

@@ -1011,8 +1011,8 @@ export default function ImagePage() {
                                         <Button size="small" icon={<BookOpen className="size-3.5" />} onClick={() => setPromptDialogOpen(true)}>
                                             查看提示词库
                                         </Button>
-                                        <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => setAssetPickerOpen(true)}>
-                                            查看我的资产
+                                        <Button size="small" icon={<FolderPlus className="size-3.5" />} title="从我的资产或工作空间导入" onClick={() => setAssetPickerOpen(true)}>
+                                            我的资产
                                         </Button>
                                     </div>
                                 </div>

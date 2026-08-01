@@ -66,6 +66,10 @@ import {
     listWorkspaceItems,
     listWorkspaceTasks,
     memberDisplayName,
+    peekWorkspaceDetailCache,
+    peekWorkspaceItemsCache,
+    peekWorkspaceTasksCache,
+    prefetchWorkspaceThumbs,
     reactionCounts,
     removeWorkspaceMember,
     resetWorkspaceInvite,
@@ -231,18 +235,25 @@ export default function WorkspaceDetailPage() {
     }, [members]);
 
     const load = useCallback(
-        async (options?: { soft?: boolean }) => {
+        async (options?: { soft?: boolean; force?: boolean }) => {
             if (!userId || !id) return;
             const soft = Boolean(options?.soft) && hasShellRef.current;
+            const force = Boolean(options?.force);
             if (soft) setRefreshing(true);
-            else {
+            else if (!hasShellRef.current) {
                 setLoading(true);
+                setContentLoading(true);
+            } else {
+                // Re-enter with shell already painted from cache — only soft-refresh content.
                 setContentLoading(true);
             }
             try {
                 // Parallelize metadata + lists; paint shell as soon as workspace returns.
-                const detailPromise = getWorkspace(id);
-                const listsPromise = Promise.all([listWorkspaceItems(id, { pageSize: 100 }), listWorkspaceTasks(id)]);
+                const detailPromise = getWorkspace(id, { force });
+                const listsPromise = Promise.all([
+                    listWorkspaceItems(id, { pageSize: 100 }, { force }),
+                    listWorkspaceTasks(id, { force }),
+                ]);
 
                 const detail = await detailPromise;
                 setWorkspace(detail.workspace);
@@ -254,6 +265,7 @@ export default function WorkspaceDetailPage() {
                 const [itemRes, taskRes] = await listsPromise;
                 setItems(itemRes.items || []);
                 setTasks(taskRes.items || []);
+                prefetchWorkspaceThumbs(itemRes.items || [], 8);
             } catch (error) {
                 message.error(error instanceof Error ? error.message : "加载工作空间失败");
                 if (!hasShellRef.current) navigate("/workspace?list=1");
@@ -267,14 +279,39 @@ export default function WorkspaceDetailPage() {
     );
 
     useEffect(() => {
-        hasShellRef.current = false;
-        setWorkspace(null);
-        setMembers([]);
-        setItems([]);
-        setTasks([]);
+        // Seed from session cache so re-open after share does not blank the page.
+        const cachedDetail = id ? peekWorkspaceDetailCache(id) : null;
+        const cachedItems = id ? peekWorkspaceItemsCache(id, { pageSize: 100 }) : null;
+        const cachedTasks = id ? peekWorkspaceTasksCache(id) : null;
+        if (cachedDetail) {
+            setWorkspace(cachedDetail.workspace);
+            setMembers(cachedDetail.members || []);
+            setLastWorkspaceId(cachedDetail.workspace.id);
+            hasShellRef.current = true;
+            setLoading(false);
+        } else {
+            hasShellRef.current = false;
+            setWorkspace(null);
+            setMembers([]);
+            setLoading(true);
+        }
+        if (cachedItems) {
+            setItems(cachedItems.items || []);
+            setContentLoading(false);
+            prefetchWorkspaceThumbs(cachedItems.items || [], 8);
+        } else {
+            setItems([]);
+            setContentLoading(true);
+        }
+        if (cachedTasks) setTasks(cachedTasks.items || []);
+        else setTasks([]);
         setDetailItem(null);
-        void load();
-    }, [load]);
+        // Cache hit → soft revalidate; cache miss for items → force network so share results appear.
+        void load({
+            soft: Boolean(cachedDetail),
+            force: !cachedItems,
+        });
+    }, [load, id]);
 
     const assetItems = useMemo(() => items.filter((i) => isAssetWallKind(i.kind)), [items]);
     const genItems = useMemo(() => items.filter((i) => i.kind.startsWith("gen_")), [items]);
@@ -772,7 +809,7 @@ export default function WorkspaceDetailPage() {
                                 上传本地文件
                             </Button>
                         </Upload>
-                        <Button size="small" icon={<RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />} loading={refreshing} onClick={() => void load({ soft: true })}>
+                        <Button size="small" icon={<RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />} loading={refreshing} onClick={() => void load({ soft: true, force: true })}>
                             刷新
                         </Button>
                         {isOwner ? (

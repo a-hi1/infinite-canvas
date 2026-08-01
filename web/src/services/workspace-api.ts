@@ -167,14 +167,119 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     return payload.data;
 }
 
-export function listWorkspaces() {
-    return request<{ items: WorkspaceSummary[]; total: number }>("/workspaces");
+// --- Short-lived session caches (share modal + re-enter detail feel faster) ---
+
+type CacheEntry<T> = { at: number; data: T };
+
+const LIST_TTL_MS = 60_000;
+const DETAIL_TTL_MS = 45_000;
+const ITEMS_TTL_MS = 30_000;
+const TASKS_TTL_MS = 30_000;
+
+let workspaceListCache: CacheEntry<{ items: WorkspaceSummary[]; total: number }> | null = null;
+let workspaceListInflight: Promise<{ items: WorkspaceSummary[]; total: number }> | null = null;
+const workspaceDetailCache = new Map<string, CacheEntry<{ workspace: WorkspaceSummary; members: WorkspaceMember[] }>>();
+const workspaceDetailInflight = new Map<string, Promise<{ workspace: WorkspaceSummary; members: WorkspaceMember[] }>>();
+const workspaceItemsCache = new Map<
+    string,
+    CacheEntry<{ items: WorkspaceItem[]; total: number; page: number; page_size: number }>
+>();
+const workspaceItemsInflight = new Map<
+    string,
+    Promise<{ items: WorkspaceItem[]; total: number; page: number; page_size: number }>
+>();
+const workspaceTasksCache = new Map<string, CacheEntry<{ items: WorkspaceTask[]; total: number }>>();
+const workspaceTasksInflight = new Map<string, Promise<{ items: WorkspaceTask[]; total: number }>>();
+
+function cacheKeyItems(workspaceId: string, input?: { kind?: string; category?: string; page?: number; pageSize?: number }) {
+    return [
+        workspaceId,
+        input?.kind || "",
+        input?.category || "",
+        String(input?.page || 1),
+        String(input?.pageSize || 50),
+    ].join("|");
+}
+
+function readCache<T>(entry: CacheEntry<T> | null | undefined, ttl: number): T | null {
+    if (!entry) return null;
+    if (Date.now() - entry.at > ttl) return null;
+    return entry.data;
+}
+
+export function peekWorkspaceListCache() {
+    return readCache(workspaceListCache, LIST_TTL_MS);
+}
+
+export function peekWorkspaceDetailCache(workspaceId: string) {
+    return readCache(workspaceDetailCache.get(workspaceId), DETAIL_TTL_MS);
+}
+
+export function peekWorkspaceItemsCache(
+    workspaceId: string,
+    input?: { kind?: string; category?: string; page?: number; pageSize?: number },
+) {
+    return readCache(workspaceItemsCache.get(cacheKeyItems(workspaceId, input)), ITEMS_TTL_MS);
+}
+
+export function peekWorkspaceTasksCache(workspaceId: string) {
+    return readCache(workspaceTasksCache.get(workspaceId), TASKS_TTL_MS);
+}
+
+export function invalidateWorkspaceListCache() {
+    workspaceListCache = null;
+}
+
+export function invalidateWorkspaceDetailCache(workspaceId?: string) {
+    if (!workspaceId) {
+        workspaceDetailCache.clear();
+        workspaceItemsCache.clear();
+        workspaceTasksCache.clear();
+        return;
+    }
+    workspaceDetailCache.delete(workspaceId);
+    for (const key of [...workspaceItemsCache.keys()]) {
+        if (key.startsWith(`${workspaceId}|`)) workspaceItemsCache.delete(key);
+    }
+    workspaceTasksCache.delete(workspaceId);
+}
+
+/** Drop items list cache for a workspace (after share/upload/delete). */
+export function invalidateWorkspaceItemsCache(workspaceId: string) {
+    for (const key of [...workspaceItemsCache.keys()]) {
+        if (key.startsWith(`${workspaceId}|`)) workspaceItemsCache.delete(key);
+    }
+}
+
+export function invalidateWorkspaceTasksCache(workspaceId: string) {
+    workspaceTasksCache.delete(workspaceId);
+}
+
+export function listWorkspaces(options?: { force?: boolean }) {
+    if (!options?.force) {
+        const cached = peekWorkspaceListCache();
+        if (cached) return Promise.resolve(cached);
+        if (workspaceListInflight) return workspaceListInflight;
+    }
+    const promise = request<{ items: WorkspaceSummary[]; total: number }>("/workspaces")
+        .then((data) => {
+            workspaceListCache = { at: Date.now(), data };
+            return data;
+        })
+        .finally(() => {
+            if (workspaceListInflight === promise) workspaceListInflight = null;
+        });
+    workspaceListInflight = promise;
+    return promise;
 }
 
 export function createWorkspace(input: { name: string }) {
     return request<WorkspaceSummary>("/workspaces", {
         method: "POST",
         body: JSON.stringify({ name: input.name }),
+    }).then((data) => {
+        invalidateWorkspaceListCache();
+        return data;
     });
 }
 
@@ -182,39 +287,86 @@ export function joinWorkspace(input: { inviteCode: string }) {
     return request<WorkspaceSummary>("/workspaces/join", {
         method: "POST",
         body: JSON.stringify({ invite_code: input.inviteCode }),
+    }).then((data) => {
+        invalidateWorkspaceListCache();
+        return data;
     });
 }
 
-export function getWorkspace(workspaceId: string) {
-    return request<{ workspace: WorkspaceSummary; members: WorkspaceMember[] }>(`/workspaces/${encodeURIComponent(workspaceId)}`);
+export function getWorkspace(workspaceId: string, options?: { force?: boolean }) {
+    if (!options?.force) {
+        const cached = peekWorkspaceDetailCache(workspaceId);
+        if (cached) return Promise.resolve(cached);
+        const pending = workspaceDetailInflight.get(workspaceId);
+        if (pending) return pending;
+    }
+    const promise = request<{ workspace: WorkspaceSummary; members: WorkspaceMember[] }>(
+        `/workspaces/${encodeURIComponent(workspaceId)}`,
+    )
+        .then((data) => {
+            workspaceDetailCache.set(workspaceId, { at: Date.now(), data });
+            return data;
+        })
+        .finally(() => {
+            workspaceDetailInflight.delete(workspaceId);
+        });
+    workspaceDetailInflight.set(workspaceId, promise);
+    return promise;
 }
 
 export function resetWorkspaceInvite(workspaceId: string) {
     return request<WorkspaceSummary>(`/workspaces/${encodeURIComponent(workspaceId)}/invite/reset`, {
         method: "POST",
         body: "{}",
+    }).then((data) => {
+        workspaceDetailCache.delete(workspaceId);
+        invalidateWorkspaceListCache();
+        return data;
     });
 }
 
 export function archiveWorkspace(workspaceId: string) {
     return request<{ ok: boolean; id: string }>(`/workspaces/${encodeURIComponent(workspaceId)}`, {
         method: "DELETE",
+    }).then((data) => {
+        invalidateWorkspaceListCache();
+        invalidateWorkspaceDetailCache(workspaceId);
+        return data;
     });
 }
 
 export function listWorkspaceItems(
     workspaceId: string,
     input?: { kind?: string; category?: string; page?: number; pageSize?: number },
+    options?: { force?: boolean },
 ) {
+    const key = cacheKeyItems(workspaceId, input);
+    // Only cache the common unfiltered first page used by detail/share pickers.
+    const cacheable = !input?.kind && !input?.category && (input?.page || 1) === 1;
+    if (cacheable && !options?.force) {
+        const cached = peekWorkspaceItemsCache(workspaceId, input);
+        if (cached) return Promise.resolve(cached);
+        const pending = workspaceItemsInflight.get(key);
+        if (pending) return pending;
+    }
     const params = new URLSearchParams();
     if (input?.kind) params.set("kind", input.kind);
     if (input?.category) params.set("category", input.category);
     if (input?.page) params.set("page", String(input.page));
     if (input?.pageSize) params.set("page_size", String(input.pageSize));
     const qs = params.toString();
-    return request<{ items: WorkspaceItem[]; total: number; page: number; page_size: number }>(
+    const promise = request<{ items: WorkspaceItem[]; total: number; page: number; page_size: number }>(
         `/workspaces/${encodeURIComponent(workspaceId)}/items${qs ? `?${qs}` : ""}`,
-    );
+    )
+        .then((data) => {
+            if (cacheable) workspaceItemsCache.set(key, { at: Date.now(), data });
+            return data;
+        })
+        .finally(() => {
+            workspaceItemsInflight.delete(key);
+        });
+    if (cacheable) workspaceItemsInflight.set(key, promise);
+    return promise;
 }
 
 export type ShareWorkspaceItemInput = {
@@ -242,6 +394,10 @@ export type ShareWorkspaceItemInput = {
 
 export function createWorkspaceItem(workspaceId: string, input: ShareWorkspaceItemInput) {
     const isText = input.kind === WORKSPACE_ITEM_KIND.ASSET_TEXT;
+    const done = <T extends WorkspaceItem>(item: T) => {
+        invalidateWorkspaceItemsCache(workspaceId);
+        return item;
+    };
     if (isText) {
         return request<WorkspaceItem>(`/workspaces/${encodeURIComponent(workspaceId)}/items`, {
             method: "POST",
@@ -260,7 +416,7 @@ export function createWorkspaceItem(workspaceId: string, input: ShareWorkspaceIt
                 replaces_item_id: input.replacesItemId || "",
                 is_final: Boolean(input.isFinal),
             }),
-        });
+        }).then(done);
     }
     const form = new FormData();
     form.append("kind", input.kind);
@@ -287,7 +443,7 @@ export function createWorkspaceItem(workspaceId: string, input: ShareWorkspaceIt
     return request<WorkspaceItem>(`/workspaces/${encodeURIComponent(workspaceId)}/items`, {
         method: "POST",
         body: form,
-    });
+    }).then(done);
 }
 
 export type UpdateWorkspaceItemInput = {
@@ -315,7 +471,10 @@ export function updateWorkspaceItem(workspaceId: string, itemId: string, patch: 
             method: "PATCH",
             body: JSON.stringify(body),
         },
-    );
+    ).then((item) => {
+        invalidateWorkspaceItemsCache(workspaceId);
+        return item;
+    });
 }
 
 /** Upsert caller's own 用/弃/改 vote on a shared item. */
@@ -333,7 +492,10 @@ export function upsertWorkspaceItemReaction(
                 comment: input.comment ?? "",
             }),
         },
-    );
+    ).then((item) => {
+        invalidateWorkspaceItemsCache(workspaceId);
+        return item;
+    });
 }
 
 /** Clear own reaction; owner may pass userId to clear another's. */
@@ -342,25 +504,52 @@ export function clearWorkspaceItemReaction(workspaceId: string, itemId: string, 
     return request<WorkspaceItem>(
         `/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}/reaction${qs}`,
         { method: "DELETE" },
-    );
+    ).then((item) => {
+        invalidateWorkspaceItemsCache(workspaceId);
+        return item;
+    });
 }
 
 export function deleteWorkspaceItem(workspaceId: string, itemId: string) {
     return request<{ ok: boolean; id: string }>(
         `/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}`,
         { method: "DELETE" },
-    );
+    ).then((data) => {
+        invalidateWorkspaceItemsCache(workspaceId);
+        return data;
+    });
 }
 
 export function removeWorkspaceMember(workspaceId: string, userId: string) {
     return request<{ ok: boolean; user_id: string }>(
         `/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
         { method: "DELETE" },
-    );
+    ).then((data) => {
+        workspaceDetailCache.delete(workspaceId);
+        invalidateWorkspaceListCache();
+        return data;
+    });
 }
 
-export function listWorkspaceTasks(workspaceId: string) {
-    return request<{ items: WorkspaceTask[]; total: number }>(`/workspaces/${encodeURIComponent(workspaceId)}/tasks`);
+export function listWorkspaceTasks(workspaceId: string, options?: { force?: boolean }) {
+    if (!options?.force) {
+        const cached = peekWorkspaceTasksCache(workspaceId);
+        if (cached) return Promise.resolve(cached);
+        const pending = workspaceTasksInflight.get(workspaceId);
+        if (pending) return pending;
+    }
+    const promise = request<{ items: WorkspaceTask[]; total: number }>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/tasks`,
+    )
+        .then((data) => {
+            workspaceTasksCache.set(workspaceId, { at: Date.now(), data });
+            return data;
+        })
+        .finally(() => {
+            workspaceTasksInflight.delete(workspaceId);
+        });
+    workspaceTasksInflight.set(workspaceId, promise);
+    return promise;
 }
 
 export type WorkspaceTaskInput = {
@@ -389,6 +578,9 @@ export function createWorkspaceTask(workspaceId: string, input: WorkspaceTaskInp
             assignee_user_ids: assigneeIds,
             assignee_user_id: assigneeIds[0] || null,
         }),
+    }).then((task) => {
+        invalidateWorkspaceTasksCache(workspaceId);
+        return task;
     });
 }
 
@@ -433,7 +625,10 @@ export function updateWorkspaceTask(
                 method: "PATCH",
                 body: form,
             },
-        );
+        ).then((task) => {
+            invalidateWorkspaceTasksCache(workspaceId);
+            return task;
+        });
     }
 
     const body: Record<string, unknown> = {
@@ -454,14 +649,49 @@ export function updateWorkspaceTask(
             method: "PATCH",
             body: JSON.stringify(body),
         },
-    );
+    ).then((task) => {
+        invalidateWorkspaceTasksCache(workspaceId);
+        return task;
+    });
 }
 
 export function deleteWorkspaceTask(workspaceId: string, taskId: string) {
     return request<{ ok: boolean; id: string }>(
         `/workspaces/${encodeURIComponent(workspaceId)}/tasks/${encodeURIComponent(taskId)}`,
         { method: "DELETE" },
-    );
+    ).then((data) => {
+        invalidateWorkspaceTasksCache(workspaceId);
+        return data;
+    });
+}
+
+/** Run async work over items with a concurrency cap (share multi-upload). */
+export async function mapPool<T, R>(items: readonly T[], concurrency: number, worker: (item: T, index: number) => Promise<R>) {
+    const limit = Math.max(1, Math.min(concurrency, items.length || 1));
+    const results = new Array<R>(items.length);
+    let next = 0;
+    async function run() {
+        while (next < items.length) {
+            const index = next;
+            next += 1;
+            results[index] = await worker(items[index], index);
+        }
+    }
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => run()));
+    return results;
+}
+
+/** Warm first N media thumbs after list paint (non-blocking). */
+export function prefetchWorkspaceThumbs(items: readonly WorkspaceItem[], limit = 6) {
+    const targets = items
+        .filter((item) => item.file_url && (item.kind.includes("image") || item.kind.includes("video")))
+        .slice(0, limit);
+    for (const item of targets) {
+        if (!item.file_url) continue;
+        void workspaceFileObjectUrl(item.file_url).catch(() => {
+            // ignore prefetch failures
+        });
+    }
 }
 
 function normalizeWorkspaceFileUrl(fileUrl: string) {
