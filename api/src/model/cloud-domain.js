@@ -124,6 +124,8 @@ export const WORKSPACE_ITEM_KIND = {
     ASSET_IMAGE: "asset_image",
     ASSET_VIDEO: "asset_video",
     ASSET_TEXT: "asset_text",
+    /** Script / storyboard notes as files (.md / .txt / .csv); full body in file_id. */
+    ASSET_DOCUMENT: "asset_document",
     GEN_IMAGE: "gen_image",
     GEN_VIDEO: "gen_video",
 };

@@ -168,6 +168,25 @@ export function extForMime(mime) {
     if (mime === "image/webp") return ".webp";
     if (mime === "video/mp4") return ".mp4";
     if (mime === "video/webm") return ".webm";
+    if (mime === "text/markdown" || mime === "text/x-markdown") return ".md";
+    if (mime === "text/plain") return ".txt";
+    if (mime === "text/csv" || mime === "application/csv") return ".csv";
+    return "";
+}
+
+/** Resolve workspace document mime from filename / declared type (text files have no magic). */
+export function resolveDocumentMime(filename = "", declaredMime = "") {
+    const ext = String(path.extname(filename) || "").toLowerCase();
+    if (ext === ".md" || ext === ".markdown") return "text/markdown";
+    if (ext === ".txt") return "text/plain";
+    if (ext === ".csv") return "text/csv";
+    const mime = String(declaredMime || "")
+        .split(";")[0]
+        .trim()
+        .toLowerCase();
+    if (mime === "text/markdown" || mime === "text/x-markdown") return "text/markdown";
+    if (mime === "text/plain") return "text/plain";
+    if (mime === "text/csv" || mime === "application/csv" || mime === "application/vnd.ms-excel") return "text/csv";
     return "";
 }
 

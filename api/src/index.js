@@ -46,6 +46,7 @@ import {
     randomId,
     randomToken,
     readBody,
+    resolveDocumentMime,
     safeJoin,
     setCookie,
     sniffMime,
@@ -78,6 +79,8 @@ const cookieSecure = String(process.env.API_COOKIE_SECURE || "").toLowerCase() =
 const maxBodyBytes = Number(process.env.API_MAX_BODY_BYTES || 220 * 1024 * 1024);
 const maxImageBytes = Number(process.env.API_MAX_IMAGE_BYTES || 20 * 1024 * 1024);
 const maxVideoBytes = Number(process.env.API_MAX_VIDEO_BYTES || 200 * 1024 * 1024);
+// Workspace document scripts / notes (.md / .txt / .csv). Default 2MB — enough for long scripts, not a dump store.
+const maxDocumentBytes = Number(process.env.API_MAX_DOCUMENT_BYTES || 2 * 1024 * 1024);
 const maxUserBytes = Number(process.env.API_MAX_USER_BYTES || 5 * 1024 * 1024 * 1024);
 const maxRemoteRedirects = Math.min(5, Math.max(0, Number(process.env.API_REMOTE_FETCH_MAX_REDIRECTS || 3)));
 const generateHits = new Map();
@@ -1347,14 +1350,18 @@ async function handleUploadJob(req, res, type) {
 
 function writeUserFile({ userId, type, sniffed, bytes, width, height, durationMs, filename }) {
     const fileId = randomId();
-    const ext = extForMime(sniffed) || path.extname(filename || "") || (type === JOB_TYPE.IMAGE ? ".png" : ".mp4");
-    const relKey = path.posix.join(userId, type === JOB_TYPE.IMAGE ? "images" : "videos", `${fileId}${ext}`);
+    const isDocument = type === "document";
+    const subdir = type === JOB_TYPE.IMAGE ? "images" : type === JOB_TYPE.VIDEO ? "videos" : "documents";
+    const fallbackExt = type === JOB_TYPE.IMAGE ? ".png" : type === JOB_TYPE.VIDEO ? ".mp4" : ".txt";
+    const ext = extForMime(sniffed) || path.extname(filename || "") || fallbackExt;
+    const relKey = path.posix.join(userId, subdir, `${fileId}${ext}`);
     const abs = safeJoin(uploadsDir, ...relKey.split("/"));
     ensureDir(path.dirname(abs));
     fs.writeFileSync(abs, bytes);
     return filesRepo.create({
         userId,
-        kind: type,
+        // files.kind historically image|video; document uses its own label for storage hygiene.
+        kind: isDocument ? "document" : type,
         storageKey: relKey,
         mime: sniffed,
         bytes: bytes.length,
@@ -1928,11 +1935,40 @@ async function handleCreateWorkspaceItem(req, res, workspaceId) {
     }
 
     const isText = kind === WORKSPACE_ITEM_KIND.ASSET_TEXT;
+    const isDocument = kind === WORKSPACE_ITEM_KIND.ASSET_DOCUMENT;
     const isImage = kind === WORKSPACE_ITEM_KIND.ASSET_IMAGE || kind === WORKSPACE_ITEM_KIND.GEN_IMAGE;
     const isVideo = kind === WORKSPACE_ITEM_KIND.ASSET_VIDEO || kind === WORKSPACE_ITEM_KIND.GEN_VIDEO;
 
     let fileRow = null;
-    if (!isText) {
+    let documentSummary = "";
+    if (isDocument) {
+        if (!file?.data?.length) return fail(res, 400, "请上传文档文件", CLOUD_ERROR_REASON.BAD_REQUEST);
+        const docMime = resolveDocumentMime(file.filename || fields.filename || "", file.mime || fields.mime || "");
+        if (!docMime) {
+            return fail(res, 400, "文档仅支持 .md / .txt / .csv", CLOUD_ERROR_REASON.UNSUPPORTED_MEDIA_TYPE);
+        }
+        if (file.data.length > maxDocumentBytes) return fail(res, 413, "文档过大（上限约 2MB）", CLOUD_ERROR_REASON.PAYLOAD_TOO_LARGE);
+        if (filesRepo.countUserBytes(ctx.user.id) + file.data.length > maxUserBytes) {
+            return fail(res, 413, "云端存储空间不足", CLOUD_ERROR_REASON.STORAGE_QUOTA_EXCEEDED);
+        }
+        // UTF-8 text only; reject obvious binary blobs.
+        const head = file.data.subarray(0, Math.min(file.data.length, 4096));
+        if (head.includes(0)) {
+            return fail(res, 400, "文档须为 UTF-8 文本", CLOUD_ERROR_REASON.UNSUPPORTED_MEDIA_TYPE);
+        }
+        const fullText = file.data.toString("utf8");
+        documentSummary = fullText.slice(0, 500);
+        fileRow = writeUserFile({
+            userId: ctx.user.id,
+            type: "document",
+            sniffed: docMime,
+            bytes: file.data,
+            width: 0,
+            height: 0,
+            durationMs: 0,
+            filename: file.filename || fields.filename || "document.txt",
+        });
+    } else if (!isText) {
         if (!file?.data?.length) return fail(res, 400, "请上传媒体文件", CLOUD_ERROR_REASON.BAD_REQUEST);
         const sniffed = sniffMime(file.data) || file.mime || "";
         const allowed = isImage ? ["image/jpeg", "image/png", "image/webp"] : ["video/mp4", "video/webm"];
@@ -1980,17 +2016,30 @@ async function handleCreateWorkspaceItem(req, res, workspaceId) {
         const target = workspacesRepo.findItem(replacesItemId, workspaceId);
         if (!target) return fail(res, 400, "替代条目不存在或不在本空间", CLOUD_ERROR_REASON.BAD_REQUEST);
     }
+    const defaultTitle = isText
+        ? "文本分享"
+        : isDocument
+          ? "文档分享"
+          : isImage
+            ? "图片分享"
+            : "视频分享";
+    // Optional short card summary for documents; prefer client field, else first 500 chars of file.
+    const textContent = isText
+        ? String(fields.text_content || fields.textContent || fields.content || "")
+        : isDocument
+          ? String(fields.text_content || fields.textContent || documentSummary || "").slice(0, 500)
+          : "";
     const item = workspacesRepo.createItem({
         workspaceId,
         kind,
-        title: String(fields.title || "").trim() || (isText ? "文本分享" : isImage ? "图片分享" : "视频分享"),
+        title: String(fields.title || "").trim() || defaultTitle,
         note: String(fields.note || ""),
         category: String(fields.category || ""),
         tags,
         prompt: String(fields.prompt || ""),
         model: String(fields.model || ""),
         fileId: fileRow?.id || null,
-        textContent: isText ? String(fields.text_content || fields.textContent || fields.content || "") : "",
+        textContent,
         width: Number(fields.width || fileRow?.width || 0) || 0,
         height: Number(fields.height || fileRow?.height || 0) || 0,
         bytes: Number(fields.bytes || fileRow?.bytes || 0) || 0,
@@ -2006,6 +2055,10 @@ async function handleCreateWorkspaceItem(req, res, workspaceId) {
     if (isText && !item.text_content) {
         workspacesRepo.softDeleteItem(item.id, workspaceId);
         return fail(res, 400, "文本内容不能为空", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    if (isDocument && !item.file_id) {
+        workspacesRepo.softDeleteItem(item.id, workspaceId);
+        return fail(res, 400, "文档文件保存失败", CLOUD_ERROR_REASON.BAD_REQUEST);
     }
 
     json(res, 200, decorateWorkspaceItem(item), "已分享到工作空间");

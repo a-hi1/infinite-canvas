@@ -279,6 +279,8 @@ export function createWorkspaceItem(workspaceId: string, input: ShareWorkspaceIt
     form.append("version", input.version || "");
     form.append("replaces_item_id", input.replacesItemId || "");
     form.append("is_final", input.isFinal ? "true" : "false");
+    // Optional short card summary for documents (full body stays in file).
+    if (input.textContent) form.append("text_content", input.textContent);
     if (input.file) {
         form.append("file", input.file, input.filename || "share.bin");
     }
@@ -479,6 +481,24 @@ export async function workspaceFileObjectUrl(fileUrl: string) {
     if (!response.ok) throw new CloudApiError(`读取工作空间文件失败（${response.status}）`, response.status);
     const blob = await response.blob();
     return URL.createObjectURL(blob);
+}
+
+/** Auth-gated UTF-8 text for workspace documents (md/txt/csv). */
+export async function workspaceFileText(fileUrl: string) {
+    const url = fileUrl.startsWith("http")
+        ? fileUrl
+        : fileUrl.startsWith("/api/")
+          ? fileUrl
+          : fileUrl.startsWith("/workspace-files/")
+            ? `/api${fileUrl}`
+            : `/api/workspace-files/${fileUrl}`;
+    const response = await fetch(url, { credentials: "include" });
+    if (response.status === 401) {
+        notifyUnauthorized();
+        throw new CloudApiError("请先登录", 401, "auth_required");
+    }
+    if (!response.ok) throw new CloudApiError(`读取工作空间文件失败（${response.status}）`, response.status);
+    return response.text();
 }
 
 export function memberDisplayName(member: Pick<WorkspaceMember, "display_name" | "email" | "user_id"> | null | undefined) {

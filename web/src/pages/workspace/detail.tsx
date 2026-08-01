@@ -33,6 +33,17 @@ import {
     standardAssetCategoryOptions,
     suggestAssetCategory,
 } from "@/lib/asset-category";
+import {
+    isWorkspaceDocumentFile,
+    parseCsvPreview,
+    renderSimpleMarkdown,
+    resolveWorkspaceDocumentMime,
+    summarizeDocumentText,
+    WORKSPACE_DOCUMENT_ACCEPT,
+    WORKSPACE_DOCUMENT_MAX_BYTES,
+    workspaceDocumentExt,
+    workspaceDocumentFormat,
+} from "@/lib/workspace-document";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useAuthStore } from "@/stores/use-auth-store";
 import { useAssetStore } from "@/stores/use-asset-store";
@@ -65,6 +76,7 @@ import {
     updateWorkspaceTask,
     upsertWorkspaceItemReaction,
     workspaceFileObjectUrl,
+    workspaceFileText,
     type WorkspaceItem,
     type WorkspaceMember,
     type WorkspaceSummary,
@@ -109,6 +121,7 @@ function kindLabel(kind: string) {
     if (kind === WORKSPACE_ITEM_KIND.ASSET_IMAGE || kind === WORKSPACE_ITEM_KIND.GEN_IMAGE) return "图片";
     if (kind === WORKSPACE_ITEM_KIND.ASSET_VIDEO || kind === WORKSPACE_ITEM_KIND.GEN_VIDEO) return "视频";
     if (kind === WORKSPACE_ITEM_KIND.ASSET_TEXT) return "文本";
+    if (kind === WORKSPACE_ITEM_KIND.ASSET_DOCUMENT) return "文档";
     return kind;
 }
 
@@ -121,12 +134,20 @@ function isMediaKind(kind: string) {
     );
 }
 
+function isDocumentKind(kind: string) {
+    return kind === WORKSPACE_ITEM_KIND.ASSET_DOCUMENT;
+}
+
 function isVideoKind(kind: string) {
     return kind === WORKSPACE_ITEM_KIND.ASSET_VIDEO || kind === WORKSPACE_ITEM_KIND.GEN_VIDEO;
 }
 
 function isAssetWallKind(kind: string) {
     return kind.startsWith("asset_") || kind === WORKSPACE_ITEM_KIND.ASSET_TEXT;
+}
+
+function isDownloadableKind(kind: string) {
+    return isMediaKind(kind) || isDocumentKind(kind);
 }
 
 /** Keep finals easy to scan: finals first, then newest. */
@@ -433,6 +454,31 @@ export default function WorkspaceDetailPage() {
                 message.success("已保存到我的资产");
                 return;
             }
+            if (isDocumentKind(item.kind)) {
+                if (!item.file_url) {
+                    message.error("没有可保存的文档");
+                    return;
+                }
+                const content = await workspaceFileText(item.file_url);
+                addAsset({
+                    kind: "text",
+                    title: item.title || "工作空间文档",
+                    coverUrl: "",
+                    category: item.category || undefined,
+                    tags: item.tags || [],
+                    source: "工作空间",
+                    note: item.note || "",
+                    metadata: {
+                        prompt: item.prompt,
+                        fromWorkspaceItemId: item.id,
+                        documentMime: item.mime,
+                        originalBytes: item.bytes,
+                    },
+                    data: { content },
+                });
+                message.success("已保存到我的资产（文本）");
+                return;
+            }
             if (!item.file_url) {
                 message.error("没有可保存的文件");
                 return;
@@ -523,13 +569,43 @@ export default function WorkspaceDetailPage() {
             for (const file of fileList) {
                 const isImage = file.type.startsWith("image/");
                 const isVideo = file.type.startsWith("video/");
-                if (!isImage && !isVideo) {
+                const isDocument = isWorkspaceDocumentFile(file);
+                if (!isImage && !isVideo && !isDocument) {
                     message.warning(`已跳过不支持的文件：${file.name}`);
                     fail += 1;
                     continue;
                 }
                 try {
                     const title = file.name.replace(/\.[^.]+$/, "") || file.name;
+                    if (isDocument) {
+                        if (file.size > WORKSPACE_DOCUMENT_MAX_BYTES) {
+                            message.warning(`${file.name} 超过 2MB，已跳过`);
+                            fail += 1;
+                            continue;
+                        }
+                        const mime = resolveWorkspaceDocumentMime(file.name, file.type) || "text/plain";
+                        const fullText = await file.text();
+                        const suggested = suggestAssetCategory({
+                            title,
+                            fileName: file.name,
+                            content: fullText.slice(0, 2000),
+                            kind: "text",
+                        });
+                        const created = await createWorkspaceItem(id, {
+                            kind: WORKSPACE_ITEM_KIND.ASSET_DOCUMENT,
+                            title,
+                            category: suggested,
+                            sourceType: WORKSPACE_ITEM_SOURCE.LOCAL_UPLOAD,
+                            mime,
+                            bytes: file.size,
+                            textContent: summarizeDocumentText(fullText, 500),
+                            file,
+                            filename: file.name,
+                        });
+                        setItems((list) => [created, ...list]);
+                        ok += 1;
+                        continue;
+                    }
                     const suggested = suggestAssetCategory({
                         title,
                         fileName: file.name,
@@ -555,11 +631,12 @@ export default function WorkspaceDetailPage() {
             if (ok) {
                 const withCat = fileList.filter((f) => {
                     const title = f.name.replace(/\.[^.]+$/, "") || f.name;
+                    const isDoc = isWorkspaceDocumentFile(f);
                     return Boolean(
                         suggestAssetCategory({
                             title,
                             fileName: f.name,
-                            kind: f.type.startsWith("video/") ? "video" : "image",
+                            kind: isDoc ? "text" : f.type.startsWith("video/") ? "video" : "image",
                         }),
                     );
                 }).length;
@@ -577,7 +654,7 @@ export default function WorkspaceDetailPage() {
     const uploadProps: UploadProps = {
         multiple: true,
         showUploadList: false,
-        accept: "image/jpeg,image/png,image/webp,video/mp4,video/webm,.jpg,.jpeg,.png,.webp,.mp4,.webm",
+        accept: `image/jpeg,image/png,image/webp,video/mp4,video/webm,.jpg,.jpeg,.png,.webp,.mp4,.webm,${WORKSPACE_DOCUMENT_ACCEPT}`,
         disabled: uploadBusy,
         beforeUpload: (file, fileList) => {
             // Ant Design calls beforeUpload per file; only process the full batch once.
@@ -694,7 +771,7 @@ export default function WorkspaceDetailPage() {
                                 <div className="space-y-3">
                                     <div className="flex flex-wrap items-center justify-between gap-2">
                                         <div className="text-xs text-stone-500">
-                                            团队可复用素材 · 本地上传或从「我的资产」分享
+                                            团队可复用素材 · 本地上传图片/视频/文档（md/txt/csv）或从「我的资产」分享
                                         </div>
                                         <div className="flex flex-wrap gap-2">
                                             <Button size="small" icon={<Images className="size-3.5" />} onClick={() => navigate("/assets")}>
@@ -1630,10 +1707,18 @@ function WorkspaceItemCard({
     }, [item.file_url, item.kind]);
 
     const handleDownload = async () => {
+        if (!isDownloadableKind(item.kind)) {
+            message.warning("没有可下载的文件");
+            return;
+        }
         if (!previewUrl && item.file_url) {
             try {
                 const url = await workspaceFileObjectUrl(item.file_url);
-                const ext = isVideoKind(item.kind) ? "mp4" : "png";
+                const ext = isDocumentKind(item.kind)
+                    ? workspaceDocumentExt(item.mime, item.title)
+                    : isVideoKind(item.kind)
+                      ? "mp4"
+                      : "png";
                 saveAs(url, `${item.title || item.id}.${ext}`);
                 URL.revokeObjectURL(url);
             } catch (error) {
@@ -1645,12 +1730,18 @@ function WorkspaceItemCard({
             message.warning("没有可下载的文件");
             return;
         }
-        const ext = isVideoKind(item.kind) ? "mp4" : "png";
+        const ext = isDocumentKind(item.kind)
+            ? workspaceDocumentExt(item.mime, item.title)
+            : isVideoKind(item.kind)
+              ? "mp4"
+              : "png";
         saveAs(previewUrl, `${item.title || item.id}.${ext}`);
     };
 
     const uploader = itemUploaderLabel(item);
     const counts = reactionCounts(item.reactions);
+    const docSummary = isDocumentKind(item.kind) ? item.text_content?.trim() || "" : "";
+    const docFormat = isDocumentKind(item.kind) ? workspaceDocumentFormat(item.mime, item.title) : "unknown";
 
     return (
         <div
@@ -1663,6 +1754,15 @@ function WorkspaceItemCard({
             <button type="button" className={`relative block w-full cursor-zoom-in border-0 bg-stone-100 p-0 text-left dark:bg-stone-900 ${isVideoKind(item.kind) ? "aspect-video" : "aspect-square"}`} onClick={onOpen} title="点击查看详情">
                 {item.kind === WORKSPACE_ITEM_KIND.ASSET_TEXT ? (
                     <div className="flex size-full items-start overflow-hidden p-3 text-xs leading-5 text-stone-700 dark:text-stone-200">{item.text_content || "（空文本）"}</div>
+                ) : isDocumentKind(item.kind) ? (
+                    <div className="flex size-full flex-col gap-1.5 overflow-hidden p-3 text-left">
+                        <div className="inline-flex w-fit items-center gap-1 rounded-md border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-800 dark:border-sky-800 dark:bg-sky-950 dark:text-sky-200">
+                            {docFormat === "markdown" ? "Markdown" : docFormat === "csv" ? "CSV" : "TXT"}
+                        </div>
+                        <div className="line-clamp-6 whitespace-pre-wrap text-xs leading-5 text-stone-700 dark:text-stone-200">
+                            {docSummary || "文档 · 点击查看全文"}
+                        </div>
+                    </div>
                 ) : previewUrl && !previewError ? (
                     isVideoKind(item.kind) ? (
                         <video src={previewUrl} muted playsInline preload="metadata" className="pointer-events-none size-full object-contain" />
@@ -1735,7 +1835,7 @@ function WorkspaceItemCard({
                     <Button size="small" onClick={() => void onSave()}>
                         存到我的资产
                     </Button>
-                    {isMediaKind(item.kind) ? (
+                    {isDownloadableKind(item.kind) ? (
                         <Button size="small" icon={<Download className="size-3.5" />} onClick={() => void handleDownload()}>
                             下载
                         </Button>
@@ -1786,6 +1886,8 @@ function ItemDetailModal({
     const { message } = App.useApp();
     const [previewUrl, setPreviewUrl] = useState("");
     const [previewError, setPreviewError] = useState(false);
+    const [documentText, setDocumentText] = useState("");
+    const [documentLoading, setDocumentLoading] = useState(false);
     const [metaBusy, setMetaBusy] = useState(false);
     const [reactionBusy, setReactionBusy] = useState(false);
     const [versionDraft, setVersionDraft] = useState("");
@@ -1817,6 +1919,31 @@ function ItemDetailModal({
     }, [item?.file_url, item?.kind, item?.id]);
 
     useEffect(() => {
+        let active = true;
+        setDocumentText("");
+        setDocumentLoading(false);
+        if (!item || !isDocumentKind(item.kind) || !item.file_url) return;
+        setDocumentLoading(true);
+        void workspaceFileText(item.file_url)
+            .then((text) => {
+                if (active) {
+                    setDocumentText(text);
+                    setDocumentLoading(false);
+                }
+            })
+            .catch(() => {
+                if (active) {
+                    setDocumentText("");
+                    setDocumentLoading(false);
+                    setPreviewError(true);
+                }
+            });
+        return () => {
+            active = false;
+        };
+    }, [item?.file_url, item?.kind, item?.id]);
+
+    useEffect(() => {
         setVersionDraft(item?.version || "");
         setTitleDraft(item?.title || "");
         const mine = (item?.reactions || []).find((r) => r.user_id === currentUserId);
@@ -1837,15 +1964,33 @@ function ItemDetailModal({
         ? items.find((x) => x.id === item.replaces_item_id)?.title || item.replaces_item_id.slice(0, 8)
         : "";
 
+    const documentFormat = item && isDocumentKind(item.kind) ? workspaceDocumentFormat(item.mime, item.title) : "unknown";
+    const csvRows = useMemo(() => {
+        if (documentFormat !== "csv" || !documentText) return [] as string[][];
+        return parseCsvPreview(documentText);
+    }, [documentFormat, documentText]);
+    const markdownHtml = useMemo(() => {
+        if (documentFormat !== "markdown" || !documentText) return "";
+        return renderSimpleMarkdown(documentText);
+    }, [documentFormat, documentText]);
+
     const handleDownload = async () => {
         if (!item) return;
+        if (!isDownloadableKind(item.kind)) {
+            message.warning("没有可下载的文件");
+            return;
+        }
         try {
             const url = previewUrl || (item.file_url ? await workspaceFileObjectUrl(item.file_url) : "");
             if (!url) {
                 message.warning("没有可下载的文件");
                 return;
             }
-            const ext = isVideoKind(item.kind) ? "mp4" : "png";
+            const ext = isDocumentKind(item.kind)
+                ? workspaceDocumentExt(item.mime, item.title)
+                : isVideoKind(item.kind)
+                  ? "mp4"
+                  : "png";
             saveAs(url, `${item.title || item.id}.${ext}`);
             if (!previewUrl) URL.revokeObjectURL(url);
         } catch (error) {
@@ -1943,6 +2088,38 @@ function ItemDetailModal({
                         {item.kind === WORKSPACE_ITEM_KIND.ASSET_TEXT ? (
                             <div className="max-h-[min(52vh,560px)] w-full overflow-auto whitespace-pre-wrap p-5 text-sm leading-6 text-stone-100 lg:max-h-[min(84vh,880px)]">
                                 {item.text_content || "（空文本）"}
+                            </div>
+                        ) : isDocumentKind(item.kind) ? (
+                            <div className="max-h-[min(52vh,560px)] w-full overflow-auto p-5 lg:max-h-[min(84vh,880px)]">
+                                {documentLoading ? (
+                                    <div className="py-16 text-center text-sm text-stone-400">加载文档…</div>
+                                ) : previewError ? (
+                                    <div className="py-16 text-center text-sm text-stone-400">预览失败</div>
+                                ) : documentFormat === "csv" ? (
+                                    <div className="overflow-auto rounded-lg border border-stone-700 bg-stone-900/60">
+                                        <table className="min-w-full border-collapse text-left text-xs text-stone-100">
+                                            <tbody>
+                                                {csvRows.map((row, rowIndex) => (
+                                                    <tr key={`csv-row-${rowIndex}`} className={rowIndex === 0 ? "bg-stone-800/80 font-semibold" : "odd:bg-stone-900/40"}>
+                                                        {row.map((cell, cellIndex) => (
+                                                            <td key={`csv-cell-${rowIndex}-${cellIndex}`} className="border border-stone-700 px-2 py-1.5 align-top whitespace-pre-wrap">
+                                                                {cell}
+                                                            </td>
+                                                        ))}
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                        {csvRows.length === 0 ? <div className="p-4 text-stone-400">空表格</div> : null}
+                                    </div>
+                                ) : documentFormat === "markdown" ? (
+                                    <div
+                                        className="ws-doc-md prose-invert max-w-none text-sm leading-6 text-stone-100 [&_.ws-doc-h1]:mb-3 [&_.ws-doc-h1]:text-xl [&_.ws-doc-h1]:font-semibold [&_.ws-doc-h2]:mb-2 [&_.ws-doc-h2]:mt-4 [&_.ws-doc-h2]:text-lg [&_.ws-doc-h2]:font-semibold [&_.ws-doc-h3]:mb-2 [&_.ws-doc-h3]:mt-3 [&_.ws-doc-h3]:font-semibold [&_.ws-doc-p]:mb-2 [&_.ws-doc-ul]:mb-2 [&_.ws-doc-ul]:list-disc [&_.ws-doc-ul]:pl-5 [&_.ws-doc-pre]:my-3 [&_.ws-doc-pre]:overflow-auto [&_.ws-doc-pre]:rounded-lg [&_.ws-doc-pre]:bg-black/40 [&_.ws-doc-pre]:p-3 [&_.ws-doc-code]:rounded [&_.ws-doc-code]:bg-black/35 [&_.ws-doc-code]:px-1 [&_.ws-doc-quote]:border-l-2 [&_.ws-doc-quote]:border-stone-500 [&_.ws-doc-quote]:pl-3 [&_.ws-doc-quote]:text-stone-300 [&_.ws-doc-link]:text-sky-300 [&_.ws-doc-link]:underline [&_.ws-doc-hr]:my-4 [&_.ws-doc-hr]:border-stone-600"
+                                        dangerouslySetInnerHTML={{ __html: markdownHtml || "<p class='ws-doc-p'>（空文档）</p>" }}
+                                    />
+                                ) : (
+                                    <pre className="whitespace-pre-wrap wrap-break-word font-mono text-sm leading-6 text-stone-100">{documentText || "（空文档）"}</pre>
+                                )}
                             </div>
                         ) : previewUrl && !previewError ? (
                             isVideoKind(item.kind) ? (
@@ -2249,7 +2426,7 @@ function ItemDetailModal({
                             <Button type="primary" onClick={() => onSave(item)}>
                                 存到我的资产
                             </Button>
-                            {isMediaKind(item.kind) ? (
+                            {isDownloadableKind(item.kind) ? (
                                 <Button icon={<Download className="size-3.5" />} onClick={() => void handleDownload()}>
                                     下载
                                 </Button>
