@@ -68,9 +68,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                             <div className="text-[11px] leading-4 opacity-55">{cap.resolutions.find((item) => item.disabled)?.disabledReason}</div>
                         ) : null}
                         {cap.provider === "grok" ? (
-                            <div className="text-[11px] leading-4 opacity-55">
-                                选中的清晰度/比例/秒数会原样写入首个请求（含单图图生）。仅当该规格创建失败时才降档 720p/480p 或去字段兜底；不会用无分辨率 body 抢先成功。若结果实际宽高仍偏低，会提示——不虚标 1080p 源片。
-                            </div>
+                            <div className="text-[11px] leading-4 opacity-55">规格原样请求；失败才降档。结果偏低会提示，不虚标。</div>
                         ) : null}
                     </SettingGroup>
                 ) : null}

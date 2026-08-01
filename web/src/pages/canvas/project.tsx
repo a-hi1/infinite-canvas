@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { BookOpen, Bot, Download, Group, Home, ImageIcon, Images, List, Menu, Music2, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Settings2, Trash2, Undo2, Upload, Video } from "lucide-react";
+import { BookOpen, Bot, Download, Group, Home, ImageIcon, Images, List, Menu, Music2, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Settings2, Share2, Trash2, Undo2, Upload, Video } from "lucide-react";
 import { saveAs } from "file-saver";
 
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
@@ -18,7 +18,9 @@ import { grokResolutionShortfallMessage, isGrokVideoConfig } from "@/lib/grok-vi
 import { suggestAssetCategory } from "@/lib/asset-category";
 import { assetTitleFromPrompt } from "@/lib/asset-display";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
+import { AuthModal } from "@/components/layout/auth-modal";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
+import { draftsFromCanvasNodes, isCanvasNodeShareable, ShareToWorkspaceModal, type ShareDraft } from "@/components/workspace/share-to-workspace-modal";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useAuthStore } from "@/stores/use-auth-store";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -332,6 +334,10 @@ function InfiniteCanvasPage() {
     const [showImageInfo, setShowImageInfo] = useState(false);
     const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
     const [assetPickerOpen, setAssetPickerOpen] = useState(false);
+    const [shareDrafts, setShareDrafts] = useState<ShareDraft[]>([]);
+    const [shareOpen, setShareOpen] = useState(false);
+    const [authOpen, setAuthOpen] = useState(false);
+    const authUser = useAuthStore((state) => state.user);
     const [projectLoaded, setProjectLoaded] = useState(false);
     const [toolbarNodeId, setToolbarNodeId] = useState<string | null>(null);
     const [nodeImageSettingsOpen, setNodeImageSettingsOpen] = useState(false);
@@ -1804,6 +1810,48 @@ function InfiniteCanvasPage() {
         }
     }, [currentProject?.title, message, nodes, selectedNodeIds]);
 
+    const openShareWorkspace = useCallback(
+        (targets: CanvasNodeData[]) => {
+            if (!authUser) {
+                message.warning("登录后可将画布节点发布到工作空间");
+                setAuthOpen(true);
+                return;
+            }
+            const drafts = draftsFromCanvasNodes(targets, projectId);
+            if (!drafts.length) {
+                const skipped = targets.length;
+                message.warning(
+                    skipped
+                        ? "选中节点没有可发布内容（需有图片/视频结果，或非空文本）"
+                        : "没有可发布的节点",
+                );
+                return;
+            }
+            if (drafts.length < targets.length) {
+                message.info(`已跳过 ${targets.length - drafts.length} 个不可发布节点`);
+            }
+            setShareDrafts(drafts);
+            setShareOpen(true);
+        },
+        [authUser, message, projectId],
+    );
+
+    const shareSelectedNodes = useCallback(() => {
+        const selected = nodes.filter((node) => selectedNodeIds.has(node.id));
+        if (!selected.length) {
+            message.warning("请先选中要发布的节点");
+            return;
+        }
+        openShareWorkspace(selected);
+    }, [message, nodes, openShareWorkspace, selectedNodeIds]);
+
+    const shareNodeToWorkspace = useCallback(
+        (node: CanvasNodeData) => {
+            openShareWorkspace([node]);
+        },
+        [openShareWorkspace],
+    );
+
     const saveNodeAsset = useCallback(
         async (node: CanvasNodeData) => {
             if (node.type === CanvasNodeType.Text) {
@@ -2980,7 +3028,7 @@ function InfiniteCanvasPage() {
 
     return (
         <main className="flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
-            <CanvasSidePanel nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNodeFromList} onPreviewNode={setPreviewNodeId} onInsertAsset={handleAssetInsert} />
+            <CanvasSidePanel nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNodeFromList} onPreviewNode={setPreviewNodeId} onInsertAsset={handleAssetInsert} onShareNodes={openShareWorkspace} />
             <section className="relative min-w-0 flex-1 overflow-hidden">
                 <CanvasTopBar
                     title={currentProject?.title || "未命名画布"}
@@ -3000,6 +3048,8 @@ function InfiniteCanvasPage() {
                     onExportCanvas={() => void exportCurrentCanvas()}
                     onExportSelected={() => void exportSelectedNodes()}
                     canExportSelected={selectedNodeIds.size > 0}
+                    onShareSelected={shareSelectedNodes}
+                    canShareSelected={nodes.some((node) => selectedNodeIds.has(node.id) && isCanvasNodeShareable(node))}
                     onUndo={undoCanvas}
                     onRedo={redoCanvas}
                     agentOpen={assistantOpen}
@@ -3196,6 +3246,7 @@ function InfiniteCanvasPage() {
                     onUpload={(node) => handleUploadRequest(node.id)}
                     onDownload={downloadNodeImage}
                     onSaveAsset={(node) => void saveNodeAsset(node)}
+                    onShareWorkspace={shareNodeToWorkspace}
                     onMaskEdit={(node) => setMaskEditNodeId(node.id)}
                     onCrop={(node) => setCropNodeId(node.id)}
                     onSplit={(node) => setSplitNodeId(node.id)}
@@ -3239,6 +3290,7 @@ function InfiniteCanvasPage() {
                     onDelete={() => deleteNodes(new Set(selectedNodeIds))}
                     onDeselect={deselectCanvas}
                     onCopy={copySelectedNodes}
+                    onShareWorkspace={shareSelectedNodes}
                 />
 
                 {isMiniMapOpen ? <Minimap nodes={nodes} viewport={viewport} viewportSize={size} onViewportChange={setViewport} /> : null}
@@ -3259,6 +3311,19 @@ function InfiniteCanvasPage() {
                             copySelectedNodes();
                             setContextMenu(null);
                         }}
+                        onShareWorkspace={
+                            contextMenu.type === "node"
+                                ? () => {
+                                      if (selectedNodeIds.has(contextMenu.nodeId) && selectedNodeIds.size > 1) {
+                                          shareSelectedNodes();
+                                      } else {
+                                          const target = nodes.find((node) => node.id === contextMenu.nodeId);
+                                          if (target) shareNodeToWorkspace(target);
+                                      }
+                                      setContextMenu(null);
+                                  }
+                                : undefined
+                        }
                         onDelete={() => {
                             if (contextMenu.type === "node") {
                                 // 多选中右键：删全部选中；否则只删该节点
@@ -3329,6 +3394,15 @@ function InfiniteCanvasPage() {
                 </Modal>
 
                 <AssetPickerModal open={assetPickerOpen} onInsert={handleAssetInsert} onClose={() => setAssetPickerOpen(false)} />
+                <ShareToWorkspaceModal
+                    open={shareOpen}
+                    drafts={shareDrafts}
+                    onClose={() => {
+                        setShareOpen(false);
+                        setShareDrafts([]);
+                    }}
+                />
+                <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} />
                 {codexCompactAgent && !assistantMounted ? <CanvasLocalAgentPanel headless snapshot={agentSnapshot} canUndoOps={Boolean(agentUndoSnapshot)} onApplyOps={applyAgentOps} onUndoOps={undoAgentOps} autoConnect={codexAutoConnect} /> : null}
             </section>
             {assistantMounted ? (
@@ -3373,6 +3447,8 @@ function CanvasTopBar({
     onExportCanvas,
     onExportSelected,
     canExportSelected,
+    onShareSelected,
+    canShareSelected,
     onUndo,
     onRedo,
     agentOpen,
@@ -3396,6 +3472,8 @@ function CanvasTopBar({
     onExportCanvas: () => void;
     onExportSelected: () => void;
     canExportSelected: boolean;
+    onShareSelected: () => void;
+    canShareSelected: boolean;
     onUndo: () => void;
     onRedo: () => void;
     agentOpen: boolean;
@@ -3447,6 +3525,7 @@ function CanvasTopBar({
                                 { key: "import", icon: <Upload className="size-4" />, label: "导入素材", onClick: onImportImage },
                                 { key: "export-canvas", icon: <Download className="size-4" />, label: "导出当前画布", onClick: onExportCanvas },
                                 { key: "export-selected", icon: <Download className="size-4" />, label: "导出选中节点", disabled: !canExportSelected, onClick: onExportSelected },
+                                { key: "share-selected", icon: <Share2 className="size-4" />, label: "发布选中到空间", disabled: !canShareSelected, onClick: onShareSelected },
                                 { type: "divider" },
                                 { key: "undo", disabled: !canUndo, icon: <Undo2 className="size-4" />, label: <MenuLabel text="撤销" shortcut="⌘ Z" />, onClick: onUndo },
                                 { key: "redo", disabled: !canRedo, icon: <Redo2 className="size-4" />, label: <MenuLabel text="重做" shortcut="⌘ ⇧ Z / ⌘ Y" />, onClick: onRedo },

@@ -1,4 +1,4 @@
-import { Copy, Trash2, X } from "lucide-react";
+import { Copy, Share2, Trash2, X } from "lucide-react";
 import { Button } from "antd";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -10,11 +10,13 @@ export function CanvasMultiSelectBar({
     onDelete,
     onDeselect,
     onCopy,
+    onShareWorkspace,
 }: {
     count: number;
     onDelete: () => void;
     onDeselect: () => void;
     onCopy: () => void;
+    onShareWorkspace?: () => void;
 }) {
     const colorTheme = useThemeStore((state) => state.theme);
     const theme = canvasThemes[colorTheme];
@@ -36,6 +38,11 @@ export function CanvasMultiSelectBar({
                 <Button size="small" type="text" icon={<Copy className="size-3.5" />} onClick={onCopy} className="!px-2">
                     复制
                 </Button>
+                {onShareWorkspace ? (
+                    <Button size="small" type="text" icon={<Share2 className="size-3.5" />} onClick={onShareWorkspace} className="!px-2">
+                        发布空间
+                    </Button>
+                ) : null}
                 <Button size="small" type="text" danger icon={<Trash2 className="size-3.5" />} onClick={onDelete} className="!px-2">
                     删除
                 </Button>

@@ -1,7 +1,7 @@
 import { memo, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { App, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Square, Trash2, Type, Video } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Download, Eye, FileText, Image as ImageIcon, ListChecks, Music2, Plus, Search, Settings2, Share2, Square, Trash2, Type, Video } from "lucide-react";
 import { motion } from "motion/react";
 
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
@@ -40,6 +40,7 @@ type Props = {
     onFocusNode: (nodeId: string) => void;
     onPreviewNode: (nodeId: string) => void;
     onInsertAsset: (payload: InsertAssetPayload) => void;
+    onShareNodes?: (nodes: CanvasNodeData[]) => void;
 };
 
 const NODE_TYPE_ICON: Record<string, typeof Square> = {
@@ -58,7 +59,7 @@ const STATUS_COLOR: Record<string, string> = {
     idle: "transparent",
 };
 
-export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, onInsertAsset }: Props) {
+export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, onInsertAsset, onShareNodes }: Props) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [tab, setTab] = useState<PanelTab>("canvas");
     const width = useCanvasSidePanelStore((state) => state.width);
@@ -113,7 +114,7 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreview
                 </div>
                 <div className="mt-2 min-h-0 flex-1 overflow-hidden">
                     {tab === "canvas" ? (
-                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} onPreviewNode={onPreviewNode} theme={theme} />
+                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} onPreviewNode={onPreviewNode} onShareNodes={onShareNodes} theme={theme} />
                     ) : tab === "assets" ? (
                         <CanvasAssetsTab onInsert={onInsertAsset} theme={theme} />
                     ) : (
@@ -159,7 +160,21 @@ function nodeDisplayTitle(node: CanvasNodeData) {
     return displayNodeTitle(node.title, node.type, node.metadata?.prompt);
 }
 
-function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, theme }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; theme: CanvasTheme }) {
+function CanvasNodesTab({
+    nodes,
+    selectedNodeIds,
+    onFocusNode,
+    onPreviewNode,
+    onShareNodes,
+    theme,
+}: {
+    nodes: CanvasNodeData[];
+    selectedNodeIds: Set<string>;
+    onFocusNode: (nodeId: string) => void;
+    onPreviewNode: (nodeId: string) => void;
+    onShareNodes?: (nodes: CanvasNodeData[]) => void;
+    theme: CanvasTheme;
+}) {
     const { message } = App.useApp();
     const [keyword, setKeyword] = useState("");
     const [typeFilter, setTypeFilter] = useState<string>("all");
@@ -201,6 +216,12 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
             hide();
             setExporting(false);
         }
+    };
+
+    const handleShare = () => {
+        const targets = nodes.filter((node) => checked.has(node.id));
+        if (!targets.length || !onShareNodes) return;
+        onShareNodes(targets);
     };
 
     return (
@@ -275,11 +296,23 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
                         {allChecked ? "取消全选" : "全选"}
                     </button>
                     <span className="text-xs opacity-45">已选 {checked.size}</span>
+                    {onShareNodes ? (
+                        <button
+                            type="button"
+                            onClick={handleShare}
+                            disabled={!checked.size}
+                            className="ml-auto flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-white/10"
+                            style={{ color: theme.node.text }}
+                        >
+                            <Share2 className="size-3.5" />
+                            发布空间
+                        </button>
+                    ) : null}
                     <button
                         type="button"
                         onClick={() => void handleExport()}
                         disabled={!checked.size || exporting}
-                        className="ml-auto flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-white/10"
+                        className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-white/10 ${onShareNodes ? "" : "ml-auto"}`}
                         style={{ color: theme.node.text }}
                     >
                         <Download className="size-3.5" />

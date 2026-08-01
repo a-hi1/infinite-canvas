@@ -14,6 +14,7 @@ import {
     SAVE_STATUS,
     USER_STATUS,
     WORKSPACE_ITEM_KIND,
+    WORKSPACE_ITEM_RESOLUTION,
     WORKSPACE_ITEM_SOURCE,
     WORKSPACE_ROLE,
     WORKSPACE_TASK_STATUS,
@@ -240,11 +241,27 @@ const server = http.createServer(async (req, res) => {
         if (req.method === "DELETE" && /^\/workspaces\/[^/]+$/.test(route)) {
             return await handleArchiveWorkspace(req, res, route.slice("/workspaces/".length));
         }
+        if (req.method === "DELETE" && /^\/workspaces\/[^/]+\/members\/[^/]+$/.test(route)) {
+            const parts = route.split("/");
+            return await handleRemoveWorkspaceMember(req, res, parts[2], parts[4]);
+        }
         if (req.method === "GET" && /^\/workspaces\/[^/]+\/items$/.test(route)) {
             return await handleListWorkspaceItems(req, res, route.split("/")[2], url);
         }
         if (req.method === "POST" && /^\/workspaces\/[^/]+\/items$/.test(route)) {
             return await handleCreateWorkspaceItem(req, res, route.split("/")[2]);
+        }
+        if (req.method === "PATCH" && /^\/workspaces\/[^/]+\/items\/[^/]+$/.test(route)) {
+            const parts = route.split("/");
+            return await handleUpdateWorkspaceItem(req, res, parts[2], parts[4]);
+        }
+        if (req.method === "PUT" && /^\/workspaces\/[^/]+\/items\/[^/]+\/reaction$/.test(route)) {
+            const parts = route.split("/");
+            return await handleUpsertWorkspaceItemReaction(req, res, parts[2], parts[4]);
+        }
+        if (req.method === "DELETE" && /^\/workspaces\/[^/]+\/items\/[^/]+\/reaction$/.test(route)) {
+            const parts = route.split("/");
+            return await handleClearWorkspaceItemReaction(req, res, parts[2], parts[4]);
         }
         if (req.method === "DELETE" && /^\/workspaces\/[^/]+\/items\/[^/]+$/.test(route)) {
             const parts = route.split("/");
@@ -1763,6 +1780,27 @@ function handleArchiveWorkspace(req, res, workspaceId) {
     json(res, 200, { ok: true, id: workspace.id }, "工作空间已解散");
 }
 
+function handleRemoveWorkspaceMember(req, res, workspaceId, targetUserIdRaw) {
+    const ctx = requireWorkspaceOwner(req, res, workspaceId);
+    if (!ctx) return;
+    const targetUserId = String(targetUserIdRaw || "").trim();
+    if (!targetUserId) return fail(res, 400, "缺少成员 id", CLOUD_ERROR_REASON.BAD_REQUEST);
+    // Cannot kick the workspace owner (including self-as-owner).
+    if (targetUserId === ctx.workspace.owner_id) {
+        return fail(res, 400, "不能移除空间所有者", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    const membership = workspacesRepo.findMembership(workspaceId, targetUserId);
+    if (!membership) {
+        return fail(res, 404, "该用户不是空间成员", CLOUD_ERROR_REASON.WORKSPACE_NOT_FOUND);
+    }
+    if (membership.role === WORKSPACE_ROLE.OWNER) {
+        return fail(res, 400, "不能移除空间所有者", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    const removed = workspacesRepo.removeMember(workspaceId, targetUserId);
+    if (!removed) return fail(res, 404, "该用户不是空间成员", CLOUD_ERROR_REASON.WORKSPACE_NOT_FOUND);
+    json(res, 200, { ok: true, user_id: targetUserId }, "已移除成员");
+}
+
 function userPublicName(user) {
     if (!user) return { name: "", email: "" };
     return {
@@ -1774,10 +1812,23 @@ function userPublicName(user) {
 function decorateWorkspaceItem(item) {
     const user = item?.created_by ? usersRepo.findById(item.created_by) : null;
     const { name, email } = userPublicName(user);
-    return publicWorkspaceItem(item, {
+    const publicItem = publicWorkspaceItem(item, {
         created_by_name: name,
         created_by_email: email,
     });
+    // Attach member display names onto reactions for UI.
+    if (publicItem && Array.isArray(publicItem.reactions) && publicItem.reactions.length) {
+        publicItem.reactions = publicItem.reactions.map((r) => {
+            const u = r.user_id ? usersRepo.findById(r.user_id) : null;
+            const info = userPublicName(u);
+            return {
+                ...r,
+                display_name: info.name || r.display_name || "",
+                email: info.email || r.email || "",
+            };
+        });
+    }
+    return publicItem;
 }
 
 function decorateWorkspaceTask(task) {
@@ -1840,7 +1891,8 @@ function handleListWorkspaceItems(req, res, workspaceId, url) {
     const page = Math.max(1, Number(url.searchParams.get("page") || 1) || 1);
     const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get("page_size") || url.searchParams.get("pageSize") || 50) || 50));
     const kind = String(url.searchParams.get("kind") || "").trim();
-    const result = workspacesRepo.listItems(workspaceId, { kind, page, pageSize });
+    const category = String(url.searchParams.get("category") || "").trim();
+    const result = workspacesRepo.listItems(workspaceId, { kind, category, page, pageSize });
     json(res, 200, {
         items: result.items.map((item) => decorateWorkspaceItem(item)),
         total: result.total,
@@ -1916,6 +1968,18 @@ async function handleCreateWorkspaceItem(req, res, workspaceId) {
     if (!Array.isArray(tags)) tags = [];
 
     const sourceType = String(fields.source_type || fields.sourceType || WORKSPACE_ITEM_SOURCE.ASSET).trim() || WORKSPACE_ITEM_SOURCE.ASSET;
+    const version = String(fields.version || "").trim().slice(0, 40);
+    const replacesItemId = String(fields.replaces_item_id || fields.replacesItemId || "").trim().slice(0, 80);
+    const isFinalRaw = fields.is_final ?? fields.isFinal;
+    const isFinal =
+        isFinalRaw === true ||
+        isFinalRaw === 1 ||
+        isFinalRaw === "1" ||
+        String(isFinalRaw || "").toLowerCase() === "true";
+    if (replacesItemId) {
+        const target = workspacesRepo.findItem(replacesItemId, workspaceId);
+        if (!target) return fail(res, 400, "替代条目不存在或不在本空间", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
     const item = workspacesRepo.createItem({
         workspaceId,
         kind,
@@ -1933,6 +1997,9 @@ async function handleCreateWorkspaceItem(req, res, workspaceId) {
         mime: String(fields.mime || fileRow?.mime || (isText ? "text/plain" : "")),
         sourceType,
         sourceRef: String(fields.source_ref || fields.sourceRef || ""),
+        version,
+        replacesItemId,
+        isFinal,
         createdBy: ctx.user.id,
     });
 
@@ -1942,6 +2009,120 @@ async function handleCreateWorkspaceItem(req, res, workspaceId) {
     }
 
     json(res, 200, decorateWorkspaceItem(item), "已分享到工作空间");
+}
+
+async function handleUpdateWorkspaceItem(req, res, workspaceId, itemId) {
+    const ctx = requireWorkspaceMember(req, res, workspaceId);
+    if (!ctx) return;
+    const item = workspacesRepo.findItem(itemId, workspaceId);
+    if (!item) return fail(res, 404, "分享条目不存在", CLOUD_ERROR_REASON.WORKSPACE_ITEM_NOT_FOUND);
+    const isOwner = ctx.membership.role === WORKSPACE_ROLE.OWNER || ctx.workspace.owner_id === ctx.user.id;
+    if (item.created_by !== ctx.user.id && !isOwner) {
+        return fail(res, 403, "只能编辑自己的分享，或由所有者编辑", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+    }
+
+    const body = await readJson(req, Math.min(maxBodyBytes, 256 * 1024));
+    const patch = {};
+    if (body.title !== undefined) patch.title = body.title;
+    if (body.note !== undefined) patch.note = body.note;
+    if (body.category !== undefined) patch.category = body.category;
+    if (body.tags !== undefined) {
+        let tags = body.tags;
+        if (typeof tags === "string") {
+            try {
+                tags = JSON.parse(tags);
+            } catch {
+                tags = String(tags)
+                    .split(",")
+                    .map((t) => t.trim())
+                    .filter(Boolean);
+            }
+        }
+        patch.tags = Array.isArray(tags) ? tags : [];
+    }
+    if (body.version !== undefined) patch.version = body.version;
+    if (body.replaces_item_id !== undefined || body.replacesItemId !== undefined) {
+        const replacesItemId = String(body.replaces_item_id ?? body.replacesItemId ?? "").trim();
+        if (replacesItemId) {
+            if (replacesItemId === itemId) {
+                return fail(res, 400, "不能替代自己", CLOUD_ERROR_REASON.BAD_REQUEST);
+            }
+            const target = workspacesRepo.findItem(replacesItemId, workspaceId);
+            if (!target) return fail(res, 400, "替代条目不存在或不在本空间", CLOUD_ERROR_REASON.BAD_REQUEST);
+        }
+        patch.replacesItemId = replacesItemId;
+    }
+    if (body.is_final !== undefined || body.isFinal !== undefined) {
+        const raw = body.is_final ?? body.isFinal;
+        patch.isFinal =
+            raw === true || raw === 1 || raw === "1" || String(raw || "").toLowerCase() === "true";
+    }
+
+    if (!Object.keys(patch).length) {
+        return fail(res, 400, "没有可更新的字段", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+
+    // Best-effort: when marking final, clear is_final on the previous item in the same replaces chain.
+    if (patch.isFinal === true) {
+        const chainRoot = String(patch.replacesItemId ?? item.replaces_item_id ?? "").trim() || itemId;
+        const siblings = workspacesRepo.listItems(workspaceId, { page: 1, pageSize: 100 }).items || [];
+        for (const other of siblings) {
+            if (!other || other.id === itemId || !other.is_final) continue;
+            const otherRoot = String(other.replaces_item_id || "").trim() || other.id;
+            const related =
+                other.id === chainRoot ||
+                otherRoot === chainRoot ||
+                other.replaces_item_id === itemId ||
+                item.replaces_item_id === other.id;
+            if (related) {
+                workspacesRepo.updateItem(other.id, workspaceId, { isFinal: false });
+            }
+        }
+    }
+
+    const updated = workspacesRepo.updateItem(itemId, workspaceId, patch);
+    if (!updated) return fail(res, 404, "分享条目不存在", CLOUD_ERROR_REASON.WORKSPACE_ITEM_NOT_FOUND);
+    json(res, 200, decorateWorkspaceItem(updated), "已更新");
+}
+
+/** Any member can set their own 用/弃/改 vote (+ optional short comment). */
+async function handleUpsertWorkspaceItemReaction(req, res, workspaceId, itemId) {
+    const ctx = requireWorkspaceMember(req, res, workspaceId);
+    if (!ctx) return;
+    const item = workspacesRepo.findItem(itemId, workspaceId);
+    if (!item) return fail(res, 404, "分享条目不存在", CLOUD_ERROR_REASON.WORKSPACE_ITEM_NOT_FOUND);
+    const body = await readJson(req, Math.min(maxBodyBytes, 64 * 1024));
+    const resolution = String(body.resolution || "").trim();
+    if (!Object.values(WORKSPACE_ITEM_RESOLUTION).includes(resolution)) {
+        return fail(res, 400, "决议须为 use / discard / revise（用 / 弃 / 改）", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    const comment = body.comment !== undefined ? String(body.comment || "") : "";
+    const updated = workspacesRepo.upsertItemReaction(itemId, workspaceId, {
+        userId: ctx.user.id,
+        resolution,
+        comment,
+    });
+    if (!updated) return fail(res, 404, "分享条目不存在", CLOUD_ERROR_REASON.WORKSPACE_ITEM_NOT_FOUND);
+    json(res, 200, decorateWorkspaceItem(updated), "决议已保存");
+}
+
+/** Clear own reaction; owner may pass ?user_id= to clear another's. */
+function handleClearWorkspaceItemReaction(req, res, workspaceId, itemId) {
+    const ctx = requireWorkspaceMember(req, res, workspaceId);
+    if (!ctx) return;
+    const item = workspacesRepo.findItem(itemId, workspaceId);
+    if (!item) return fail(res, 404, "分享条目不存在", CLOUD_ERROR_REASON.WORKSPACE_ITEM_NOT_FOUND);
+    const url = new URL(req.url || "", "http://local");
+    const targetUserId = String(url.searchParams.get("user_id") || url.searchParams.get("userId") || "").trim();
+    const isOwner = ctx.membership.role === WORKSPACE_ROLE.OWNER || ctx.workspace.owner_id === ctx.user.id;
+    let clearUserId = ctx.user.id;
+    if (targetUserId && targetUserId !== ctx.user.id) {
+        if (!isOwner) return fail(res, 403, "只能清除自己的决议", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+        clearUserId = targetUserId;
+    }
+    const updated = workspacesRepo.clearItemReaction(itemId, workspaceId, clearUserId);
+    if (!updated) return fail(res, 404, "分享条目不存在", CLOUD_ERROR_REASON.WORKSPACE_ITEM_NOT_FOUND);
+    json(res, 200, decorateWorkspaceItem(updated), "决议已清除");
 }
 
 function handleDeleteWorkspaceItem(req, res, workspaceId, itemId) {

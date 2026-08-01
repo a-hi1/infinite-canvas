@@ -25,6 +25,9 @@ export function createWorkspacesRepo(db) {
         addMember(input) {
             return db.addWorkspaceMember(input);
         },
+        removeMember(workspaceId, userId) {
+            return db.removeWorkspaceMember(workspaceId, userId);
+        },
         resetInviteCode(workspaceId, ownerId, inviteCode) {
             return db.resetWorkspaceInviteCode(workspaceId, ownerId, inviteCode);
         },
@@ -39,6 +42,15 @@ export function createWorkspacesRepo(db) {
         },
         findItem(itemId, workspaceId) {
             return db.findWorkspaceItem(itemId, workspaceId);
+        },
+        updateItem(itemId, workspaceId, patch) {
+            return db.updateWorkspaceItem(itemId, workspaceId, patch);
+        },
+        upsertItemReaction(itemId, workspaceId, input) {
+            return db.upsertWorkspaceItemReaction(itemId, workspaceId, input);
+        },
+        clearItemReaction(itemId, workspaceId, userId) {
+            return db.clearWorkspaceItemReaction(itemId, workspaceId, userId);
         },
         softDeleteItem(itemId, workspaceId) {
             return db.softDeleteWorkspaceItem(itemId, workspaceId);

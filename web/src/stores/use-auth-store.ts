@@ -46,7 +46,25 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         if (!get().user) return;
         try {
             const me = await loadMe();
-            set({ user: me.user, usage: me.usage, limits: me.limits, credits: me.credits });
+            const prev = get();
+            // Keep `user` reference stable when identity fields are unchanged.
+            // Replacing `user` on every /auth/me poll re-triggers pages that depend on
+            // the object (e.g. workspace detail load) and can loop with AccountPopover.
+            const nextUser = me.user;
+            let user = prev.user;
+            if (!prev.user || !nextUser) {
+                user = nextUser;
+            } else if (
+                prev.user.id !== nextUser.id ||
+                prev.user.email !== nextUser.email ||
+                prev.user.display_name !== nextUser.display_name ||
+                prev.user.plan_code !== nextUser.plan_code ||
+                Number(prev.user.credit_balance_cents || 0) !== Number(nextUser.credit_balance_cents || 0) ||
+                prev.user.status !== nextUser.status
+            ) {
+                user = nextUser;
+            }
+            set({ user, usage: me.usage, limits: me.limits, credits: me.credits });
         } catch {
             // ignore transient errors
         }

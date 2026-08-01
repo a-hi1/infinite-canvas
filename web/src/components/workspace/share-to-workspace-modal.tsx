@@ -13,6 +13,9 @@ import { useAuthStore } from "@/stores/use-auth-store";
 import { getImageBlob } from "@/services/image-storage";
 import { getMediaBlob } from "@/services/file-storage";
 import type { Asset } from "@/stores/use-asset-store";
+import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
+import { assetTitleFromPrompt } from "@/lib/asset-display";
+import { resolveCategoryOrSuggest, suggestAssetCategory } from "@/lib/asset-category";
 
 export type ShareDraft = {
     kind: string;
@@ -70,6 +73,24 @@ async function resolveBlob(draft: ShareDraft): Promise<Blob | null> {
         }
     }
     return null;
+}
+
+/** Infer category when draft lacks one (share paths often omit it). */
+function resolveShareCategory(draft: ShareDraft): string | undefined {
+    return resolveCategoryOrSuggest(draft.category, {
+        title: draft.title,
+        tags: draft.tags,
+        note: draft.note,
+        content: draft.textContent,
+        prompt: draft.prompt,
+        fileName: draft.filename,
+        kind:
+            draft.kind === WORKSPACE_ITEM_KIND.ASSET_TEXT
+                ? "text"
+                : draft.kind.includes("video")
+                  ? "video"
+                  : "image",
+    });
 }
 
 export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) {
@@ -131,7 +152,7 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
                         kind: draft.kind,
                         title: draft.title,
                         note: draft.note,
-                        category: draft.category,
+                        category: resolveShareCategory(draft),
                         tags: draft.tags,
                         prompt: draft.prompt,
                         model: draft.model,
@@ -171,7 +192,7 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
             destroyOnHidden
         >
             <p className="mb-3 text-xs text-stone-500 dark:text-stone-400">
-                仅上传你选中的内容副本；不会自动同步全部本地资产。对方可预览/下载，并另存到自己的「我的资产」。
+                仅上传你选中的内容副本；不会自动同步全部本地资产。对方可预览/下载，并另存到自己的「我的资产」。无分类时会按标题/提示词自动推断分区，可在空间详情再改。
             </p>
             {loading ? (
                 <div className="flex justify-center py-8">
@@ -197,17 +218,28 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
 /** Build share drafts from personal assets. */
 export function draftsFromAssets(assets: Asset[]): ShareDraft[] {
     return assets.map((asset) => {
+        const prompt = typeof asset.metadata?.prompt === "string" ? asset.metadata.prompt : "";
+        const category =
+            resolveCategoryOrSuggest(asset.category, {
+                title: asset.title,
+                tags: asset.tags,
+                source: asset.source,
+                note: asset.note,
+                content: asset.kind === "text" ? asset.data.content : undefined,
+                prompt,
+                kind: asset.kind,
+            }) || undefined;
         if (asset.kind === "text") {
             return {
                 kind: WORKSPACE_ITEM_KIND.ASSET_TEXT,
                 title: asset.title,
                 note: asset.note,
-                category: asset.category,
+                category,
                 tags: asset.tags,
                 textContent: asset.data.content,
                 sourceType: WORKSPACE_ITEM_SOURCE.ASSET,
                 sourceRef: asset.id,
-                prompt: typeof asset.metadata?.prompt === "string" ? asset.metadata.prompt : "",
+                prompt,
             };
         }
         if (asset.kind === "video") {
@@ -215,7 +247,7 @@ export function draftsFromAssets(assets: Asset[]): ShareDraft[] {
                 kind: WORKSPACE_ITEM_KIND.ASSET_VIDEO,
                 title: asset.title,
                 note: asset.note,
-                category: asset.category,
+                category,
                 tags: asset.tags,
                 storageKey: asset.data.storageKey,
                 mediaUrl: asset.data.url,
@@ -225,7 +257,7 @@ export function draftsFromAssets(assets: Asset[]): ShareDraft[] {
                 mime: asset.data.mimeType,
                 sourceType: WORKSPACE_ITEM_SOURCE.ASSET,
                 sourceRef: asset.id,
-                prompt: typeof asset.metadata?.prompt === "string" ? asset.metadata.prompt : "",
+                prompt,
                 filename: `${asset.title || "video"}.mp4`,
             };
         }
@@ -233,7 +265,7 @@ export function draftsFromAssets(assets: Asset[]): ShareDraft[] {
             kind: WORKSPACE_ITEM_KIND.ASSET_IMAGE,
             title: asset.title,
             note: asset.note,
-            category: asset.category,
+            category,
             tags: asset.tags,
             storageKey: asset.data.storageKey,
             mediaUrl: asset.data.dataUrl,
@@ -243,8 +275,91 @@ export function draftsFromAssets(assets: Asset[]): ShareDraft[] {
             mime: asset.data.mimeType,
             sourceType: WORKSPACE_ITEM_SOURCE.ASSET,
             sourceRef: asset.id,
-            prompt: typeof asset.metadata?.prompt === "string" ? asset.metadata.prompt : "",
+            prompt,
             filename: `${asset.title || "image"}.png`,
         };
     });
+}
+
+/** Whether a canvas node can be published to a workspace (has shareable content). */
+export function isCanvasNodeShareable(node: CanvasNodeData) {
+    if (node.type === CanvasNodeType.Text) return Boolean(node.metadata?.content?.trim());
+    if (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Video) {
+        return Boolean(node.metadata?.content || node.metadata?.storageKey);
+    }
+    return false;
+}
+
+/** Build workspace share drafts from canvas nodes (storyboard → team). Skips empty/config/audio. */
+export function draftsFromCanvasNodes(nodes: CanvasNodeData[], projectId?: string): ShareDraft[] {
+    const drafts: ShareDraft[] = [];
+    for (const node of nodes) {
+        if (!isCanvasNodeShareable(node)) continue;
+        const prompt = node.metadata?.prompt?.trim() || "";
+        const model = node.metadata?.model || "";
+        const sourceRef = projectId ? `canvas:${projectId}:${node.id}` : `canvas:${node.id}`;
+        if (node.type === CanvasNodeType.Text) {
+            const content = node.metadata?.content?.trim() || "";
+            drafts.push({
+                kind: WORKSPACE_ITEM_KIND.ASSET_TEXT,
+                title: assetTitleFromPrompt(prompt || content, node.title || "画布文本"),
+                textContent: content,
+                prompt,
+                model,
+                category: suggestAssetCategory({
+                    title: node.title,
+                    content,
+                    prompt,
+                    kind: "text",
+                }),
+                sourceType: WORKSPACE_ITEM_SOURCE.CANVAS,
+                sourceRef,
+            });
+            continue;
+        }
+        if (node.type === CanvasNodeType.Video) {
+            drafts.push({
+                kind: WORKSPACE_ITEM_KIND.GEN_VIDEO,
+                title: assetTitleFromPrompt(prompt, node.title || "画布视频"),
+                storageKey: node.metadata?.storageKey,
+                mediaUrl: node.metadata?.content,
+                width: node.metadata?.naturalWidth || node.width,
+                height: node.metadata?.naturalHeight || node.height,
+                bytes: node.metadata?.bytes,
+                mime: node.metadata?.mimeType || "video/mp4",
+                prompt,
+                model,
+                category: suggestAssetCategory({
+                    title: node.title,
+                    prompt,
+                    kind: "video",
+                }),
+                sourceType: WORKSPACE_ITEM_SOURCE.CANVAS,
+                sourceRef,
+                filename: `${node.title || "canvas-video"}.mp4`,
+            });
+            continue;
+        }
+        drafts.push({
+            kind: WORKSPACE_ITEM_KIND.GEN_IMAGE,
+            title: assetTitleFromPrompt(prompt, node.title || "画布图片"),
+            storageKey: node.metadata?.storageKey,
+            mediaUrl: node.metadata?.content,
+            width: node.metadata?.naturalWidth || node.width,
+            height: node.metadata?.naturalHeight || node.height,
+            bytes: node.metadata?.bytes,
+            mime: node.metadata?.mimeType || "image/png",
+            prompt,
+            model,
+            category: suggestAssetCategory({
+                title: node.title,
+                prompt,
+                kind: "image",
+            }),
+            sourceType: WORKSPACE_ITEM_SOURCE.CANVAS,
+            sourceRef,
+            filename: `${node.title || "canvas-image"}.png`,
+        });
+    }
+    return drafts;
 }

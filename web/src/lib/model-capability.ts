@@ -248,25 +248,13 @@ export function resolveVideoCapability(config: AiConfig): VideoCapabilityProfile
             card: {
                 title: label,
                 fields: [
-                    { label: "工作模式", value: "文生 / 单图·多图 generation；单条参考视频 edits" },
-                    {
-                        label: "输入规格",
-                        value: "提示词；参考图最多 7 张（禁止静默只发第一张）；参考视频 1 条约 1–15s、建议≤40MB",
-                    },
-                    {
-                        label: "输出规格",
-                        value: "比例 16:9 / 9:16 / 1:1 / 4:3 / 3:4 · 清晰度 480/720/1080p · 时长 1–15s",
-                    },
-                    {
-                        label: "返回格式",
-                        value: "JSON 任务 + 轮询（codex2api: /videos/generations；内网 New API: /video/generations）",
-                    },
-                    {
-                        label: "不支持",
-                        value: "图+视频混用；多条参考视频；中转若未真正交付所选清晰度会在结果上提示实际分辨率（不虚标）",
-                    },
+                    { label: "工作模式", value: "文生 · 多图 generation · 单视频 edits" },
+                    { label: "输入规格", value: "参考图 ≤7 张 · 参考视频 1 条（1–15s / 建议≤40MB）" },
+                    { label: "输出规格", value: "比例 5 种 · 480/720/1080p · 1–15s" },
+                    { label: "返回格式", value: "异步任务 + 轮询" },
+                    { label: "不支持", value: "图+视频混用 · 多条参考视频" },
                 ],
-                note: "选中的清晰度/比例/秒数会原样写入首个请求（含单图图生）。仅创建失败才降档或去字段；不会用无分辨率 body 抢先成功。若结果仍明显低于所选，会提示实际宽高。",
+                note: "规格原样进首个请求；失败才降档。结果偏低会提示，不虚标。",
             },
         };
     }
@@ -296,35 +284,27 @@ export function resolveVideoCapability(config: AiConfig): VideoCapabilityProfile
                 fields: [
                     {
                         label: "工作模式",
-                        value: sora
-                            ? "文生优先 JSON {model,prompt,seconds}；图生 1 张首帧"
-                            : "文生 JSON 优先；图生最多 3 张参考（优先 veo-*-i2v）",
+                        value: sora ? "文生 · 1 张首帧图生" : `文生 · 图生最多 ${refLimit} 张`,
                     },
                     {
                         label: "输入规格",
-                        value: sora
-                            ? "提示词；图生仅 1 张本地可读首帧（multipart input_reference 或 JSON images）"
-                            : `提示词；图生最多 ${refLimit} 张本地可读参考图（JSON images/reference_images）`,
+                        value: sora ? "本地可读首帧 1 张" : `本地可读参考图 ≤${refLimit} 张`,
                     },
                     {
                         label: "输出规格",
                         value: sora
                             ? isSora2ProModel(modelName)
-                                ? "秒数 4/8/12 · 尺寸 1280x720 / 720x1280 / 1792x1024 / 1024x1792"
-                                : "秒数 4/8/12 · 尺寸仅 1280x720 / 720x1280（sora-2 硬限制）"
-                            : "秒数 4/6/8 · 尺寸 1280x720 / 720x1280 / 1024x1024",
+                                ? "4/8/12s · 720p 横竖 + 高清尺寸"
+                                : "4/8/12s · 仅 1280×720 / 720×1280"
+                            : "4/6/8s · 横/竖/方",
                     },
-                    {
-                        label: "返回格式",
-                        value: "创建优先 /video/generations，再 /videos；嵌套 status/video_url 解包；轮询约 15 分钟",
-                    },
+                    { label: "返回格式", value: "异步任务 + 轮询" },
                     {
                         label: "不支持",
-                        value: sora
-                            ? "多参考图、参考视频/音频、resolution_name/preset；部分中转 VIDEO 端点只认 azure-sora（自动回退）"
-                            : "参考视频/音频、resolution_name/preset；远程 imgen CORS 不可读图",
+                        value: sora ? "多参考图 · 参考视频/音频" : "参考视频/音频 · 远程不可读图",
                     },
                 ],
+                note: sora ? "部分中转只认 azure-sora，会自动回退。" : "优先本地可读参考图。",
             },
         };
     }

@@ -11,24 +11,30 @@ import { SelectCheckbox } from "@/components/ui/select-checkbox";
 import { ShareToWorkspaceModal, type ShareDraft } from "@/components/workspace/share-to-workspace-modal";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
+import { VideoModeGuideBanner } from "@/components/video-mode-guide-banner";
 import { VideoSettingsPanel, normalizeVideoResolutionValue, videoSettingsSummary } from "@/components/video-settings-panel";
-import { agnesVideoModeHint, agnesVideoRequestError, isAgnesVideoConfig } from "@/lib/agnes-video";
+import { agnesVideoModeGuide, agnesVideoRequestError, isAgnesVideoConfig } from "@/lib/agnes-video";
 import { suggestAssetCategory } from "@/lib/asset-category";
 import { assetTitleFromPrompt } from "@/lib/asset-display";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS, grokResolutionShortfallMessage, grokVideoModeHint, isGrokVideoConfig, normalizeGrokResolution } from "@/lib/grok-video";
+import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS, grokResolutionShortfallMessage, grokVideoModeGuide, isGrokVideoConfig, normalizeGrokResolution } from "@/lib/grok-video";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import {
     isSoraOrVeoVideoConfig,
     isSoraVideoConfig,
     isVeoVideoConfig,
-    soraVeoModeHint,
+    soraVeoModeGuide,
     soraVeoReferenceImageLimit,
     soraVeoReferenceImageMaxBytes,
 } from "@/lib/openai-compatible-video";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
 import { clampVideoConfigToCapability } from "@/lib/model-capability";
 import { boolConfig, isSeedanceVideoConfig, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
+import {
+    GENERIC_OPENAI_VIDEO_MODE_GUIDE,
+    SEEDANCE_VIDEO_MODE_GUIDE,
+    type VideoModeGuide,
+} from "@/lib/video-mode-guide";
 import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { createVideoGenerationTask, pollVideoGenerationTask, rewritePrivateVideoUrlToLanRelay, storeGeneratedVideo, videoPollBudget, type VideoGenerationTask } from "@/services/api/video";
@@ -201,15 +207,15 @@ export default function VideoPage() {
                 : "OpenAI /videos";
     const videoUsesCustomScript = Boolean(resolveModelScript(effectiveConfig, model));
     const videoReadinessWarning = getVideoReadinessWarning(videoRequestConfig, model);
-    const referenceModeHint = agnesMode
-        ? agnesVideoModeHint
+    const referenceModeGuide: VideoModeGuide = agnesMode
+        ? agnesVideoModeGuide
         : seedanceMode
-          ? "当前模型支持参考图、参考视频和参考音频"
+          ? SEEDANCE_VIDEO_MODE_GUIDE
           : grokMode
-            ? grokVideoModeHint
+            ? grokVideoModeGuide
             : soraVeoMode
-              ? soraVeoModeHint
-              : "当前 OpenAI 格式视频接口仅支持参考图；参考视频/音频需要 Seedance 2.0 / 火山 Agent Plan";
+              ? soraVeoModeGuide
+              : GENERIC_OPENAI_VIDEO_MODE_GUIDE;
     const canGenerate = Boolean(prompt.trim());
 
     useEffect(() => {
@@ -876,9 +882,7 @@ export default function VideoPage() {
                             </div>
                         </div>
 
-                        <div className={`mt-4 rounded-lg border px-3 py-2 text-xs leading-5 ${videoReadinessWarning ? "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100" : "border-stone-200 bg-stone-50 text-stone-500 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-400"}`}>
-                            {videoReadinessWarning || referenceModeHint}
-                        </div>
+                        <VideoModeGuideBanner guide={referenceModeGuide} warning={videoReadinessWarning} />
 
                         <div className="mt-6 space-y-5">
                             <div>

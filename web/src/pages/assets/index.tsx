@@ -921,7 +921,17 @@ export default function AssetsPage() {
                 />
             </Modal>
 
-            <AssetDrawer asset={previewAsset} onClose={() => setPreviewAsset(null)} onCopy={copyAssetText} onDownload={downloadImage} />
+            <AssetDrawer
+                asset={previewAsset}
+                onClose={() => setPreviewAsset(null)}
+                onCopy={copyAssetText}
+                onDownload={downloadImage}
+                onRename={(id, title) => {
+                    updateAsset(id, { title });
+                    setPreviewAsset((prev) => (prev && prev.id === id ? ({ ...prev, title } as Asset) : prev));
+                    message.success("名称已更新");
+                }}
+            />
 
             <input
                 ref={assetInputRef}
@@ -1118,10 +1128,41 @@ function AssetCard({
     );
 }
 
-function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | null; onClose: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void }) {
+function AssetDrawer({
+    asset,
+    onClose,
+    onCopy,
+    onDownload,
+    onRename,
+}: {
+    asset: Asset | null;
+    onClose: () => void;
+    onCopy: (asset: Asset) => void;
+    onDownload: (asset: Asset) => void;
+    onRename: (id: string, title: string) => void;
+}) {
+    const { message } = App.useApp();
+    const [titleDraft, setTitleDraft] = useState("");
     const cover = asset ? asset.coverUrl || (asset.kind === "image" ? asset.data.dataUrl : "") : "";
     const generationPrompt = asset ? assetGenerationPrompt(asset) : "";
     const displayTitle = asset ? assetDisplayTitle(asset) : "";
+
+    useEffect(() => {
+        setTitleDraft(asset?.title || "");
+    }, [asset?.id, asset?.title]);
+
+    const saveTitle = () => {
+        if (!asset) return;
+        const next = titleDraft.trim();
+        if (!next) {
+            message.warning("名称不能为空");
+            setTitleDraft(asset.title || "");
+            return;
+        }
+        if (next === (asset.title || "")) return;
+        onRename(asset.id, next);
+    };
+
     return (
         <Drawer title="资产详情" open={Boolean(asset)} size="large" onClose={onClose}>
             {asset ? (
@@ -1143,13 +1184,27 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                         </Tag>
                         {asset.source ? <Tag className="m-0">{asset.source}</Tag> : null}
                     </div>
-                    <div>
-                        <Typography.Title level={4} className="!mb-2">
-                            {displayTitle}
-                        </Typography.Title>
+                    <div className="space-y-2">
+                        <Typography.Text type="secondary" className="block text-xs">
+                            名称
+                        </Typography.Text>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <Input
+                                className="min-w-0 flex-1"
+                                value={titleDraft}
+                                maxLength={120}
+                                placeholder="方便辨认的名称"
+                                onChange={(e) => setTitleDraft(e.target.value)}
+                                onPressEnter={saveTitle}
+                                onBlur={saveTitle}
+                            />
+                            <Button size="small" disabled={titleDraft.trim() === (asset.title || "")} onClick={saveTitle}>
+                                保存名称
+                            </Button>
+                        </div>
                         {displayTitle !== asset.title ? (
-                            <Typography.Text type="secondary" className="mb-2 block text-xs">
-                                原标题：{asset.title}
+                            <Typography.Text type="secondary" className="block text-xs">
+                                展示摘要：{displayTitle}
                             </Typography.Text>
                         ) : null}
                         <Space size={[4, 4]} wrap>

@@ -4,7 +4,7 @@ import { Brush, Camera, Copy, FileText, Grid2x2, Lock, LockOpen, Maximize2, Scis
 import type { CanvasNodeData } from "@/types/canvas";
 
 export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "crop" | "split" | "upscale" | "superResolve" | "angle" | "view";
-export type ImageQuickToolId = "info" | "delete" | "saveAsset" | "download" | "edit" | ImageNodeActionToolId;
+export type ImageQuickToolId = "info" | "delete" | "saveAsset" | "shareWorkspace" | "download" | "edit" | ImageNodeActionToolId;
 
 export type ImageToolHandlers = {
     onUpload: (node: CanvasNodeData) => void;
@@ -38,7 +38,7 @@ export type ImageQuickToolsConfig = {
 
 export const IMAGE_QUICK_TOOLS_STORAGE_KEY = "canvas-image-quick-tools-v6";
 
-const defaultBaseToolIds: ImageQuickToolId[] = ["info", "delete", "saveAsset", "download", "edit"];
+const defaultBaseToolIds: ImageQuickToolId[] = ["info", "delete", "saveAsset", "shareWorkspace", "download", "edit"];
 
 export const imageToolDefinitions: ImageToolDefinition[] = [
     {

@@ -17,6 +17,8 @@ export default function WorkspaceListPage() {
     const { message } = App.useApp();
     const navigate = useNavigate();
     const user = useAuthStore((s) => s.user);
+    // Depend on stable identity only — account popover refreshUsage must not reload the list.
+    const userId = user?.id || "";
     const [authOpen, setAuthOpen] = useState(false);
     const [loading, setLoading] = useState(false);
     const [items, setItems] = useState<WorkspaceSummary[]>([]);
@@ -27,7 +29,7 @@ export default function WorkspaceListPage() {
     const [busy, setBusy] = useState(false);
 
     const load = useCallback(async () => {
-        if (!user) {
+        if (!userId) {
             setItems([]);
             return;
         }
@@ -40,7 +42,7 @@ export default function WorkspaceListPage() {
         } finally {
             setLoading(false);
         }
-    }, [message, user]);
+    }, [message, userId]);
 
     useEffect(() => {
         void load();

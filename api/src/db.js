@@ -11,6 +11,7 @@ import {
         JOB_SOURCE,
         SAVE_STATUS,
         USER_STATUS,
+        WORKSPACE_ITEM_RESOLUTION,
         WORKSPACE_ROLE,
         WORKSPACE_STATUS,
         WORKSPACE_TASK_STATUS,
@@ -659,6 +660,36 @@ export function createDb(dataDir) {
             return member;
         },
 
+        /**
+         * Owner kick: remove membership row only. Does not delete shared items.
+         * Optionally scrub kicked user from task assignees in the same workspace.
+         */
+        removeWorkspaceMember(workspaceId, userId) {
+            const idx = state.workspace_members.findIndex(
+                (m) => m.workspace_id === workspaceId && m.user_id === userId,
+            );
+            if (idx < 0) return null;
+            const [removed] = state.workspace_members.splice(idx, 1);
+            // Best-effort: drop kicked user from multi-assignee task lists.
+            for (const task of state.workspace_tasks) {
+                if (task.workspace_id !== workspaceId || task.deleted_at) continue;
+                const ids = normalizeAssigneeUserIds(
+                    Array.isArray(task.assignee_user_ids) && task.assignee_user_ids.length
+                        ? task.assignee_user_ids
+                        : task.assignee_user_id,
+                );
+                if (!ids.includes(userId)) continue;
+                const next = ids.filter((id) => id !== userId);
+                task.assignee_user_ids = next;
+                task.assignee_user_id = next[0] || null;
+                task.updated_at = now();
+            }
+            const ws = this.findWorkspaceById(workspaceId);
+            if (ws) ws.updated_at = now();
+            schedulePersist();
+            return removed;
+        },
+
         resetWorkspaceInviteCode(workspaceId, ownerId, inviteCode) {
             const ws = this.findWorkspaceById(workspaceId);
             if (!ws || ws.owner_id !== ownerId) return null;
@@ -696,6 +727,12 @@ export function createDb(dataDir) {
                 mime: String(record.mime || "").slice(0, 120),
                 source_type: String(record.sourceType || "").slice(0, 40),
                 source_ref: String(record.sourceRef || "").slice(0, 200),
+                // Optional revision metadata (material wall hygiene; no blob versions).
+                version: String(record.version || "").slice(0, 40),
+                replaces_item_id: String(record.replacesItemId || record.replaces_item_id || "").slice(0, 80),
+                is_final: Boolean(record.isFinal ?? record.is_final),
+                // Review reactions (用/弃/改); per-user one vote, array on item.
+                reactions: [],
                 created_by: record.createdBy,
                 created_at: now(),
                 updated_at: now(),
@@ -708,7 +745,7 @@ export function createDb(dataDir) {
             return item;
         },
 
-        listWorkspaceItems(workspaceId, { kind, page = 1, pageSize = 50 } = {}) {
+        listWorkspaceItems(workspaceId, { kind, category, page = 1, pageSize = 50 } = {}) {
             let rows = state.workspace_items.filter((i) => i.workspace_id === workspaceId && !i.deleted_at);
             if (kind) {
                 const kinds = String(kind)
@@ -717,6 +754,19 @@ export function createDb(dataDir) {
                     .filter(Boolean);
                 if (kinds.length) rows = rows.filter((i) => kinds.includes(i.kind));
             }
+            if (category) {
+                const categories = String(category)
+                    .split(",")
+                    .map((c) => c.trim())
+                    .filter(Boolean);
+                if (categories.length) {
+                    rows = rows.filter((i) => {
+                        const value = String(i.category || "").trim();
+                        // "__uncategorized__" matches empty category (client taxonomy sentinel).
+                        return categories.some((c) => (c === "__uncategorized__" ? !value : value === c));
+                    });
+                }
+            }
             const total = rows.length;
             const start = Math.max(0, (page - 1) * pageSize);
             return { items: rows.slice(start, start + pageSize), total, page, page_size: pageSize };
@@ -724,6 +774,85 @@ export function createDb(dataDir) {
 
         findWorkspaceItem(itemId, workspaceId) {
             return state.workspace_items.find((i) => i.id === itemId && i.workspace_id === workspaceId && !i.deleted_at) || null;
+        },
+
+        /**
+         * Metadata-only patch for workspace items (no media re-upload).
+         * Supports category/tags/title/note + version / replaces / is_final.
+         */
+        updateWorkspaceItem(itemId, workspaceId, patch = {}) {
+            const item = this.findWorkspaceItem(itemId, workspaceId);
+            if (!item) return null;
+            if (patch.title !== undefined) item.title = String(patch.title || "").slice(0, 200);
+            if (patch.note !== undefined) item.note = String(patch.note || "").slice(0, 1000);
+            if (patch.category !== undefined) item.category = String(patch.category || "").slice(0, 80);
+            if (patch.tags !== undefined) {
+                item.tags = Array.isArray(patch.tags)
+                    ? patch.tags.map((t) => String(t).slice(0, 40)).slice(0, 20)
+                    : [];
+            }
+            if (patch.version !== undefined) item.version = String(patch.version || "").slice(0, 40);
+            if (patch.replacesItemId !== undefined || patch.replaces_item_id !== undefined) {
+                item.replaces_item_id = String(patch.replacesItemId ?? patch.replaces_item_id ?? "").slice(0, 80);
+            }
+            if (patch.isFinal !== undefined || patch.is_final !== undefined) {
+                item.is_final = Boolean(patch.isFinal ?? patch.is_final);
+            }
+            // Ensure older rows still have the optional keys when first patched.
+            if (item.version == null) item.version = "";
+            if (item.replaces_item_id == null) item.replaces_item_id = "";
+            if (item.is_final == null) item.is_final = false;
+            if (!Array.isArray(item.reactions)) item.reactions = [];
+            item.updated_at = now();
+            const ws = this.findWorkspaceById(workspaceId);
+            if (ws) ws.updated_at = now();
+            schedulePersist();
+            return item;
+        },
+
+        /**
+         * Upsert caller's own reaction (use/discard/revise + optional comment).
+         * One vote per user_id; does not require item ownership.
+         */
+        upsertWorkspaceItemReaction(itemId, workspaceId, { userId, resolution, comment = "" } = {}) {
+            const item = this.findWorkspaceItem(itemId, workspaceId);
+            if (!item) return null;
+            const uid = String(userId || "").trim();
+            if (!uid) return null;
+            const res = String(resolution || "").trim();
+            if (!Object.values(WORKSPACE_ITEM_RESOLUTION).includes(res)) return null;
+            if (!Array.isArray(item.reactions)) item.reactions = [];
+            const entry = {
+                user_id: uid,
+                resolution: res,
+                comment: String(comment || "").slice(0, 200),
+                updated_at: now(),
+            };
+            const idx = item.reactions.findIndex((r) => r && r.user_id === uid);
+            if (idx >= 0) item.reactions[idx] = entry;
+            else item.reactions.push(entry);
+            // Cap by member count soft upper bound.
+            if (item.reactions.length > 50) item.reactions = item.reactions.slice(-50);
+            item.updated_at = now();
+            const ws = this.findWorkspaceById(workspaceId);
+            if (ws) ws.updated_at = now();
+            schedulePersist();
+            return item;
+        },
+
+        /** Clear caller's own reaction (or owner force-clear by userId). */
+        clearWorkspaceItemReaction(itemId, workspaceId, userId) {
+            const item = this.findWorkspaceItem(itemId, workspaceId);
+            if (!item) return null;
+            const uid = String(userId || "").trim();
+            if (!uid) return null;
+            if (!Array.isArray(item.reactions)) item.reactions = [];
+            item.reactions = item.reactions.filter((r) => r && r.user_id !== uid);
+            item.updated_at = now();
+            const ws = this.findWorkspaceById(workspaceId);
+            if (ws) ws.updated_at = now();
+            schedulePersist();
+            return item;
         },
 
         softDeleteWorkspaceItem(itemId, workspaceId) {
@@ -993,6 +1122,10 @@ export function publicWorkspaceItem(item, extra = {}) {
         mime: item.mime || "",
         source_type: item.source_type || "",
         source_ref: item.source_ref || "",
+        version: item.version || "",
+        replaces_item_id: item.replaces_item_id || "",
+        is_final: Boolean(item.is_final),
+        reactions: normalizeWorkspaceItemReactions(item.reactions),
         created_by: item.created_by,
         created_by_name: extra.created_by_name || "",
         created_by_email: extra.created_by_email || "",
@@ -1001,6 +1134,32 @@ export function publicWorkspaceItem(item, extra = {}) {
         file_url: item.file_id ? `/api/workspace-files/${item.file_id}` : null,
         ...extra,
     };
+}
+
+/** Normalize reaction rows for public API (max 50, strip junk). */
+export function normalizeWorkspaceItemReactions(input) {
+    if (!Array.isArray(input)) return [];
+    const allowed = new Set(Object.values(WORKSPACE_ITEM_RESOLUTION));
+    const out = [];
+    const seen = new Set();
+    for (const raw of input) {
+        if (!raw || typeof raw !== "object") continue;
+        const userId = String(raw.user_id || raw.userId || "").trim();
+        if (!userId || seen.has(userId)) continue;
+        const resolution = String(raw.resolution || "").trim();
+        if (!allowed.has(resolution)) continue;
+        seen.add(userId);
+        out.push({
+            user_id: userId,
+            resolution,
+            comment: String(raw.comment || "").slice(0, 200),
+            updated_at: raw.updated_at || raw.updatedAt || "",
+            display_name: raw.display_name || raw.displayName || undefined,
+            email: raw.email || undefined,
+        });
+        if (out.length >= 50) break;
+    }
+    return out;
 }
 
 /** Normalize single id / id[] into unique non-empty string ids (max 20). */

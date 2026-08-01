@@ -2,31 +2,48 @@ import { App, Button, Empty, Image, Input, Modal, Select, Spin, Tabs, Tag, Typog
 import type { UploadProps } from "antd";
 import {
     ArrowLeft,
+    BadgeCheck,
     Copy,
     Download,
     ExternalLink,
     FileUp,
+    GripVertical,
     Images,
     Paperclip,
+    Pencil,
     RefreshCw,
     Share2,
     Trash2,
     Upload as UploadIcon,
+    UserMinus,
     Video,
+    X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { saveAs } from "file-saver";
 
+import {
+    ALL_CATEGORIES_VALUE,
+    assetCategoryLabel,
+    buildAssetCategoryFilterOptions,
+    collectAssetCategories,
+    matchesAssetCategoryFilter,
+    resolveAssetCategoryForSave,
+    standardAssetCategoryOptions,
+    suggestAssetCategory,
+} from "@/lib/asset-category";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useAuthStore } from "@/stores/use-auth-store";
 import { useAssetStore } from "@/stores/use-asset-store";
 import {
     WORKSPACE_ITEM_KIND,
+    WORKSPACE_ITEM_RESOLUTION,
     WORKSPACE_ITEM_SOURCE,
     WORKSPACE_ROLE,
     WORKSPACE_TASK_STATUS,
     archiveWorkspace,
+    clearWorkspaceItemReaction,
     createWorkspaceItem,
     createWorkspaceTask,
     deleteWorkspaceItem,
@@ -37,11 +54,16 @@ import {
     listWorkspaceItems,
     listWorkspaceTasks,
     memberDisplayName,
+    reactionCounts,
+    removeWorkspaceMember,
     resetWorkspaceInvite,
+    resolutionLabel,
     sourceTypeLabel,
     taskAssigneeIds,
     taskDeliverables,
+    updateWorkspaceItem,
     updateWorkspaceTask,
+    upsertWorkspaceItemReaction,
     workspaceFileObjectUrl,
     type WorkspaceItem,
     type WorkspaceMember,
@@ -107,6 +129,16 @@ function isAssetWallKind(kind: string) {
     return kind.startsWith("asset_") || kind === WORKSPACE_ITEM_KIND.ASSET_TEXT;
 }
 
+/** Keep finals easy to scan: finals first, then newest. */
+function sortFinalsFirst(list: WorkspaceItem[]) {
+    return [...list].sort((a, b) => {
+        const af = a.is_final ? 1 : 0;
+        const bf = b.is_final ? 1 : 0;
+        if (af !== bf) return bf - af;
+        return String(b.created_at || "").localeCompare(String(a.created_at || ""));
+    });
+}
+
 function formatTime(value?: string) {
     if (!value) return "";
     try {
@@ -135,6 +167,8 @@ export default function WorkspaceDetailPage() {
     const { message, modal } = App.useApp();
     const copyText = useCopyText();
     const user = useAuthStore((s) => s.user);
+    // Depend on stable identity only — refreshUsage may replace usage/credits without changing login.
+    const userId = user?.id || "";
     const addAsset = useAssetStore((s) => s.addAsset);
     const [loading, setLoading] = useState(true);
     const [workspace, setWorkspace] = useState<WorkspaceSummary | null>(null);
@@ -148,8 +182,15 @@ export default function WorkspaceDetailPage() {
     const [taskBusy, setTaskBusy] = useState(false);
     const [uploadBusy, setUploadBusy] = useState(false);
     const [detailItem, setDetailItem] = useState<WorkspaceItem | null>(null);
+    const [assetCategoryFilter, setAssetCategoryFilter] = useState(ALL_CATEGORIES_VALUE);
+    const [genCategoryFilter, setGenCategoryFilter] = useState(ALL_CATEGORIES_VALUE);
+    /** Wall view focus: all | finals only — keeps material wall scannable. */
+    const [assetFinalOnly, setAssetFinalOnly] = useState(false);
+    const [genFinalOnly, setGenFinalOnly] = useState(false);
+    const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
+    const [dragOverStatus, setDragOverStatus] = useState<string | null>(null);
 
-    const isOwner = workspace?.role === WORKSPACE_ROLE.OWNER || workspace?.owner_id === user?.id;
+    const isOwner = workspace?.role === WORKSPACE_ROLE.OWNER || workspace?.owner_id === userId;
     const memberOptions = useMemo(
         () =>
             members.map((m) => ({
@@ -165,7 +206,7 @@ export default function WorkspaceDetailPage() {
     }, [members]);
 
     const load = useCallback(async () => {
-        if (!user || !id) return;
+        if (!userId || !id) return;
         setLoading(true);
         try {
             const detail = await getWorkspace(id);
@@ -180,7 +221,7 @@ export default function WorkspaceDetailPage() {
         } finally {
             setLoading(false);
         }
-    }, [id, message, navigate, user]);
+    }, [id, message, navigate, userId]);
 
     useEffect(() => {
         void load();
@@ -188,6 +229,42 @@ export default function WorkspaceDetailPage() {
 
     const assetItems = useMemo(() => items.filter((i) => isAssetWallKind(i.kind)), [items]);
     const genItems = useMemo(() => items.filter((i) => i.kind.startsWith("gen_")), [items]);
+    const assetFinalCount = useMemo(() => assetItems.filter((item) => item.is_final).length, [assetItems]);
+    const genFinalCount = useMemo(() => genItems.filter((item) => item.is_final).length, [genItems]);
+    const filteredAssetItems = useMemo(
+        () =>
+            sortFinalsFirst(
+                assetItems.filter((item) => {
+                    if (assetFinalOnly && !item.is_final) return false;
+                    return matchesAssetCategoryFilter(item.category, assetCategoryFilter);
+                }),
+            ),
+        [assetItems, assetCategoryFilter, assetFinalOnly],
+    );
+    const filteredGenItems = useMemo(
+        () =>
+            sortFinalsFirst(
+                genItems.filter((item) => {
+                    if (genFinalOnly && !item.is_final) return false;
+                    return matchesAssetCategoryFilter(item.category, genCategoryFilter);
+                }),
+            ),
+        [genItems, genCategoryFilter, genFinalOnly],
+    );
+    const assetCategoryOptions = useMemo(() => buildAssetCategoryFilterOptions(assetItems), [assetItems]);
+    const genCategoryOptions = useMemo(() => buildAssetCategoryFilterOptions(genItems), [genItems]);
+    /** Detail category select: standards + any categories already used in this workspace. */
+    const categoryEditOptions = useMemo(() => {
+        const names = collectAssetCategories(items);
+        const standard = standardAssetCategoryOptions().map((o) => o.value);
+        const merged = [...new Set([...standard, ...names])];
+        return [{ label: "未分类", value: "" }, ...merged.map((name) => ({ label: name, value: name }))];
+    }, [items]);
+    const itemTitleById = useMemo(() => {
+        const map = new Map<string, string>();
+        for (const item of items) map.set(item.id, item.title || item.id.slice(0, 8));
+        return map;
+    }, [items]);
 
     const handleResetInvite = () => {
         if (!workspace) return;
@@ -231,6 +308,112 @@ export default function WorkspaceDetailPage() {
                 message.success("已删除");
             },
         });
+    };
+
+    const handleKickMember = (member: WorkspaceMember) => {
+        if (!isOwner) return;
+        if (member.role === WORKSPACE_ROLE.OWNER || member.user_id === workspace?.owner_id) {
+            message.warning("不能移除空间所有者");
+            return;
+        }
+        modal.confirm({
+            title: "移除成员",
+            content: `确定将「${memberDisplayName(member)}」移出本空间？对方将无法再访问；已分享内容仍保留。`,
+            okText: "移除",
+            okButtonProps: { danger: true },
+            onOk: async () => {
+                await removeWorkspaceMember(id, member.user_id);
+                setMembers((list) => list.filter((m) => m.user_id !== member.user_id));
+                // Refresh tasks so assignee chips drop the kicked user.
+                try {
+                    const taskRes = await listWorkspaceTasks(id);
+                    setTasks(taskRes.items || []);
+                } catch {
+                    // non-blocking
+                }
+                message.success("已移除成员");
+            },
+        });
+    };
+
+    const applyItemPatch = (updated: WorkspaceItem) => {
+        setItems((list) => list.map((x) => (x.id === updated.id ? updated : x)));
+        setDetailItem((current) => (current?.id === updated.id ? updated : current));
+        // Best-effort: if another item lost is_final on the server, re-sync final flags from response only for this item;
+        // full reload would flash — clear siblings client-side when this one becomes final.
+        if (updated.is_final) {
+            setItems((list) =>
+                list.map((x) => {
+                    if (x.id === updated.id) return updated;
+                    if (!x.is_final) return x;
+                    const sameChain =
+                        x.replaces_item_id === updated.id ||
+                        updated.replaces_item_id === x.id ||
+                        (updated.replaces_item_id && x.replaces_item_id === updated.replaces_item_id) ||
+                        (updated.replaces_item_id && x.id === updated.replaces_item_id);
+                    return sameChain ? { ...x, is_final: false } : x;
+                }),
+            );
+        }
+    };
+
+    const handleUpdateItemMeta = async (
+        item: WorkspaceItem,
+        patch: { title?: string; category?: string; version?: string; replacesItemId?: string | null; isFinal?: boolean },
+    ) => {
+        try {
+            const updated = await updateWorkspaceItem(id, item.id, patch);
+            applyItemPatch(updated);
+            message.success("已更新");
+            return updated;
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "更新失败");
+            throw error;
+        }
+    };
+
+    /** Any member can cast 用/弃/改 on shared items. */
+    const handleUpsertReaction = async (item: WorkspaceItem, resolution: string, comment?: string) => {
+        try {
+            const updated = await upsertWorkspaceItemReaction(id, item.id, { resolution, comment });
+            applyItemPatch(updated);
+            message.success(`已标记「${resolutionLabel(resolution)}」`);
+            return updated;
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "决议保存失败");
+            throw error;
+        }
+    };
+
+    const handleClearReaction = async (item: WorkspaceItem, targetUserId?: string) => {
+        try {
+            const updated = await clearWorkspaceItemReaction(id, item.id, targetUserId);
+            applyItemPatch(updated);
+            message.success("已取消决议");
+            return updated;
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "取消失败");
+            throw error;
+        }
+    };
+
+    /** Drag task card onto another progress column (creator/owner only; same as status select). */
+    const handleTaskDrop = async (taskId: string, nextStatus: string) => {
+        const task = tasks.find((t) => t.id === taskId);
+        if (!task) return;
+        if (task.status === nextStatus) return;
+        const canEdit = task.created_by === userId || Boolean(isOwner);
+        if (!canEdit) {
+            message.warning("仅创建者或所有者可拖拽改进度");
+            return;
+        }
+        try {
+            const next = await updateWorkspaceTask(id, task.id, { status: nextStatus });
+            setTasks((list) => list.map((t) => (t.id === task.id ? next : t)));
+            message.success(`已移到${TASK_STATUS_META[nextStatus]?.label || nextStatus}`);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "更新进度失败");
+        }
     };
 
     const handleSaveToAssets = async (item: WorkspaceItem) => {
@@ -346,9 +529,16 @@ export default function WorkspaceDetailPage() {
                     continue;
                 }
                 try {
+                    const title = file.name.replace(/\.[^.]+$/, "") || file.name;
+                    const suggested = suggestAssetCategory({
+                        title,
+                        fileName: file.name,
+                        kind: isImage ? "image" : "video",
+                    });
                     const created = await createWorkspaceItem(id, {
                         kind: isImage ? WORKSPACE_ITEM_KIND.ASSET_IMAGE : WORKSPACE_ITEM_KIND.ASSET_VIDEO,
-                        title: file.name.replace(/\.[^.]+$/, "") || file.name,
+                        title,
+                        category: suggested,
                         sourceType: WORKSPACE_ITEM_SOURCE.LOCAL_UPLOAD,
                         mime: file.type,
                         bytes: file.size,
@@ -362,7 +552,23 @@ export default function WorkspaceDetailPage() {
                     message.error(error instanceof Error ? `${file.name}：${error.message}` : `${file.name} 上传失败`);
                 }
             }
-            if (ok) message.success(`已上传 ${ok} 个文件到素材墙${fail ? `，${fail} 个失败` : ""}`);
+            if (ok) {
+                const withCat = fileList.filter((f) => {
+                    const title = f.name.replace(/\.[^.]+$/, "") || f.name;
+                    return Boolean(
+                        suggestAssetCategory({
+                            title,
+                            fileName: f.name,
+                            kind: f.type.startsWith("video/") ? "video" : "image",
+                        }),
+                    );
+                }).length;
+                message.success(
+                    `已上传 ${ok} 个文件到素材墙${fail ? `，${fail} 个失败` : ""}${
+                        withCat ? `（其中 ${Math.min(withCat, ok)} 个已自动分类）` : "（可在详情手动设分类）"
+                    }`,
+                );
+            }
         } finally {
             setUploadBusy(false);
         }
@@ -483,28 +689,40 @@ export default function WorkspaceDetailPage() {
                     items={[
                         {
                             key: "assets",
-                            label: `素材墙 (${assetItems.length})`,
+                            label: `素材墙 (${assetItems.length}${assetFinalCount ? ` · 终稿 ${assetFinalCount}` : ""})`,
                             children: (
                                 <div className="space-y-3">
-                                    <div className="rounded-lg border border-dashed border-stone-300 bg-card/80 px-3 py-2 text-xs leading-5 text-stone-600 shadow-sm dark:border-stone-700 dark:text-stone-300">
-                                        <strong className="font-medium text-stone-800 dark:text-stone-100">素材墙</strong>
-                                        ：团队可复用的素材库内容。可来自「我的资产」分享，或本页「上传本地文件」（jpg/png/webp/mp4/webm）。点击卡片可看详情与预览。
-                                        <div className="mt-2 flex flex-wrap gap-2">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <div className="text-xs text-stone-500">
+                                            团队可复用素材 · 本地上传或从「我的资产」分享
+                                        </div>
+                                        <div className="flex flex-wrap gap-2">
                                             <Button size="small" icon={<Images className="size-3.5" />} onClick={() => navigate("/assets")}>
-                                                去我的资产选择分享
+                                                从资产分享
                                             </Button>
                                             <Upload {...uploadProps}>
-                                                <Button size="small" icon={<FileUp className="size-3.5" />} loading={uploadBusy}>
-                                                    上传到素材墙
+                                                <Button size="small" type="primary" icon={<FileUp className="size-3.5" />} loading={uploadBusy}>
+                                                    上传
                                                 </Button>
                                             </Upload>
                                         </div>
                                     </div>
+                                    <WallFilterBar
+                                        categoryOptions={assetCategoryOptions}
+                                        categoryValue={assetCategoryFilter}
+                                        onCategoryChange={setAssetCategoryFilter}
+                                        finalOnly={assetFinalOnly}
+                                        onFinalOnlyChange={setAssetFinalOnly}
+                                        finalCount={assetFinalCount}
+                                        shownCount={filteredAssetItems.length}
+                                        totalCount={assetItems.length}
+                                    />
                                     <ItemGrid
-                                        items={assetItems}
-                                        currentUserId={user.id}
+                                        items={filteredAssetItems}
+                                        currentUserId={userId}
                                         isOwner={Boolean(isOwner)}
-                                        emptyHint="素材墙"
+                                        emptyHint={assetFinalOnly ? "终稿" : "素材墙"}
+                                        itemTitleById={itemTitleById}
                                         onOpen={setDetailItem}
                                         onDelete={handleDeleteItem}
                                         onSave={(item) => void handleSaveToAssets(item)}
@@ -515,26 +733,38 @@ export default function WorkspaceDetailPage() {
                         },
                         {
                             key: "gens",
-                            label: `生成分享 (${genItems.length})`,
+                            label: `生成分享 (${genItems.length}${genFinalCount ? ` · 终稿 ${genFinalCount}` : ""})`,
                             children: (
                                 <div className="space-y-3">
-                                    <div className="rounded-lg border border-stone-200 bg-card/80 px-3 py-2 text-xs leading-5 text-stone-600 shadow-sm dark:border-stone-800 dark:text-stone-300">
-                                        <strong className="font-medium text-stone-800 dark:text-stone-100">生成分享</strong>
-                                        ：来自图/视频工作台的本机或云端历史，通常带 prompt / model，方便对照生成过程。不会自动全量同步；需在工作台历史点「分享到工作空间」。点击卡片可看详情。
-                                        <div className="mt-2 flex flex-wrap gap-2">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <div className="text-xs text-stone-500">
+                                            工作台过程快照 · 在图/视频历史点「分享到工作空间」
+                                        </div>
+                                        <div className="flex flex-wrap gap-2">
                                             <Button size="small" icon={<Images className="size-3.5" />} onClick={() => navigate("/image")}>
-                                                去图片工作台分享
+                                                图片工作台
                                             </Button>
                                             <Button size="small" icon={<Video className="size-3.5" />} onClick={() => navigate("/video")}>
-                                                去视频工作台分享
+                                                视频工作台
                                             </Button>
                                         </div>
                                     </div>
+                                    <WallFilterBar
+                                        categoryOptions={genCategoryOptions}
+                                        categoryValue={genCategoryFilter}
+                                        onCategoryChange={setGenCategoryFilter}
+                                        finalOnly={genFinalOnly}
+                                        onFinalOnlyChange={setGenFinalOnly}
+                                        finalCount={genFinalCount}
+                                        shownCount={filteredGenItems.length}
+                                        totalCount={genItems.length}
+                                    />
                                     <ItemGrid
-                                        items={genItems}
-                                        currentUserId={user.id}
+                                        items={filteredGenItems}
+                                        currentUserId={userId}
                                         isOwner={Boolean(isOwner)}
-                                        emptyHint="生成分享"
+                                        emptyHint={genFinalOnly ? "终稿" : "生成分享"}
+                                        itemTitleById={itemTitleById}
                                         onOpen={setDetailItem}
                                         onDelete={handleDeleteItem}
                                         onSave={(item) => void handleSaveToAssets(item)}
@@ -618,75 +848,116 @@ export default function WorkspaceDetailPage() {
                                     </div>
 
                                     {tasks.length ? (
-                                        <div className="grid gap-3 lg:grid-cols-3">
-                                            {[WORKSPACE_TASK_STATUS.TODO, WORKSPACE_TASK_STATUS.DOING, WORKSPACE_TASK_STATUS.DONE].map((status) => {
-                                                const meta = TASK_STATUS_META[status];
-                                                const columnTasks = tasksByStatus[status] || [];
-                                                return (
-                                                    <div key={status} className={`rounded-xl border p-2 ${meta.column}`}>
-                                                        <div className="mb-2 flex items-center justify-between px-1">
-                                                            <div className="flex items-center gap-2 text-sm font-medium text-stone-800 dark:text-stone-100">
-                                                                <span className={`size-2.5 rounded-sm ${meta.bar}`} />
-                                                                {meta.label}
-                                                            </div>
-                                                            <span className={`rounded-full px-2 py-0.5 text-[11px] ${meta.chip}`}>{columnTasks.length}</span>
-                                                        </div>
-                                                        <div className="space-y-2">
-                                                            {columnTasks.length ? (
-                                                                columnTasks.map((task) => {
-                                                                    const ids = taskAssigneeIds(task);
-                                                                    const canEdit = task.created_by === user.id || Boolean(isOwner);
-                                                                    const canDeliver = canEdit || ids.includes(user.id);
-                                                                    return (
-                                                                        <TaskRow
-                                                                            key={task.id}
-                                                                            task={task}
-                                                                            members={members}
-                                                                            memberNameById={memberNameById}
-                                                                            canEdit={canEdit}
-                                                                            canDeliver={canDeliver}
-                                                                            onChangeStatus={async (nextStatus) => {
-                                                                                const next = await updateWorkspaceTask(id, task.id, { status: nextStatus });
-                                                                                setTasks((list) => list.map((t) => (t.id === task.id ? next : t)));
-                                                                            }}
-                                                                            onChangeAssignees={async (assigneeUserIds) => {
-                                                                                const next = await updateWorkspaceTask(id, task.id, { assigneeUserIds });
-                                                                                setTasks((list) => list.map((t) => (t.id === task.id ? next : t)));
-                                                                            }}
-                                                                            onUploadDeliverable={async (file) => {
-                                                                                const next = await updateWorkspaceTask(id, task.id, {
-                                                                                    deliverableFile: file,
-                                                                                    deliverableFilename: file.name,
-                                                                                });
-                                                                                setTasks((list) => list.map((t) => (t.id === task.id ? next : t)));
-                                                                            }}
-                                                                            onRemoveDeliverable={async (fileId) => {
-                                                                                const next = await updateWorkspaceTask(id, task.id, {
-                                                                                    removeDeliverableFileId: fileId,
-                                                                                });
-                                                                                setTasks((list) => list.map((t) => (t.id === task.id ? next : t)));
-                                                                            }}
-                                                                            onClearDeliverable={async () => {
-                                                                                const next = await updateWorkspaceTask(id, task.id, { clearDeliverable: true });
-                                                                                setTasks((list) => list.map((t) => (t.id === task.id ? next : t)));
-                                                                            }}
-                                                                            onDelete={async () => {
-                                                                                await deleteWorkspaceTask(id, task.id);
-                                                                                setTasks((list) => list.filter((t) => t.id !== task.id));
-                                                                                message.success("已删除任务");
-                                                                            }}
-                                                                        />
-                                                                    );
-                                                                })
-                                                            ) : (
-                                                                <div className="rounded-lg border border-dashed border-stone-300/80 px-2 py-6 text-center text-[11px] text-stone-400 dark:border-stone-700">
-                                                                    暂无
+                                        <div className="space-y-2">
+                                            <div className="text-[11px] text-stone-400">
+                                                按左侧 ⋮⋮ 手柄拖到其它列更新进度（创建者/所有者）；状态下拉仍可用
+                                            </div>
+                                            <div className="grid gap-3 lg:grid-cols-3">
+                                                {[WORKSPACE_TASK_STATUS.TODO, WORKSPACE_TASK_STATUS.DOING, WORKSPACE_TASK_STATUS.DONE].map((status) => {
+                                                    const meta = TASK_STATUS_META[status];
+                                                    const columnTasks = tasksByStatus[status] || [];
+                                                    const isDropTarget = dragOverStatus === status;
+                                                    return (
+                                                        <div
+                                                            key={status}
+                                                            className={`rounded-xl border p-2 transition ${meta.column} ${
+                                                                isDropTarget
+                                                                    ? "ring-2 ring-sky-400 ring-offset-1 dark:ring-sky-500 dark:ring-offset-stone-950"
+                                                                    : ""
+                                                            }`}
+                                                            onDragOver={(event) => {
+                                                                if (!draggingTaskId) return;
+                                                                event.preventDefault();
+                                                                event.dataTransfer.dropEffect = "move";
+                                                                if (dragOverStatus !== status) setDragOverStatus(status);
+                                                            }}
+                                                            onDragLeave={(event) => {
+                                                                const related = event.relatedTarget as Node | null;
+                                                                if (related && event.currentTarget.contains(related)) return;
+                                                                if (dragOverStatus === status) setDragOverStatus(null);
+                                                            }}
+                                                            onDrop={(event) => {
+                                                                event.preventDefault();
+                                                                const taskId =
+                                                                    event.dataTransfer.getData("text/workspace-task-id") ||
+                                                                    draggingTaskId ||
+                                                                    "";
+                                                                setDragOverStatus(null);
+                                                                setDraggingTaskId(null);
+                                                                if (!taskId) return;
+                                                                void handleTaskDrop(taskId, status);
+                                                            }}
+                                                        >
+                                                            <div className="mb-2 flex items-center justify-between px-1">
+                                                                <div className="flex items-center gap-2 text-sm font-medium text-stone-800 dark:text-stone-100">
+                                                                    <span className={`size-2.5 rounded-sm ${meta.bar}`} />
+                                                                    {meta.label}
                                                                 </div>
-                                                            )}
+                                                                <span className={`rounded-full px-2 py-0.5 text-[11px] ${meta.chip}`}>{columnTasks.length}</span>
+                                                            </div>
+                                                            <div className="min-h-24 space-y-2">
+                                                                {columnTasks.length ? (
+                                                                    columnTasks.map((task) => {
+                                                                        const ids = taskAssigneeIds(task);
+                                                                        const canEdit = task.created_by === userId || Boolean(isOwner);
+                                                                        const canDeliver = canEdit || ids.includes(userId);
+                                                                        return (
+                                                                            <TaskRow
+                                                                                key={task.id}
+                                                                                task={task}
+                                                                                members={members}
+                                                                                memberNameById={memberNameById}
+                                                                                canEdit={canEdit}
+                                                                                canDeliver={canDeliver}
+                                                                                isDragging={draggingTaskId === task.id}
+                                                                                onDragStart={(taskId) => setDraggingTaskId(taskId)}
+                                                                                onDragEnd={() => {
+                                                                                    setDraggingTaskId(null);
+                                                                                    setDragOverStatus(null);
+                                                                                }}
+                                                                                onChangeStatus={async (nextStatus) => {
+                                                                                    const next = await updateWorkspaceTask(id, task.id, { status: nextStatus });
+                                                                                    setTasks((list) => list.map((t) => (t.id === task.id ? next : t)));
+                                                                                }}
+                                                                                onChangeAssignees={async (assigneeUserIds) => {
+                                                                                    const next = await updateWorkspaceTask(id, task.id, { assigneeUserIds });
+                                                                                    setTasks((list) => list.map((t) => (t.id === task.id ? next : t)));
+                                                                                }}
+                                                                                onUploadDeliverable={async (file) => {
+                                                                                    const next = await updateWorkspaceTask(id, task.id, {
+                                                                                        deliverableFile: file,
+                                                                                        deliverableFilename: file.name,
+                                                                                    });
+                                                                                    setTasks((list) => list.map((t) => (t.id === task.id ? next : t)));
+                                                                                }}
+                                                                                onRemoveDeliverable={async (fileId) => {
+                                                                                    const next = await updateWorkspaceTask(id, task.id, {
+                                                                                        removeDeliverableFileId: fileId,
+                                                                                    });
+                                                                                    setTasks((list) => list.map((t) => (t.id === task.id ? next : t)));
+                                                                                }}
+                                                                                onClearDeliverable={async () => {
+                                                                                    const next = await updateWorkspaceTask(id, task.id, { clearDeliverable: true });
+                                                                                    setTasks((list) => list.map((t) => (t.id === task.id ? next : t)));
+                                                                                }}
+                                                                                onDelete={async () => {
+                                                                                    await deleteWorkspaceTask(id, task.id);
+                                                                                    setTasks((list) => list.filter((t) => t.id !== task.id));
+                                                                                    message.success("已删除任务");
+                                                                                }}
+                                                                            />
+                                                                        );
+                                                                    })
+                                                                ) : (
+                                                                    <div className="rounded-lg border border-dashed border-stone-300/80 px-2 py-6 text-center text-[11px] text-stone-400 dark:border-stone-700">
+                                                                        {isDropTarget ? "松开以移到此列" : "暂无 · 可拖入"}
+                                                                    </div>
+                                                                )}
+                                                            </div>
                                                         </div>
-                                                    </div>
-                                                );
-                                            })}
+                                                    );
+                                                })}
+                                            </div>
                                         </div>
                                     ) : (
                                         <Empty description="还没有进度任务" className="rounded-xl border border-dashed border-stone-300 bg-card/70 py-12 dark:border-stone-700" />
@@ -699,15 +970,31 @@ export default function WorkspaceDetailPage() {
                             label: `成员 (${members.length})`,
                             children: (
                                 <div className="space-y-2">
-                                    {members.map((m) => (
-                                        <div key={m.id} className="flex items-center justify-between rounded-lg border border-stone-200 bg-card/90 px-3 py-2 text-sm shadow-sm dark:border-stone-800">
-                                            <div>
-                                                <div className="font-medium">{memberDisplayName(m)}</div>
-                                                <div className="text-xs text-stone-500">{m.email}</div>
+                                    {members.map((m) => {
+                                        const isMemberOwner = m.role === WORKSPACE_ROLE.OWNER || m.user_id === workspace.owner_id;
+                                        const canKick = Boolean(isOwner) && !isMemberOwner;
+                                        return (
+                                            <div key={m.id} className="flex items-center justify-between gap-2 rounded-lg border border-stone-200 bg-card/90 px-3 py-2 text-sm shadow-sm dark:border-stone-800">
+                                                <div className="min-w-0">
+                                                    <div className="font-medium">{memberDisplayName(m)}</div>
+                                                    <div className="text-xs text-stone-500">{m.email}</div>
+                                                </div>
+                                                <div className="flex shrink-0 items-center gap-2">
+                                                    <Tag className="m-0">{isMemberOwner ? "所有者" : "成员"}</Tag>
+                                                    {canKick ? (
+                                                        <Button
+                                                            size="small"
+                                                            danger
+                                                            icon={<UserMinus className="size-3.5" />}
+                                                            onClick={() => handleKickMember(m)}
+                                                        >
+                                                            移除
+                                                        </Button>
+                                                    ) : null}
+                                                </div>
                                             </div>
-                                            <Tag className="m-0">{m.role === "owner" ? "所有者" : "成员"}</Tag>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             ),
                         },
@@ -716,13 +1003,101 @@ export default function WorkspaceDetailPage() {
 
                 <ItemDetailModal
                     item={detailItem}
-                    canDelete={Boolean(detailItem && (detailItem.created_by === user.id || isOwner))}
+                    items={items}
+                    categoryOptions={categoryEditOptions}
+                    currentUserId={userId}
+                    isOwner={isOwner}
+                    canEdit={Boolean(detailItem && (detailItem.created_by === userId || isOwner))}
+                    canDelete={Boolean(detailItem && (detailItem.created_by === userId || isOwner))}
                     onClose={() => setDetailItem(null)}
                     onSave={(item) => void handleSaveToAssets(item)}
                     onDelete={(item) => handleDeleteItem(item)}
+                    onUpdateMeta={(item, patch) => handleUpdateItemMeta(item, patch)}
+                    onUpsertReaction={(item, resolution, comment) => handleUpsertReaction(item, resolution, comment)}
+                    onClearReaction={(item, targetUserId) => handleClearReaction(item, targetUserId)}
                 />
                 </div>
             </main>
+        </div>
+    );
+}
+
+function CategoryFilterChips({
+    options,
+    value,
+    onChange,
+}: {
+    options: Array<{ label: string; value: string }>;
+    value: string;
+    onChange: (next: string) => void;
+}) {
+    return (
+        <div className="flex flex-wrap gap-1.5">
+            {options.map((opt) => {
+                const active = value === opt.value;
+                return (
+                    <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => onChange(opt.value)}
+                        className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${
+                            active
+                                ? "border-sky-500 bg-sky-50 font-medium text-sky-800 shadow-sm ring-1 ring-sky-400/40 dark:border-sky-400 dark:bg-sky-950/50 dark:text-sky-100 dark:ring-sky-500/30"
+                                : "border-stone-200 bg-card/80 text-stone-600 hover:border-stone-400 hover:bg-stone-50 dark:border-stone-700 dark:text-stone-300 dark:hover:bg-stone-900"
+                        }`}
+                    >
+                        {opt.label}
+                    </button>
+                );
+            })}
+        </div>
+    );
+}
+
+/** Category chips + 仅终稿 toggle for material / gen walls. */
+function WallFilterBar({
+    categoryOptions,
+    categoryValue,
+    onCategoryChange,
+    finalOnly,
+    onFinalOnlyChange,
+    finalCount,
+    shownCount,
+    totalCount,
+}: {
+    categoryOptions: Array<{ label: string; value: string }>;
+    categoryValue: string;
+    onCategoryChange: (next: string) => void;
+    finalOnly: boolean;
+    onFinalOnlyChange: (next: boolean) => void;
+    finalCount: number;
+    shownCount: number;
+    totalCount: number;
+}) {
+    return (
+        <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+                <CategoryFilterChips options={categoryOptions} value={categoryValue} onChange={onCategoryChange} />
+                <button
+                    type="button"
+                    onClick={() => onFinalOnlyChange(!finalOnly)}
+                    className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition ${
+                        finalOnly
+                            ? "border-amber-500 bg-amber-100 text-amber-950 shadow-sm ring-1 ring-amber-400/50 dark:border-amber-400 dark:bg-amber-950/60 dark:text-amber-50 dark:ring-amber-500/40"
+                            : "border-amber-300/80 bg-amber-50/80 text-amber-900 hover:border-amber-400 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100"
+                    }`}
+                    title={finalOnly ? "显示全部" : "只看终稿"}
+                >
+                    <BadgeCheck className="size-3.5" />
+                    {finalOnly ? "仅终稿" : "终稿"}
+                    {finalCount > 0 ? <span className="tabular-nums opacity-80">· {finalCount}</span> : null}
+                </button>
+            </div>
+            <div className="text-[11px] text-stone-400">
+                显示 {shownCount}
+                {shownCount !== totalCount ? ` / ${totalCount}` : ""}
+                {finalOnly ? " · 已筛选终稿（置顶）" : finalCount > 0 ? " · 终稿优先排列" : ""}
+            </div>
         </div>
     );
 }
@@ -742,6 +1117,9 @@ function TaskRow({
     memberNameById,
     canEdit,
     canDeliver,
+    isDragging,
+    onDragStart,
+    onDragEnd,
     onChangeStatus,
     onChangeAssignees,
     onUploadDeliverable,
@@ -754,6 +1132,9 @@ function TaskRow({
     memberNameById: Map<string, string>;
     canEdit: boolean;
     canDeliver: boolean;
+    isDragging?: boolean;
+    onDragStart?: (taskId: string) => void;
+    onDragEnd?: () => void;
     onChangeStatus: (status: string) => Promise<void>;
     onChangeAssignees: (ids: string[]) => Promise<void>;
     onUploadDeliverable: (file: File) => Promise<void>;
@@ -870,8 +1251,28 @@ function TaskRow({
     const activeIsVideo = activePreview ? isVideoMime(activePreview.mime, activePreview.name) : false;
 
     return (
-        <div className={`rounded-lg border border-stone-200 border-l-4 bg-card px-3 py-3 shadow-sm dark:border-stone-800 ${meta.accent}`}>
+        <div
+            className={`rounded-lg border border-stone-200 border-l-4 bg-card px-3 py-3 shadow-sm transition dark:border-stone-800 ${meta.accent} ${
+                isDragging ? "opacity-60 ring-2 ring-sky-400/60" : ""
+            }`}
+        >
             <div className="flex flex-wrap items-start gap-2">
+                {canEdit ? (
+                    <div
+                        className="mt-0.5 shrink-0 cursor-grab touch-none text-stone-400 active:cursor-grabbing"
+                        title="拖到其它列更新进度"
+                        draggable
+                        onDragStart={(event) => {
+                            event.dataTransfer.setData("text/workspace-task-id", task.id);
+                            event.dataTransfer.setData("text/plain", task.id);
+                            event.dataTransfer.effectAllowed = "move";
+                            onDragStart?.(task.id);
+                        }}
+                        onDragEnd={() => onDragEnd?.()}
+                    >
+                        <GripVertical className="size-4" />
+                    </div>
+                ) : null}
                 <div className="min-w-0 flex-1">
                     <div className="font-medium text-stone-900 dark:text-stone-100">{task.title}</div>
                     {task.body ? <div className="mt-1 text-xs text-stone-500">{task.body}</div> : null}
@@ -1124,6 +1525,7 @@ function ItemGrid({
     currentUserId,
     isOwner,
     emptyHint,
+    itemTitleById,
     onOpen,
     onDelete,
     onSave,
@@ -1133,6 +1535,7 @@ function ItemGrid({
     currentUserId: string;
     isOwner: boolean;
     emptyHint: string;
+    itemTitleById?: Map<string, string>;
     onOpen: (item: WorkspaceItem) => void;
     onDelete: (item: WorkspaceItem) => void;
     onSave: (item: WorkspaceItem) => void;
@@ -1172,6 +1575,7 @@ function ItemGrid({
                 <WorkspaceItemCard
                     key={item.id}
                     item={item}
+                    replacesLabel={item.replaces_item_id ? itemTitleById?.get(item.replaces_item_id) : undefined}
                     canDelete={item.created_by === currentUserId || isOwner}
                     onOpen={() => onOpen(item)}
                     onDelete={() => onDelete(item)}
@@ -1184,12 +1588,14 @@ function ItemGrid({
 
 function WorkspaceItemCard({
     item,
+    replacesLabel,
     canDelete,
     onOpen,
     onDelete,
     onSave,
 }: {
     item: WorkspaceItem;
+    replacesLabel?: string;
     canDelete: boolean;
     onOpen: () => void;
     onDelete: () => void;
@@ -1244,9 +1650,16 @@ function WorkspaceItemCard({
     };
 
     const uploader = itemUploaderLabel(item);
+    const counts = reactionCounts(item.reactions);
 
     return (
-        <div className="overflow-hidden rounded-xl border border-stone-200 bg-card transition hover:border-stone-300 dark:border-stone-800 dark:hover:border-stone-600">
+        <div
+            className={`overflow-hidden rounded-xl border bg-card transition ${
+                item.is_final
+                    ? "border-amber-400 shadow-[0_0_0_1px_rgba(251,191,36,0.35)] ring-1 ring-amber-300/50 dark:border-amber-500 dark:shadow-[0_0_0_1px_rgba(245,158,11,0.35)] dark:ring-amber-600/40"
+                    : "border-stone-200 hover:border-stone-300 dark:border-stone-800 dark:hover:border-stone-600"
+            }`}
+        >
             <button type="button" className={`relative block w-full cursor-zoom-in border-0 bg-stone-100 p-0 text-left dark:bg-stone-900 ${isVideoKind(item.kind) ? "aspect-video" : "aspect-square"}`} onClick={onOpen} title="点击查看详情">
                 {item.kind === WORKSPACE_ITEM_KIND.ASSET_TEXT ? (
                     <div className="flex size-full items-start overflow-hidden p-3 text-xs leading-5 text-stone-700 dark:text-stone-200">{item.text_content || "（空文本）"}</div>
@@ -1260,13 +1673,51 @@ function WorkspaceItemCard({
                     <div className="flex size-full items-center justify-center text-xs text-stone-500">{previewError ? "预览失败" : "加载中…"}</div>
                 )}
                 <span className="absolute bottom-2 left-2 rounded-md bg-black/55 px-1.5 py-0.5 text-[10px] text-white">点击详情</span>
+                {item.is_final ? (
+                    <span className="absolute left-2 top-2 inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-400 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-amber-950 shadow-sm">
+                        <BadgeCheck className="size-3" />
+                        终稿
+                    </span>
+                ) : null}
+                {counts.total > 0 ? (
+                    <span className={`absolute right-2 flex flex-wrap justify-end gap-1 ${item.is_final ? "top-8" : "top-2"}`}>
+                        {counts.use > 0 ? (
+                            <span className="rounded-md border border-emerald-400/80 bg-emerald-500/90 px-1.5 py-0.5 text-[10px] font-semibold text-white shadow-sm">
+                                用 {counts.use}
+                            </span>
+                        ) : null}
+                        {counts.revise > 0 ? (
+                            <span className="rounded-md border border-sky-400/80 bg-sky-500/90 px-1.5 py-0.5 text-[10px] font-semibold text-white shadow-sm">
+                                改 {counts.revise}
+                            </span>
+                        ) : null}
+                        {counts.discard > 0 ? (
+                            <span className="rounded-md border border-rose-400/80 bg-rose-500/90 px-1.5 py-0.5 text-[10px] font-semibold text-white shadow-sm">
+                                弃 {counts.discard}
+                            </span>
+                        ) : null}
+                    </span>
+                ) : null}
             </button>
-            <div className="space-y-2 p-3">
+            <div className={`space-y-2 p-3 ${item.is_final ? "bg-amber-50/40 dark:bg-amber-950/20" : ""}`}>
                 <div className="flex flex-wrap gap-1">
                     <Tag className="m-0 text-[11px]">{kindLabel(item.kind)}</Tag>
                     <Tag className="m-0 text-[11px]">{sourceTypeLabel(item.source_type)}</Tag>
+                    {item.category ? <Tag className="m-0 text-[11px]">{assetCategoryLabel(item.category)}</Tag> : null}
+                    {item.version ? <Tag className="m-0 text-[11px]">{item.version}</Tag> : null}
                     {displayModelName(item.model) ? <Tag className="m-0 text-[11px]">{displayModelName(item.model)}</Tag> : null}
                 </div>
+                {item.is_final ? (
+                    <div className="inline-flex items-center gap-1 rounded-md border border-amber-400 bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-900 shadow-sm dark:border-amber-500 dark:bg-amber-950 dark:text-amber-100">
+                        <BadgeCheck className="size-3.5" />
+                        终稿 · 优先选用
+                    </div>
+                ) : null}
+                {counts.total > 0 ? (
+                    <div className="text-[11px] text-stone-500">
+                        决议：用 {counts.use} · 改 {counts.revise} · 弃 {counts.discard}
+                    </div>
+                ) : null}
                 <Typography.Paragraph ellipsis={{ rows: 2 }} className="mb-0! text-sm! font-medium!">
                     {item.title || "未命名"}
                 </Typography.Paragraph>
@@ -1274,10 +1725,8 @@ function WorkspaceItemCard({
                     {uploader}
                     {formatTime(item.created_at) ? ` · ${formatTime(item.created_at)}` : ""}
                 </div>
-                {item.prompt ? (
-                    <Typography.Paragraph ellipsis={{ rows: 2 }} className="mb-0! text-xs! text-stone-500!">
-                        {item.prompt}
-                    </Typography.Paragraph>
+                {item.replaces_item_id ? (
+                    <div className="text-[11px] text-stone-500">修订自：{replacesLabel || item.replaces_item_id.slice(0, 8)}</div>
                 ) : null}
                 <div className="flex flex-wrap gap-2">
                     <Button size="small" onClick={onOpen}>
@@ -1304,20 +1753,44 @@ function WorkspaceItemCard({
 
 function ItemDetailModal({
     item,
+    items,
+    categoryOptions,
+    currentUserId,
+    isOwner,
+    canEdit,
     canDelete,
     onClose,
     onSave,
     onDelete,
+    onUpdateMeta,
+    onUpsertReaction,
+    onClearReaction,
 }: {
     item: WorkspaceItem | null;
+    items: WorkspaceItem[];
+    categoryOptions: Array<{ label: string; value: string }>;
+    currentUserId: string;
+    isOwner: boolean;
+    canEdit: boolean;
     canDelete: boolean;
     onClose: () => void;
     onSave: (item: WorkspaceItem) => void;
     onDelete: (item: WorkspaceItem) => void;
+    onUpdateMeta: (
+        item: WorkspaceItem,
+        patch: { title?: string; category?: string; version?: string; replacesItemId?: string | null; isFinal?: boolean },
+    ) => Promise<WorkspaceItem | void>;
+    onUpsertReaction: (item: WorkspaceItem, resolution: string, comment?: string) => Promise<WorkspaceItem | void>;
+    onClearReaction: (item: WorkspaceItem, targetUserId?: string) => Promise<WorkspaceItem | void>;
 }) {
     const { message } = App.useApp();
     const [previewUrl, setPreviewUrl] = useState("");
     const [previewError, setPreviewError] = useState(false);
+    const [metaBusy, setMetaBusy] = useState(false);
+    const [reactionBusy, setReactionBusy] = useState(false);
+    const [versionDraft, setVersionDraft] = useState("");
+    const [titleDraft, setTitleDraft] = useState("");
+    const [commentDraft, setCommentDraft] = useState("");
 
     useEffect(() => {
         let active = true;
@@ -1343,6 +1816,27 @@ function ItemDetailModal({
         };
     }, [item?.file_url, item?.kind, item?.id]);
 
+    useEffect(() => {
+        setVersionDraft(item?.version || "");
+        setTitleDraft(item?.title || "");
+        const mine = (item?.reactions || []).find((r) => r.user_id === currentUserId);
+        setCommentDraft(mine?.comment || "");
+    }, [item?.id, item?.version, item?.title, item?.reactions, currentUserId]);
+
+    const replaceOptions = useMemo(() => {
+        if (!item) return [] as Array<{ label: string; value: string }>;
+        return items
+            .filter((candidate) => candidate.id !== item.id)
+            .map((candidate) => ({
+                value: candidate.id,
+                label: `${candidate.title || candidate.id.slice(0, 8)}${candidate.version ? ` · ${candidate.version}` : ""}${candidate.is_final ? " · 终稿" : ""}`,
+            }));
+    }, [item, items]);
+
+    const replacesLabel = item?.replaces_item_id
+        ? items.find((x) => x.id === item.replaces_item_id)?.title || item.replaces_item_id.slice(0, 8)
+        : "";
+
     const handleDownload = async () => {
         if (!item) return;
         try {
@@ -1359,73 +1853,398 @@ function ItemDetailModal({
         }
     };
 
+    const runMeta = async (patch: {
+        title?: string;
+        category?: string;
+        version?: string;
+        replacesItemId?: string | null;
+        isFinal?: boolean;
+    }) => {
+        if (!item) return;
+        setMetaBusy(true);
+        try {
+            await onUpdateMeta(item, patch);
+        } finally {
+            setMetaBusy(false);
+        }
+    };
+
+    const saveTitle = async () => {
+        if (!item) return;
+        const next = titleDraft.trim();
+        if (!next) {
+            message.warning("名称不能为空");
+            setTitleDraft(item.title || "");
+            return;
+        }
+        if (next === (item.title || "")) return;
+        await runMeta({ title: next });
+    };
+
+    const myReaction = (item?.reactions || []).find((r) => r.user_id === currentUserId) || null;
+    const counts = reactionCounts(item?.reactions);
+    const sortedReactions = [...(item?.reactions || [])].sort((a, b) =>
+        String(b.updated_at || "").localeCompare(String(a.updated_at || "")),
+    );
+
+    const castReaction = async (resolution: string) => {
+        if (!item) return;
+        setReactionBusy(true);
+        try {
+            await onUpsertReaction(item, resolution, commentDraft.trim());
+        } finally {
+            setReactionBusy(false);
+        }
+    };
+
+    const clearMyReaction = async () => {
+        if (!item) return;
+        setReactionBusy(true);
+        try {
+            await onClearReaction(item);
+            setCommentDraft("");
+        } finally {
+            setReactionBusy(false);
+        }
+    };
+
+    const specsLine = [item?.width && item?.height ? `${item.width}×${item.height}` : "", formatBytes(item?.bytes), item?.mime]
+        .filter(Boolean)
+        .join(" · ");
+    const modelName = displayModelName(item?.model);
+
     return (
         <Modal
             open={Boolean(item)}
-            title={item?.title || "分享详情"}
+            title={null}
             onCancel={onClose}
             footer={null}
-            width={920}
+            width={1080}
+            centered
             destroyOnHidden
-            styles={{ body: { paddingTop: 8 } }}
+            className="workspace-item-detail-modal [&_.ant-modal-content]:overflow-hidden! [&_.ant-modal-content]:rounded-2xl! [&_.ant-modal-content]:p-0!"
+            styles={{
+                body: { padding: 0, maxHeight: "min(88vh, 920px)", overflow: "hidden" },
+            }}
         >
             {item ? (
-                <div className="grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(240px,0.8fr)]">
-                    <div className="overflow-hidden rounded-lg border border-stone-200 bg-stone-100 dark:border-stone-800 dark:bg-stone-900">
+                <div className="flex max-h-[min(88vh,920px)] flex-col lg:flex-row">
+                    {/* Preview — media-first, no forced tall empty area */}
+                    <div className="relative flex min-h-[240px] items-center justify-center bg-stone-950 lg:min-h-0 lg:w-[58%] lg:self-stretch">
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="absolute right-3 top-3 z-10 inline-flex size-8 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm hover:bg-black/60 lg:hidden"
+                            aria-label="关闭"
+                        >
+                            <X className="size-4" />
+                        </button>
                         {item.kind === WORKSPACE_ITEM_KIND.ASSET_TEXT ? (
-                            <div className="max-h-[70vh] overflow-auto whitespace-pre-wrap p-4 text-sm leading-6 text-stone-800 dark:text-stone-100">{item.text_content || "（空文本）"}</div>
+                            <div className="max-h-[min(52vh,560px)] w-full overflow-auto whitespace-pre-wrap p-5 text-sm leading-6 text-stone-100 lg:max-h-[min(84vh,880px)]">
+                                {item.text_content || "（空文本）"}
+                            </div>
                         ) : previewUrl && !previewError ? (
                             isVideoKind(item.kind) ? (
-                                <video src={previewUrl} controls autoPlay playsInline className="max-h-[70vh] w-full bg-black object-contain" />
+                                <video
+                                    src={previewUrl}
+                                    controls
+                                    autoPlay
+                                    playsInline
+                                    className="max-h-[min(52vh,560px)] w-full object-contain lg:max-h-[min(84vh,880px)]"
+                                />
                             ) : (
-                                <Image src={previewUrl} alt={item.title} className="max-h-[70vh] w-full object-contain" rootClassName="block w-full" />
+                                <Image
+                                    src={previewUrl}
+                                    alt={item.title}
+                                    className="max-h-[min(52vh,560px)] w-full object-contain lg:max-h-[min(84vh,880px)]"
+                                    rootClassName="flex w-full items-center justify-center [&_.ant-image-img]:mx-auto [&_.ant-image-img]:max-h-[min(52vh,560px)] [&_.ant-image-img]:object-contain lg:[&_.ant-image-img]:max-h-[min(84vh,880px)]"
+                                />
                             )
                         ) : (
-                            <div className="flex min-h-64 items-center justify-center text-sm text-stone-500">{previewError ? "预览失败" : "加载中…"}</div>
+                            <div className="px-6 py-20 text-sm text-stone-400">{previewError ? "预览失败" : "加载中…"}</div>
                         )}
                     </div>
-                    <div className="space-y-3 text-sm">
-                        <div className="flex flex-wrap gap-1">
-                            <Tag className="m-0">{kindLabel(item.kind)}</Tag>
-                            <Tag className="m-0">{sourceTypeLabel(item.source_type)}</Tag>
-                            {item.category ? <Tag className="m-0">{item.category}</Tag> : null}
-                        </div>
-                        <div>
-                            <div className="text-xs text-stone-500">上传者</div>
-                            <div className="font-medium text-stone-900 dark:text-stone-100">{itemUploaderLabel(item)}</div>
-                            {item.created_by_email ? <div className="text-xs text-stone-500">{item.created_by_email}</div> : null}
-                        </div>
-                        <div>
-                            <div className="text-xs text-stone-500">时间</div>
-                            <div>{formatTime(item.created_at) || "—"}</div>
-                        </div>
-                        {displayModelName(item.model) ? (
-                            <div>
-                                <div className="text-xs text-stone-500">模型</div>
-                                <div>{displayModelName(item.model)}</div>
-                            </div>
-                        ) : null}
-                        {(item.width || item.height || item.bytes) ? (
-                            <div>
-                                <div className="text-xs text-stone-500">规格</div>
-                                <div>
-                                    {[item.width && item.height ? `${item.width}×${item.height}` : "", formatBytes(item.bytes), item.mime].filter(Boolean).join(" · ") || "—"}
+
+                    {/* Side panel */}
+                    <div className="flex min-h-0 min-w-0 flex-1 flex-col border-t border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-950 lg:border-l lg:border-t-0">
+                        <div className="flex items-start justify-between gap-3 border-b border-stone-100 px-4 py-3 dark:border-stone-800">
+                            <div className="min-w-0 flex-1">
+                                {canEdit ? (
+                                    <div className="flex items-center gap-2">
+                                        <Input
+                                            size="middle"
+                                            className="min-w-0 flex-1 border-0! bg-transparent! px-0! text-base! font-semibold! shadow-none! focus:shadow-none!"
+                                            prefix={<Pencil className="size-3.5 text-stone-400" />}
+                                            placeholder="名称"
+                                            value={titleDraft}
+                                            disabled={metaBusy}
+                                            maxLength={200}
+                                            onChange={(e) => setTitleDraft(e.target.value)}
+                                            onPressEnter={() => void saveTitle()}
+                                            onBlur={() => void saveTitle()}
+                                        />
+                                        {titleDraft.trim() && titleDraft.trim() !== (item.title || "") ? (
+                                            <Button size="small" type="link" className="px-1" disabled={metaBusy} onClick={() => void saveTitle()}>
+                                                保存
+                                            </Button>
+                                        ) : null}
+                                    </div>
+                                ) : (
+                                    <div className="truncate text-base font-semibold text-stone-900 dark:text-stone-50">{item.title || "未命名"}</div>
+                                )}
+                                <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                                    <Tag className="m-0 rounded-full text-[11px]">{kindLabel(item.kind)}</Tag>
+                                    <Tag className="m-0 rounded-full text-[11px]">{sourceTypeLabel(item.source_type)}</Tag>
+                                    {item.category ? <Tag className="m-0 rounded-full text-[11px]">{assetCategoryLabel(item.category)}</Tag> : null}
+                                    {item.version ? <Tag className="m-0 rounded-full text-[11px]">{item.version}</Tag> : null}
+                                    {item.is_final ? (
+                                        <span className="inline-flex items-center gap-1 rounded-full border border-amber-400 bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-950 dark:border-amber-500 dark:bg-amber-950 dark:text-amber-100">
+                                            <BadgeCheck className="size-3" />
+                                            终稿
+                                        </span>
+                                    ) : null}
+                                </div>
+                                <div className="mt-1.5 truncate text-[11px] text-stone-500">
+                                    {itemUploaderLabel(item)}
+                                    {formatTime(item.created_at) ? ` · ${formatTime(item.created_at)}` : ""}
+                                    {specsLine ? ` · ${specsLine}` : ""}
+                                    {modelName ? ` · ${modelName}` : ""}
                                 </div>
                             </div>
-                        ) : null}
-                        {item.prompt ? (
-                            <div>
-                                <div className="text-xs text-stone-500">提示词</div>
-                                <div className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-stone-50 p-2 text-xs leading-5 dark:bg-stone-950">{item.prompt}</div>
+                            <button
+                                type="button"
+                                onClick={onClose}
+                                className="hidden size-8 shrink-0 items-center justify-center rounded-full text-stone-400 hover:bg-stone-100 hover:text-stone-700 dark:hover:bg-stone-900 lg:inline-flex"
+                                aria-label="关闭"
+                            >
+                                <X className="size-4" />
+                            </button>
+                        </div>
+
+                        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 py-3 text-sm">
+                            {canEdit ? (
+                                <div className="space-y-1.5">
+                                    <div className="text-[11px] font-medium uppercase tracking-wide text-stone-400">分类分区</div>
+                                    <Select
+                                        size="small"
+                                        className="w-full"
+                                        showSearch
+                                        allowClear
+                                        placeholder="人物 / 场景 / 道具…"
+                                        value={item.category || undefined}
+                                        disabled={metaBusy}
+                                        options={categoryOptions.filter((o) => o.value !== "")}
+                                        optionFilterProp="label"
+                                        onChange={(value) => {
+                                            const next = resolveAssetCategoryForSave(typeof value === "string" ? value : undefined) || "";
+                                            void runMeta({ category: next });
+                                        }}
+                                    />
+                                </div>
+                            ) : null}
+
+                            {item.prompt ? (
+                                <div className="space-y-1.5">
+                                    <div className="text-[11px] font-medium uppercase tracking-wide text-stone-400">提示词</div>
+                                    <div className="max-h-28 overflow-auto whitespace-pre-wrap rounded-lg bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-700 dark:bg-stone-900 dark:text-stone-200">
+                                        {item.prompt}
+                                    </div>
+                                </div>
+                            ) : null}
+
+                            {item.note ? (
+                                <div className="space-y-1.5">
+                                    <div className="text-[11px] font-medium uppercase tracking-wide text-stone-400">备注</div>
+                                    <div className="text-xs leading-5 text-stone-600 dark:text-stone-300">{item.note}</div>
+                                </div>
+                            ) : null}
+
+                            {canEdit ? (
+                                <div className="space-y-2">
+                                    <div className="text-[11px] font-medium uppercase tracking-wide text-stone-400">版本与终稿</div>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <Input
+                                            size="small"
+                                            className="w-24"
+                                            placeholder="v2"
+                                            value={versionDraft}
+                                            disabled={metaBusy}
+                                            onChange={(e) => setVersionDraft(e.target.value)}
+                                            onPressEnter={() => void runMeta({ version: versionDraft.trim() })}
+                                        />
+                                        <Button size="small" disabled={metaBusy} onClick={() => void runMeta({ version: versionDraft.trim() })}>
+                                            保存版本
+                                        </Button>
+                                        <Button
+                                            size="small"
+                                            type={item.is_final ? "default" : "primary"}
+                                            className={
+                                                item.is_final
+                                                    ? "border-amber-400 text-amber-900 dark:border-amber-500 dark:text-amber-100"
+                                                    : "border-amber-500! bg-amber-500! text-white! hover:border-amber-600! hover:bg-amber-600!"
+                                            }
+                                            icon={<BadgeCheck className="size-3.5" />}
+                                            loading={metaBusy}
+                                            onClick={() => void runMeta({ isFinal: !item.is_final })}
+                                        >
+                                            {item.is_final ? "取消终稿" : "设为终稿"}
+                                        </Button>
+                                    </div>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <Select
+                                            size="small"
+                                            allowClear
+                                            className="min-w-0 flex-1"
+                                            placeholder="关联替代（修订自…）"
+                                            value={item.replaces_item_id || undefined}
+                                            disabled={metaBusy}
+                                            options={replaceOptions}
+                                            optionFilterProp="label"
+                                            showSearch
+                                            onChange={(value) => void runMeta({ replacesItemId: value || "" })}
+                                        />
+                                        {item.replaces_item_id ? (
+                                            <Button size="small" danger icon={<X className="size-3.5" />} disabled={metaBusy} onClick={() => void runMeta({ replacesItemId: "" })}>
+                                                取消
+                                            </Button>
+                                        ) : null}
+                                    </div>
+                                    {item.replaces_item_id ? (
+                                        <div className="text-[11px] text-sky-700 dark:text-sky-300">修订自：{replacesLabel}</div>
+                                    ) : null}
+                                </div>
+                            ) : item.replaces_item_id ? (
+                                <div className="text-xs text-stone-500">修订自：{replacesLabel}</div>
+                            ) : null}
+
+                            <div className="space-y-2 border-t border-stone-100 pt-3 dark:border-stone-800">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div className="text-[11px] font-medium uppercase tracking-wide text-stone-400">团队决议</div>
+                                    {counts.total > 0 ? (
+                                        <div className="text-[11px] text-stone-500">
+                                            用 {counts.use} · 改 {counts.revise} · 弃 {counts.discard}
+                                        </div>
+                                    ) : (
+                                        <div className="text-[11px] text-stone-400">批片时一键标记</div>
+                                    )}
+                                </div>
+                                <div className="flex flex-wrap gap-1.5">
+                                    <Button
+                                        size="small"
+                                        type={myReaction?.resolution === WORKSPACE_ITEM_RESOLUTION.USE ? "primary" : "default"}
+                                        className={
+                                            myReaction?.resolution === WORKSPACE_ITEM_RESOLUTION.USE
+                                                ? "border-emerald-500! bg-emerald-500! text-white! hover:border-emerald-600! hover:bg-emerald-600!"
+                                                : "border-emerald-300 text-emerald-800 dark:border-emerald-700 dark:text-emerald-200"
+                                        }
+                                        loading={reactionBusy}
+                                        onClick={() => void castReaction(WORKSPACE_ITEM_RESOLUTION.USE)}
+                                    >
+                                        用
+                                    </Button>
+                                    <Button
+                                        size="small"
+                                        type={myReaction?.resolution === WORKSPACE_ITEM_RESOLUTION.REVISE ? "primary" : "default"}
+                                        className={
+                                            myReaction?.resolution === WORKSPACE_ITEM_RESOLUTION.REVISE
+                                                ? "border-sky-500! bg-sky-500! text-white! hover:border-sky-600! hover:bg-sky-600!"
+                                                : "border-sky-300 text-sky-800 dark:border-sky-700 dark:text-sky-200"
+                                        }
+                                        loading={reactionBusy}
+                                        onClick={() => void castReaction(WORKSPACE_ITEM_RESOLUTION.REVISE)}
+                                    >
+                                        改
+                                    </Button>
+                                    <Button
+                                        size="small"
+                                        type={myReaction?.resolution === WORKSPACE_ITEM_RESOLUTION.DISCARD ? "primary" : "default"}
+                                        className={
+                                            myReaction?.resolution === WORKSPACE_ITEM_RESOLUTION.DISCARD
+                                                ? "border-rose-500! bg-rose-500! text-white! hover:border-rose-600! hover:bg-rose-600!"
+                                                : "border-rose-300 text-rose-800 dark:border-rose-700 dark:text-rose-200"
+                                        }
+                                        loading={reactionBusy}
+                                        onClick={() => void castReaction(WORKSPACE_ITEM_RESOLUTION.DISCARD)}
+                                    >
+                                        弃
+                                    </Button>
+                                    {myReaction ? (
+                                        <Button size="small" type="text" danger disabled={reactionBusy} onClick={() => void clearMyReaction()}>
+                                            取消
+                                        </Button>
+                                    ) : null}
+                                </div>
+                                <Input.TextArea
+                                    size="small"
+                                    rows={2}
+                                    maxLength={200}
+                                    showCount
+                                    placeholder="可选短评"
+                                    value={commentDraft}
+                                    disabled={reactionBusy}
+                                    onChange={(e) => setCommentDraft(e.target.value)}
+                                />
+                                {myReaction ? (
+                                    <div className="text-[11px] text-stone-500">
+                                        我的决议：
+                                        <span className="font-medium text-stone-800 dark:text-stone-100">{resolutionLabel(myReaction.resolution)}</span>
+                                        {commentDraft.trim() !== (myReaction.comment || "") ? (
+                                            <Button
+                                                type="link"
+                                                size="small"
+                                                className="h-auto px-1 text-[11px]"
+                                                disabled={reactionBusy || !myReaction.resolution}
+                                                onClick={() => void castReaction(myReaction.resolution)}
+                                            >
+                                                更新短评
+                                            </Button>
+                                        ) : null}
+                                    </div>
+                                ) : null}
+                                {sortedReactions.length ? (
+                                    <div className="max-h-28 space-y-1.5 overflow-auto">
+                                        {sortedReactions.map((r) => (
+                                            <div key={r.user_id} className="flex items-start justify-between gap-2 rounded-lg bg-stone-50 px-2 py-1.5 text-[11px] dark:bg-stone-900/60">
+                                                <div className="min-w-0">
+                                                    <span
+                                                        className={`mr-1.5 inline-flex rounded px-1 py-0.5 font-semibold ${
+                                                            r.resolution === WORKSPACE_ITEM_RESOLUTION.USE
+                                                                ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200"
+                                                                : r.resolution === WORKSPACE_ITEM_RESOLUTION.REVISE
+                                                                  ? "bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-200"
+                                                                  : "bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-200"
+                                                        }`}
+                                                    >
+                                                        {resolutionLabel(r.resolution)}
+                                                    </span>
+                                                    <span className="font-medium text-stone-800 dark:text-stone-100">
+                                                        {r.display_name || r.email || r.user_id.slice(0, 8)}
+                                                    </span>
+                                                    {r.comment ? <div className="mt-0.5 whitespace-pre-wrap text-stone-600 dark:text-stone-300">{r.comment}</div> : null}
+                                                </div>
+                                                {isOwner && r.user_id !== currentUserId ? (
+                                                    <Button
+                                                        type="text"
+                                                        size="small"
+                                                        danger
+                                                        className="h-auto shrink-0 px-1 text-[11px]"
+                                                        disabled={reactionBusy}
+                                                        onClick={() => {
+                                                            setReactionBusy(true);
+                                                            void onClearReaction(item, r.user_id).finally(() => setReactionBusy(false));
+                                                        }}
+                                                    >
+                                                        清除
+                                                    </Button>
+                                                ) : null}
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : null}
                             </div>
-                        ) : null}
-                        {item.note ? (
-                            <div>
-                                <div className="text-xs text-stone-500">备注</div>
-                                <div className="text-xs leading-5">{item.note}</div>
-                            </div>
-                        ) : null}
-                        <div className="flex flex-wrap gap-2 pt-2">
+                        </div>
+
+                        <div className="flex flex-wrap gap-2 border-t border-stone-200 bg-white px-4 py-3 dark:border-stone-800 dark:bg-stone-950">
                             <Button type="primary" onClick={() => onSave(item)}>
                                 存到我的资产
                             </Button>

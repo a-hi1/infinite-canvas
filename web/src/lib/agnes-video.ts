@@ -1,3 +1,4 @@
+import { AGNES_VIDEO_MODE_GUIDE, formatVideoModeGuide } from "@/lib/video-mode-guide";
 import { modelOptionName, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -37,4 +38,8 @@ export function agnesVideoRequestError(_config: AiConfig, references: ReferenceI
     return "";
 }
 
-export const agnesVideoModeHint = "Agnes Video 仅支持纯文本生视频，固定 1152x768，支持 2s / 5s，不支持参考素材和音频。";
+/** Compact guide for the video workbench banner. */
+export const agnesVideoModeGuide = AGNES_VIDEO_MODE_GUIDE;
+
+/** Single-line fallback for callers that still expect a string. */
+export const agnesVideoModeHint = formatVideoModeGuide(AGNES_VIDEO_MODE_GUIDE);

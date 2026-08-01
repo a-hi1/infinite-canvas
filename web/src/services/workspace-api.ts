@@ -1,5 +1,6 @@
 import {
     WORKSPACE_ITEM_KIND,
+    WORKSPACE_ITEM_RESOLUTION,
     WORKSPACE_ITEM_SOURCE,
     WORKSPACE_ROLE,
     WORKSPACE_TASK_STATUS,
@@ -7,7 +8,7 @@ import {
 } from "@/lib/cloud-domain";
 import { CloudApiError } from "@/services/cloud-api";
 
-export { WORKSPACE_ITEM_KIND, WORKSPACE_ITEM_SOURCE, WORKSPACE_ROLE, WORKSPACE_TASK_STATUS };
+export { WORKSPACE_ITEM_KIND, WORKSPACE_ITEM_RESOLUTION, WORKSPACE_ITEM_SOURCE, WORKSPACE_ROLE, WORKSPACE_TASK_STATUS };
 
 export type WorkspaceSummary = {
     id: string;
@@ -31,6 +32,15 @@ export type WorkspaceMember = {
     email?: string;
 };
 
+export type WorkspaceItemReaction = {
+    user_id: string;
+    resolution: string;
+    comment?: string;
+    updated_at?: string;
+    display_name?: string;
+    email?: string;
+};
+
 export type WorkspaceItem = {
     id: string;
     workspace_id: string;
@@ -49,6 +59,14 @@ export type WorkspaceItem = {
     mime?: string;
     source_type?: string;
     source_ref?: string;
+    /** Human revision label, e.g. "v2" / "终稿-A". */
+    version?: string;
+    /** Optional earlier item this revises (same workspace). */
+    replaces_item_id?: string;
+    /** Final draft flag on material wall. */
+    is_final?: boolean;
+    /** Member votes: 用/弃/改 (+ optional short comment). */
+    reactions?: WorkspaceItemReaction[];
     created_by: string;
     created_by_name?: string;
     created_by_email?: string;
@@ -184,9 +202,13 @@ export function archiveWorkspace(workspaceId: string) {
     });
 }
 
-export function listWorkspaceItems(workspaceId: string, input?: { kind?: string; page?: number; pageSize?: number }) {
+export function listWorkspaceItems(
+    workspaceId: string,
+    input?: { kind?: string; category?: string; page?: number; pageSize?: number },
+) {
     const params = new URLSearchParams();
     if (input?.kind) params.set("kind", input.kind);
+    if (input?.category) params.set("category", input.category);
     if (input?.page) params.set("page", String(input.page));
     if (input?.pageSize) params.set("page_size", String(input.pageSize));
     const qs = params.toString();
@@ -210,6 +232,9 @@ export type ShareWorkspaceItemInput = {
     height?: number;
     bytes?: number;
     mime?: string;
+    version?: string;
+    replacesItemId?: string;
+    isFinal?: boolean;
     /** Media blob for image/video kinds. */
     file?: Blob;
     filename?: string;
@@ -231,6 +256,9 @@ export function createWorkspaceItem(workspaceId: string, input: ShareWorkspaceIt
                 source_type: input.sourceType || WORKSPACE_ITEM_SOURCE.ASSET,
                 source_ref: input.sourceRef || "",
                 text_content: input.textContent || "",
+                version: input.version || "",
+                replaces_item_id: input.replacesItemId || "",
+                is_final: Boolean(input.isFinal),
             }),
         });
     }
@@ -248,6 +276,9 @@ export function createWorkspaceItem(workspaceId: string, input: ShareWorkspaceIt
     form.append("height", String(input.height || 0));
     form.append("bytes", String(input.bytes || 0));
     form.append("mime", input.mime || "");
+    form.append("version", input.version || "");
+    form.append("replaces_item_id", input.replacesItemId || "");
+    form.append("is_final", input.isFinal ? "true" : "false");
     if (input.file) {
         form.append("file", input.file, input.filename || "share.bin");
     }
@@ -257,9 +288,71 @@ export function createWorkspaceItem(workspaceId: string, input: ShareWorkspaceIt
     });
 }
 
+export type UpdateWorkspaceItemInput = {
+    title?: string;
+    note?: string;
+    category?: string;
+    tags?: string[];
+    version?: string;
+    replacesItemId?: string | null;
+    isFinal?: boolean;
+};
+
+export function updateWorkspaceItem(workspaceId: string, itemId: string, patch: UpdateWorkspaceItemInput) {
+    const body: Record<string, unknown> = {};
+    if (patch.title !== undefined) body.title = patch.title;
+    if (patch.note !== undefined) body.note = patch.note;
+    if (patch.category !== undefined) body.category = patch.category;
+    if (patch.tags !== undefined) body.tags = patch.tags;
+    if (patch.version !== undefined) body.version = patch.version;
+    if (patch.replacesItemId !== undefined) body.replaces_item_id = patch.replacesItemId || "";
+    if (patch.isFinal !== undefined) body.is_final = patch.isFinal;
+    return request<WorkspaceItem>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}`,
+        {
+            method: "PATCH",
+            body: JSON.stringify(body),
+        },
+    );
+}
+
+/** Upsert caller's own 用/弃/改 vote on a shared item. */
+export function upsertWorkspaceItemReaction(
+    workspaceId: string,
+    itemId: string,
+    input: { resolution: string; comment?: string },
+) {
+    return request<WorkspaceItem>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}/reaction`,
+        {
+            method: "PUT",
+            body: JSON.stringify({
+                resolution: input.resolution,
+                comment: input.comment ?? "",
+            }),
+        },
+    );
+}
+
+/** Clear own reaction; owner may pass userId to clear another's. */
+export function clearWorkspaceItemReaction(workspaceId: string, itemId: string, userId?: string) {
+    const qs = userId ? `?user_id=${encodeURIComponent(userId)}` : "";
+    return request<WorkspaceItem>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}/reaction${qs}`,
+        { method: "DELETE" },
+    );
+}
+
 export function deleteWorkspaceItem(workspaceId: string, itemId: string) {
     return request<{ ok: boolean; id: string }>(
         `/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}`,
+        { method: "DELETE" },
+    );
+}
+
+export function removeWorkspaceMember(workspaceId: string, userId: string) {
+    return request<{ ok: boolean; user_id: string }>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
         { method: "DELETE" },
     );
 }
@@ -428,6 +521,7 @@ export function sourceTypeLabel(sourceType?: string) {
     if (sourceType === WORKSPACE_ITEM_SOURCE.WORKBENCH_LOCAL) return "工作台本机";
     if (sourceType === WORKSPACE_ITEM_SOURCE.WORKBENCH_CLOUD) return "工作台云端";
     if (sourceType === WORKSPACE_ITEM_SOURCE.LOCAL_UPLOAD) return "本地上传";
+    if (sourceType === WORKSPACE_ITEM_SOURCE.CANVAS) return "画布";
     return sourceType || "分享";
 }
 
@@ -437,4 +531,24 @@ export function displayModelName(model?: string | null) {
     if (!value) return "";
     const idx = value.indexOf("::");
     return idx >= 0 ? value.slice(idx + 2) || value : value;
+}
+
+export function resolutionLabel(resolution?: string | null) {
+    if (resolution === WORKSPACE_ITEM_RESOLUTION.USE) return "用";
+    if (resolution === WORKSPACE_ITEM_RESOLUTION.DISCARD) return "弃";
+    if (resolution === WORKSPACE_ITEM_RESOLUTION.REVISE) return "改";
+    return resolution || "";
+}
+
+/** Count votes by resolution for card badges. */
+export function reactionCounts(reactions?: WorkspaceItemReaction[] | null) {
+    const counts = { use: 0, discard: 0, revise: 0, total: 0 };
+    for (const r of reactions || []) {
+        if (!r) continue;
+        counts.total += 1;
+        if (r.resolution === WORKSPACE_ITEM_RESOLUTION.USE) counts.use += 1;
+        else if (r.resolution === WORKSPACE_ITEM_RESOLUTION.DISCARD) counts.discard += 1;
+        else if (r.resolution === WORKSPACE_ITEM_RESOLUTION.REVISE) counts.revise += 1;
+    }
+    return counts;
 }

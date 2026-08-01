@@ -1,3 +1,4 @@
+import { formatVideoModeGuide, GROK_VIDEO_MODE_GUIDE } from "@/lib/video-mode-guide";
 import { modelOptionName, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceVideo } from "@/types/media";
 
@@ -153,5 +154,8 @@ export function grokEditVideoReferenceError(videos: ReferenceVideo[]) {
     return "";
 }
 
-export const grokVideoModeHint =
-    "Grok 视频：文生/图生/多参考图走 generation（codex2api: /videos/generations；内网 New API: 只走 /video/generations，不试不存在的 /videos/generations）。单条参考 MP4 + 提示词走 /videos/edits（JSON body：video/video_url data URI 或公网 URL；codex2api 不接受 multipart/415）。New API 常无 edits 路由。建议源文件 ≤40MB、约 1–15 秒，硬顶 100MB。不要图+视频混用。多图压小本地参考图且不静默只发第一张。规格：选中的清晰度/比例/秒数原样进首个请求；仅创建失败才降档或去字段兜底，不会用无分辨率最小 body 抢先成功。若上游仍返回明显低于所选的源文件，界面会提示实际分辨率，不虚标。";
+/** Compact guide for the video workbench banner. */
+export const grokVideoModeGuide = GROK_VIDEO_MODE_GUIDE;
+
+/** Single-line fallback for callers that still expect a string. */
+export const grokVideoModeHint = formatVideoModeGuide(GROK_VIDEO_MODE_GUIDE);

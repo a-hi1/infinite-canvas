@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import type { ReactNode } from "react";
-import { Copy, Plus, Trash2 } from "lucide-react";
+import { Copy, Plus, Share2, Trash2 } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -12,6 +12,7 @@ export function CanvasNodeContextMenu({
     onDuplicate,
     onDelete,
     onCopy,
+    onShareWorkspace,
     selectedCount = 1,
 }: {
     menu: ContextMenuState;
@@ -19,6 +20,7 @@ export function CanvasNodeContextMenu({
     onDuplicate: () => void;
     onDelete: () => void;
     onCopy?: () => void;
+    onShareWorkspace?: () => void;
     /** When right-click target is part of multi-selection, delete/copy applies to all. */
     selectedCount?: number;
 }) {
@@ -46,6 +48,13 @@ export function CanvasNodeContextMenu({
             ) : null}
             {menu.type === "node" && !multi ? <MenuButton icon={<Plus className="size-4" />} label="复制节点" onClick={onDuplicate} /> : null}
             {menu.type === "node" && multi && onCopy ? <MenuButton icon={<Copy className="size-4" />} label={`复制 ${selectedCount} 个`} onClick={onCopy} /> : null}
+            {menu.type === "node" && onShareWorkspace ? (
+                <MenuButton
+                    icon={<Share2 className="size-4" />}
+                    label={multi ? `发布到空间（${selectedCount}）` : "发布到空间"}
+                    onClick={onShareWorkspace}
+                />
+            ) : null}
             <MenuButton
                 icon={<Trash2 className="size-4" />}
                 label={menu.type === "connection" ? "删除连线" : multi ? `删除 ${selectedCount} 个节点` : "删除节点"}

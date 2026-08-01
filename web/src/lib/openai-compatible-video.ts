@@ -1,3 +1,4 @@
+import { formatVideoModeGuide, SORA_VEO_MODE_GUIDE } from "@/lib/video-mode-guide";
 import { modelOptionName, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 
 /**
@@ -720,14 +721,17 @@ export function shouldTryNextSoraVeoCreatePath(error: unknown) {
     return isMissingSoraVeoCreatePathError(error) || isInvalidVideoRequestBodyError(error);
 }
 
-export const soraVeoModeHint =
-    "Sora / Veo（OpenAI 兼容）：支持文生与图生视频。Sora 图生 1 张首帧；Veo 3.1 最多 3 张参考图。创建优先 /video/generations + 最小 body {model,prompt,seconds}，再回退 /videos、/videos/generations。远程 imgen 图常因 CORS 读不到。不支持参考视频/音频。Sora 秒数 4/8/12，Veo 4/6/8；sora-2 尺寸仅 1280x720/720x1280。";
+/** Compact guide for the video workbench banner. */
+export const soraVeoModeGuide = SORA_VEO_MODE_GUIDE;
+
+/** Single-line fallback for callers that still expect a string. */
+export const soraVeoModeHint = formatVideoModeGuide(SORA_VEO_MODE_GUIDE);
 
 export const soraVideoModeHint =
-    "Sora：文生优先 JSON 最小字段 {model,prompt,seconds}（对齐可用脚本 /video/generations）；图生走 multipart `input_reference` 或 JSON images，仅 1 张首帧。秒数 4/8/12。路径优先 /video/generations，再 /videos。部分中转 VIDEO 端点只认 azure-sora——请求会先发你选的 sora-2，再回退 azure-sora。";
+    "Sora：文生 / 1 张首帧图生 · 秒数 4/8/12 · 优先本地可读参考图。部分中转只认 azure-sora，会先发所选再自动回退。";
 
 export const veoVideoModeHint =
-    "Veo（OpenAI 兼容中转）：文生优先 /video/generations + {model,prompt,seconds}；图生优先 JSON `images`/`reference_images`，最多 3 张参考图，并尽量选用 veo-*-i2v。秒数 4/6/8。请用本地可读参考图。";
+    "Veo：文生 / 最多 3 张参考图 · 秒数 4/6/8 · 优先本地可读参考图，尽量选 veo-*-i2v。";
 
 function readErrorText(error: unknown): string {
     if (!error) return "";

@@ -114,12 +114,21 @@ export const WORKSPACE_ITEM_SOURCE = {
     WORKBENCH_CLOUD: "workbench_cloud",
     /** Direct browser file upload into a workspace (not from private assets/history). */
     LOCAL_UPLOAD: "local_upload",
+    /** Shared from canvas storyboard / nodes. */
+    CANVAS: "canvas",
 } as const;
 
 export const WORKSPACE_TASK_STATUS = {
     TODO: "todo",
     DOING: "doing",
     DONE: "done",
+} as const;
+
+/** Material-wall review resolution: 用 / 弃 / 改. */
+export const WORKSPACE_ITEM_RESOLUTION = {
+    USE: "use",
+    DISCARD: "discard",
+    REVISE: "revise",
 } as const;
 
 export type CloudErrorReason = (typeof CLOUD_ERROR_REASON)[keyof typeof CLOUD_ERROR_REASON];

@@ -134,10 +134,22 @@ export const WORKSPACE_ITEM_SOURCE = {
     WORKBENCH_CLOUD: "workbench_cloud",
     /** Direct browser file upload into a workspace (not from private assets/history). */
     LOCAL_UPLOAD: "local_upload",
+    /** Shared from canvas storyboard / nodes. */
+    CANVAS: "canvas",
 };
 
 export const WORKSPACE_TASK_STATUS = {
     TODO: "todo",
     DOING: "doing",
     DONE: "done",
+};
+
+/**
+ * Material-wall review resolution (director batch-pick on 9-grid / options).
+ * One vote per member on an item: use / discard / revise + optional short comment.
+ */
+export const WORKSPACE_ITEM_RESOLUTION = {
+    USE: "use",
+    DISCARD: "discard",
+    REVISE: "revise",
 };

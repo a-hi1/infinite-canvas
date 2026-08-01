@@ -28,10 +28,13 @@ export function AccountPopover() {
     const [open, setOpen] = useState(false);
     const [refreshing, setRefreshing] = useState(false);
 
+    const userId = user?.id || "";
+
     useEffect(() => {
-        if (!open || !user) return;
+        if (!open || !userId) return;
+        // Only refresh once when the popover opens — do not re-run on usage/user object churn.
         void refreshUsage();
-    }, [open, refreshUsage, user]);
+    }, [open, refreshUsage, userId]);
 
     if (!user) return null;
 
@@ -80,7 +83,7 @@ export function AccountPopover() {
                         刷新
                     </Button>
                 </div>
-                <Progress percent={percent} size="small" status={nearFull ? "exception" : "active"} showInfo={false} />
+                <Progress percent={percent} size="small" status={nearFull ? "exception" : "normal"} showInfo={false} />
                 <div className="mt-1 flex justify-between text-xs text-stone-600 dark:text-stone-300">
                     <span>{formatBytes(used)}</span>
                     <span>{max > 0 ? formatBytes(max) : "未配置上限"}</span>
