@@ -47,6 +47,8 @@ type AssetStore = {
     hydrated: boolean;
     assets: Asset[];
     addAsset: (asset: Omit<Asset, "id" | "createdAt" | "updatedAt">) => string;
+    /** Prepend a batch as one block (keeps input order; avoids forEach+addAsset reversing export/import). */
+    addAssets: (assets: Array<Omit<Asset, "id" | "createdAt" | "updatedAt">>) => string[];
     updateAsset: (id: string, patch: Partial<Omit<Asset, "id" | "createdAt">>) => void;
     removeAsset: (id: string) => void;
     /** Batch delete: one cleanup pass + per-id cloud tombstone. */
@@ -132,6 +134,18 @@ export const useAssetStore = create<AssetStore>()(
                 set((state) => ({ assets: [{ ...asset, id, createdAt: now, updatedAt: now } as Asset, ...state.assets] }));
                 scheduleAssetCloudPush();
                 return id;
+            },
+            addAssets: (items) => {
+                if (!items?.length) return [];
+                const now = new Date().toISOString();
+                const prepared = items.map((asset) => {
+                    const id = nanoid();
+                    return { ...asset, id, createdAt: now, updatedAt: now } as Asset;
+                });
+                // One prepend keeps package/export order (first item stays first in the new block).
+                set((state) => ({ assets: [...prepared, ...state.assets] }));
+                scheduleAssetCloudPush();
+                return prepared.map((asset) => asset.id);
             },
             updateAsset: (id, patch) => {
                 set((state) => ({

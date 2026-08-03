@@ -69,6 +69,7 @@ export default function AssetsPage() {
     const assets = useAssetStore((state) => state.assets);
     const hydrated = useAssetStore((state) => state.hydrated);
     const addAsset = useAssetStore((state) => state.addAsset);
+    const addAssets = useAssetStore((state) => state.addAssets);
     const updateAsset = useAssetStore((state) => state.updateAsset);
     const removeAsset = useAssetStore((state) => state.removeAsset);
     const removeAssets = useAssetStore((state) => state.removeAssets);
@@ -310,18 +311,20 @@ export default function AssetsPage() {
         let importedCount = 0;
         let packageCount = 0;
         let failedCount = 0;
+        // Collect then batch-insert so zip/export order is not reversed by repeated prepend.
+        const pending: Array<Parameters<typeof addAsset>[0]> = [];
 
         for (const file of selectedFiles) {
             try {
                 if (isAssetPackageFile(file)) {
                     const importedAssets = await readAssetPackage(file);
-                    importedAssets.forEach((asset) => {
+                    for (const asset of importedAssets) {
                         const payload = { ...asset } as Record<string, unknown>;
                         delete payload.id;
                         delete payload.createdAt;
                         delete payload.updatedAt;
-                        addAsset(payload as Parameters<typeof addAsset>[0]);
-                    });
+                        pending.push(payload as Parameters<typeof addAsset>[0]);
+                    }
                     packageCount += importedAssets.length;
                     importedCount += 1;
                     continue;
@@ -330,7 +333,7 @@ export default function AssetsPage() {
                 if (file.type.startsWith("image/") || isLikelyImageFile(file)) {
                     const image = await uploadImage(file);
                     const title = fileNameWithoutExtension(file.name) || "本地图片";
-                    addAsset({
+                    pending.push({
                         kind: "image",
                         title,
                         coverUrl: image.url,
@@ -354,7 +357,7 @@ export default function AssetsPage() {
                 if (file.type.startsWith("video/") || isLikelyVideoFile(file)) {
                     const video = await uploadMediaFile(file, "video-asset");
                     const title = fileNameWithoutExtension(file.name) || "本地视频";
-                    addAsset({
+                    pending.push({
                         kind: "video",
                         title,
                         coverUrl: "",
@@ -380,6 +383,8 @@ export default function AssetsPage() {
                 failedCount += 1;
             }
         }
+
+        if (pending.length) addAssets(pending);
 
         if (importedCount) {
             const packageHint = packageCount ? `（含压缩包内 ${packageCount} 项）` : "";

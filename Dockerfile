@@ -15,7 +15,9 @@ FROM nginx:1.27-alpine
 COPY --from=web-build /app/web/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY docker/nginx-entrypoint.sh /nginx-entrypoint.sh
-RUN chmod +x /nginx-entrypoint.sh \
+# Windows 检出常见 CRLF；Alpine 会报 exec ... no such file or directory
+RUN sed -i 's/\r$//' /nginx-entrypoint.sh \
+    && chmod +x /nginx-entrypoint.sh \
     && printf '%s\n' '# placeholder until entrypoint writes LAN_AI_UPSTREAM config' 'location /lan-ai/ { return 503; }' > /etc/nginx/conf.d/lan-ai.inc
 
 EXPOSE 3000

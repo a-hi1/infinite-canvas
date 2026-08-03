@@ -21,23 +21,31 @@ type AssetExportItem = {
 };
 
 export async function exportAssets(assets: Asset[]) {
-    const files: AssetExportItem[] = [];
-    const zipFiles: { name: string; data: BlobPart }[] = [];
-
-    await Promise.all(
-        assets.map(async (asset) => {
-            if (asset.kind !== "image" && asset.kind !== "video") return;
+    // Keep caller order in assets.json (list top → first). File blobs can load in parallel.
+    const orderedAssets = [...assets];
+    const fileResults = await Promise.all(
+        orderedAssets.map(async (asset) => {
+            if (asset.kind !== "image" && asset.kind !== "video") return null;
             const storageKey = asset.data.storageKey;
-            if (!storageKey) return;
+            if (!storageKey) return null;
             const blob = asset.kind === "image" ? await getImageBlob(storageKey) : await getMediaBlob(storageKey);
-            if (!blob) return;
+            if (!blob) return null;
             const path = `files/${safeFileName(storageKey)}.${fileExtension(blob.type, asset.kind)}`;
-            files.push({ storageKey, path, mimeType: blob.type || asset.data.mimeType, bytes: blob.size });
-            zipFiles.push({ name: path, data: blob });
+            return {
+                item: { storageKey, path, mimeType: blob.type || asset.data.mimeType, bytes: blob.size } satisfies AssetExportItem,
+                zipFile: { name: path, data: blob as BlobPart },
+            };
         }),
     );
+    const files: AssetExportItem[] = [];
+    const zipFiles: { name: string; data: BlobPart }[] = [];
+    for (const result of fileResults) {
+        if (!result) continue;
+        files.push(result.item);
+        zipFiles.push(result.zipFile);
+    }
 
-    const data: AssetExportFile = { app: "infinite-canvas", version: 1, exportedAt: new Date().toISOString(), assets, files };
+    const data: AssetExportFile = { app: "infinite-canvas", version: 1, exportedAt: new Date().toISOString(), assets: orderedAssets, files };
     const zip = await createZip([{ name: "assets.json", data: JSON.stringify(data, null, 2) }, ...zipFiles]);
     saveAs(zip, "我的资产.zip");
 }

@@ -21,6 +21,11 @@ export default defineConfig({
         __APP_VERSION__: JSON.stringify(localVersion),
         __APP_RELEASES__: JSON.stringify(parseChangelog(localChangelog)),
     },
+    // 默认 assetsDir=assets 会与 SPA 路由 /assets（我的资产）冲突：
+    // Docker nginx try_files 命中真实目录 /assets/ 时刷新页面返回 403。
+    build: {
+        assetsDir: "static",
+    },
     server: {
         // 本地 dev（localhost:3000）把 /api、/ai-proxy 转到 Docker app(nginx)。
         // 默认 3011：配合 docker-compose.dev-host.yml，避开 VS Code 端口转发占用的 127.0.0.1:3001/8080
