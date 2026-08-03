@@ -1,0 +1,261 @@
+---
+title: 会话接手（AI 必读）
+description: 新对话了解项目时优先读本文；含三套部署、硬约束、当前主线与汇报清单
+---
+
+# 会话接手（AI 必读）
+
+> **用途：** 用户说「了解项目 / 接管上下文 / 继续开发」时，助手**先读本文**，再按文内清单核对 `git` 与其它 progress 文档。  
+> **维护：** 部署端口、remote、主线里程碑、硬约束、未推改动风险变化时**同步改本文**；细节实现仍以代码与 `pending-test` / `todo` / `upstream-follow` 为准。  
+> **不要**把真实 API Key、FRP token、`.env` 内容写进本文。
+
+## 自用仓库与 Git
+
+| 项 | 约定 |
+| --- | --- |
+| 推送/部署源 | `https://github.com/a-hi1/infinite-canvas.git` |
+| 本机 remote | `a-hi1` → a-hi1/infinite-canvas；`origin` 可能仍是上游 `basketikun/infinite-canvas` |
+| 推送 | **仅用户要求时** `git push a-hi1 main`；**禁止**默认 `git push origin` |
+| 上游 | **禁止**整仓 merge/rebase；只按 [upstream-follow](/docs/progress/upstream-follow) 切片移植 |
+| 部署 | **服务器由用户自己更新**；助手默认只给命令，不主动 ssh/远程部署（除非用户明确授权并写明目标机） |
+| 公司机 remote | 常叫 `origin` 但实际指向 a-hi1，**不要假设**每台都有名为 `a-hi1` 的 remote |
+| 提交范围 | **不要** `git add .`；只 `git add <具体文件>` |
+
+### 禁止提交
+
+- `web/dist/`、`web/.verification/`、`.vscode/`、`.claude/`
+- `PROJECT_ANALYSIS*`、分析 PDF、`tmp_patch_*`
+- `.env`、`.env.proxy`、`deploy/lan-tunnel/frps.toml`、`frpc.toml`（含 token 的配置）
+- 真实 API Key / FRP token（对话里误贴也只提醒重置，不写入仓库或记忆）
+
+## 第一步：只读核对（动手前）
+
+```bash
+git remote -v
+git status -sb
+git log -12 --oneline
+git rev-list --left-right --count a-hi1/main...HEAD 2>/dev/null || true
+```
+
+必读：
+
+1. **本文** `docs/content/docs/progress/session-handoff.mdx`
+2. `AGENTS.md`、`CLAUDE.md`、`README.md`
+3. [todo](/docs/progress/todo) · [pending-test](/docs/progress/pending-test) · [upstream-follow](/docs/progress/upstream-follow)
+4. [ops-daily](/docs/progress/ops-daily) · [p05c-acceptance](/docs/progress/p05c-acceptance) · [s0-human-checklist](/docs/progress/s0-human-checklist)（S0 相关）
+5. 云：[cloud-api](/docs/overview/cloud-api) · 工作空间：[workspace](/docs/overview/workspace)
+6. 家里 Grok 隧道：`deploy/lan-tunnel/README.md`（若动 `/lan-ai` / FRP）
+
+有记忆/系统提醒可参考，**必须以仓库现状为准**（`git log` + progress 文档优先于过期句）。
+
+### 参考 tip（写/改本文时的锚点，接手以本机为准）
+
+- 已推 `a-hi1/main` tip 曾为：`846d2ea` — `fix(deploy): SPA /assets refresh, asset import order, Windows entrypoint`
+- 本机可能有**未提交**工作空间 `folder` 字段全栈改动 + 双端口 compose；**未 push 前不要当服务器/公司机已有**
+- 接手时以你本机 `git log -1` / `git status` 为准，**不要死记**上文 tip
+
+## 项目定位
+
+- 个人/本地/自部署 AI 视觉工作台（图/视频/音频、画布、素材、提示词、工作空间）
+- **默认本地 BYOK**，无强制登录；可选云账号做历史上云与协作
+- **本地优先**：云失败不阻断创作、不把本地成功改写成失败
+- 主线：**自用体验小切片** + 上游按矩阵移植；**收费/支付/画布扣积分后置**
+- 协作：独立「工作空间」（显式分享，非私有 assets 全量同步）
+
+## 架构速查
+
+| 路径 | 说明 |
+| --- | --- |
+| `web/` | 主应用 Vite + React + Zustand；图/视频工作台、画布、资产、提示词、工作空间 |
+| `api/` | 可选云：登录、生成历史上云、projects/blobs/assets、workspaces、积分账本；平台代生成默认关 |
+| `ai-proxy/` | 同源 AI 代理 + 部分 media 转发（CORS / 藏 Key） |
+| `canvas-agent/` | 本机 Agent/MCP（勿当公网服务） |
+| `docs/` | 文档站 |
+| `deploy/lan-tunnel/` | 可选 FRP；默认不随主栈启动 |
+| `plugins/infinite-canvas/` | Codex 插件封装 |
+
+关键前端入口：
+
+- 路由 `web/src/router.tsx`
+- 图/视频工作台 `web/src/pages/image|video/`
+- 画布 `web/src/pages/canvas/` + `web/src/components/canvas/` + `web/src/stores/canvas/`
+- 资产 `web/src/pages/assets/` + `web/src/stores/use-asset-store.ts`
+- 工作空间 `web/src/pages/workspace/` + `web/src/services/workspace-api.ts` + `web/src/components/workspace/` + `web/src/lib/workspace-folder.ts`
+- AI 请求 `web/src/services/api/`（`image.ts` / `video.ts` / `model-plugin.ts`）
+- 云 API `web/src/services/cloud-api.ts`、`cloud-history.ts`
+- 配置 `web/src/stores/use-config-store.ts`
+
+## 部署与端口（三套，勿混）
+
+### 共性
+
+- 主栈：`docker compose -f docker-compose.local.yml` → `app` + `api` + `ai-proxy`
+- 容器内 app 听 3000；Nginx 同源 `/api/`、`/ai-proxy/`、可选 `/lan-ai/`
+- Nginx **必须** `$http_host` + `X-Forwarded-Host` 保留端口（否则登录 403）
+- **禁止被上游覆盖**：compose / nginx / 端口 / 同源 `/api` `/ai-proxy`
+- 浏览器代理 ≠ Docker 出网；容器拉 `vidgen.x.ai` 超时可在根 `.env` 设 `HTTP_PROXY`/`HTTPS_PROXY` 后重建 api/ai-proxy；**服务器勿默认照搬本机 789x**
+
+### A. 本机 Windows 开发
+
+- 常同时映射 `3001:3000` + `3011:3000`（以本地 `docker-compose.local.yml` 为准）
+- 日常验收优先 `http://127.0.0.1:3011`（避开 VS Code 端口转发抢 3001）
+- 可选叠加 `docker-compose.dev-host.yml`
+- Vite dev：`/api` `/ai-proxy` 默认代理到 `3011`；可选 `VITE_LAN_AI_TARGET` / `/lan-ai`
+
+```bash
+docker compose -f docker-compose.local.yml up -d --build app api
+# 硬刷新浏览器
+```
+
+### B. 美国/公网服务器（自用）
+
+- 目录：`~/apps/infinite-canvas`
+- 端口：`3001:3000`；api 不默认绑宿主机 8080
+
+```bash
+cd ~/apps/infinite-canvas
+git pull
+sudo docker compose -f docker-compose.local.yml up -d --build
+sudo docker compose -f docker-compose.local.yml ps
+./scripts/check-cloud-stack.sh
+# 可选：./scripts/backup-api-data.sh
+```
+
+### C. 公司内网 Windows 机（协作演示）
+
+- 路径示例：`D:\wyx_group\project\infinite-canvas`（以用户当前为准）
+- **compose 项目名必须** `-p ic3011`，端口 **`3011:3000`**
+- 同机常有 :3000 new-api、:3001 旧 infinite-canvas，**禁止抢占**
+- 公网/域名访问形态常类似：`http://www.openai2api.com:3011`
+- 该机 git remote 常叫 **`origin`** 但指向 a-hi1
+
+**硬约束：不能影响同机其它项目**
+
+- 禁止 Docker engine 重启、禁止 prune、禁止停无关容器
+- 禁止改/占 3000、3001（其它服务）
+- 只操作 `ic3011` 项目容器
+
+```powershell
+cd D:\wyx_group\project\infinite-canvas
+git fetch origin
+git reset --hard origin/main   # 或 git pull，以该机 remote 名为准
+docker compose -p ic3011 -f docker-compose.local.yml up -d --build
+docker compose -p ic3011 -f docker-compose.local.yml ps
+```
+
+已知部署坑（`846d2ea` 一带已修，部署后须确认镜像含这些）：
+
+- Vite `assetsDir: "static"` + nginx `location = /assets`，避免 SPA `/assets` 刷新 403
+- `absolute_redirect off; port_in_redirect off`，避免跳到同域 :3000
+- Dockerfile `sed` 去 CRLF，避免 Alpine entrypoint `no such file`
+- 资产导入批量 `addAssets` 保序
+- 内网 Docker Hub 可能 EOF：可用离线 `docker load`；Windows 注意无 BOM
+
+### /lan-ai 与家里 Grok2API（方案 B）
+
+- 浏览器不要直连 `http://192.168.x.x`（CORS）
+- 公网用家里 API：FRP；服务器推荐 `LAN_AI_UPSTREAM=http://infinite-canvas-frps:18000`
+- 前端渠道 Base URL：`/lan-ai` + 客户端 API Key
+- 家里 Windows frpc 需常开（见 `deploy/lan-tunnel/README.md`）
+- 安全：放行 3001、FRP 7000；**不要**对公网放行 18000；勿提交含 token 的 frps/frpc.toml
+
+更短命令见 [ops-daily](/docs/progress/ops-daily)。
+
+## 已落地主线（勿当未做 / 勿回退）
+
+### 云与底座
+
+- 云历史双轨；上云幂等 `client_local_id`；远程 URL 可走 `from-url` / `/ai-proxy/media`
+- P0.5c / S0 已出门
+- P1 底座 A–G 代码在仓（平台代生成默认关）
+- P2.0-A/B/C：画布 JSON + blob + 素材 manifest/tombstone；未做 Postgres/S3
+
+### 工作空间（协作）
+
+- MVP：素材墙 / 生成分享 / 进度板 / 本地上传（含 md/txt/csv）/ 分类墙 / 终稿 / 决议 / 画布发布 / 批量与智能归类
+- **文件夹 `folder` 与 `category` 正交**：扁平字符串 max 80；空 = 未归入；智能归类**只动分类不猜文件夹**
+- 墙面 UI 分层（不删功能）：**放入**（上传旁）→ **浏览**（批次文件夹 chips + 内容分类）→ **整理**（勾选后才展开批量条）
+- 实现位置：`api` create/list/update + `web/src/lib/workspace-folder.ts` + `detail.tsx` + 分享弹窗
+- **若未 commit/push，服务器与公司机还没有**——以 `git status` 与 [pending-test](/docs/progress/pending-test) 首条为准
+- 权限：创建者或 owner 改元数据；显式分享，不自动全量同步私有库
+
+### 上游切片（对照 v0.10.0，不整仓 merge）
+
+- 透明背景（BYOK）、组节点（最小）、modelScripts
+- 画布导出当前/选中、生成后保留节点提示词、节点名默认隐藏、提示词搜索防抖
+- 完整可调宽侧栏资产 Tab **现阶段不做**
+
+### 渠道 / 模型兼容（高频踩坑）
+
+- `compatProfile`：auto / openai / openai-slim / grok-image / relay-fragile
+- **Grok 图生图**：JSON `POST /images/edits`；有参考图**不再**自动跳 `*-edit`；多参考必须完整 multi-image payload，**禁止静默只发第一张**
+- **Grok 视频**：用户当前选择永远优先；禁止硬塞不存在的模型插队；多参考勿退化首图
+- Sora/Veo：多路径 create/poll；图生禁止无参考文生回退
+- Seedance/Agnes 保留；平台视频仍无参考素材服务端路径
+- 参考图本地上限 6（平台积分图生图仍最多 4）
+- 能力卡：`web/src/lib/model-capability.ts` 只暴露真实可选值
+
+### 自用 UX（多数仍在 pending-test）
+
+- 工作台并发 + 按任务停止（AbortController）
+- 画布并发生成（runningNodeIds + runId；有内容再生成新建子节点）
+- 部署体验：`/assets` 刷新、资产导入顺序、nginx 不误跳 :3000
+- 其它以代码与 pending-test 为准
+
+## 明确后置 / 暂缓
+
+- 平台扣积分产品面 / 支付 / 画布扣积分
+- Postgres / S3 / 素材跨用户自动分享
+- 整仓合上游；用上游 compose/nginx 覆盖端口
+- 完整可调宽侧栏资产 Tab 大包 / 插件 registry 大改
+- ai-proxy 更细白名单、Vitest lock 等微修可暂缓
+- 剪贴板上传图片失败：用户点名再做
+
+## 工作方式硬约束
+
+- 先理解与建议，**等用户确认再改代码**；未确认不提交、不推送
+- **服务器不用助手部署**；只给命令（公司机同样，除非明确授权且只动 `ic3011`）
+- 不破坏已实现能力：Grok 多参考、Sora/Veo/Seedance/Agnes、工作台并发/停止、云双轨、画布并发、工作空间既有能力、本地优先
+- 动 ai-proxy / 部署 / 端口 / 安全代理时特别谨慎，并同步相关 Markdown
+- 未登录 BYOK 必须可用；云失败不阻断本地
+- 图生图/多参考：禁止静默只发第一张；禁止擅自把 Grok 模型改回自动 `*-edit`
+- 工作空间文件夹：与 `category` 正交，不替代分类墙；智能归类不猜 folder
+- 验收优先：`scripts/check-cloud-stack.*`、`scripts/smoke-dual-track.*`；说明仍须人工 UI 的部分
+- **本机**改完会影响 Docker 镜像的代码后：**自动** `docker compose -f docker-compose.local.yml up -d --build` 相关服务（app / api / ai-proxy），不要等用户再说「重启」；纯文档可跳过。美国机/公司机仍由用户自部署
+- 不要擅自大范围重构
+
+## 文档同步规则（后续开发必做）
+
+实质修改后，**有变化才改**对应文档（不要为改而改）：
+
+| 变化类型 | 更新 |
+| --- | --- |
+| 主线里程碑 / 三套部署 / 硬约束 / 未推风险 / 接手清单 | **本文** `session-handoff.mdx` |
+| 长期架构、端口默认、云双轨叙述 | `CLAUDE.md`（摘要即可，细节链到 progress） |
+| 可执行开发规则、反复踩坑 | `AGENTS.md` |
+| 待办方向 | [todo](/docs/progress/todo) |
+| 已实现待人工点验 | [pending-test](/docs/progress/pending-test) |
+| 上游切片状态 | [upstream-follow](/docs/progress/upstream-follow) |
+| 运维最短命令 | [ops-daily](/docs/progress/ops-daily) |
+| 工作空间产品说明 | [workspace](/docs/overview/workspace) |
+| 云 API 行为 | [cloud-api](/docs/overview/cloud-api) |
+
+会话结束或功能合入前自检：若有人只读 `session-handoff` + `git status`，能否在 5 分钟内知道「能推什么、部署哪台、别踩什么」。
+
+## 了解项目后的中文汇报清单
+
+1. 项目定位  
+2. 当前架构  
+3. 部署与端口（本机 3011 / 美国 3001 / 公司 ic3011:3011；/lan-ai、FRP 若相关）  
+4. 最近重点（对照 `git log`；点名 Grok/Sora/Veo、工作台并发与停止、工作空间、部署 SPA/assets；**未提交改动单独列出**）  
+5. 已知风险（中转多图、远程图 CORS、容器出网、Key 可见、公司机误伤其它容器、未 push 的本地改动）  
+6. 当前待办（todo / upstream-follow / pending-test 顶上项）  
+7. 不能随便提交的文件  
+8. 建议下一步：1 个推荐 + 备选，并说明为何（优先自用体验小切片；勿抢跑计费）
+
+## 开发质量提示
+
+- 小步可回归；优先复用：`/api/blobs`、cloud-domain reason、本地优先同步、compatProfile、modelScripts、model-capability、workspace `mapPool`/`canEditItem`、既有 AbortSignal 链路
+- 换中转/模型：先改渠道兼容预设或拉取模型列表，避免再堆硬编码 if
+- 公司机操作前先确认：project 名 `ic3011`、端口 `3011`、不碰其它 compose 项目
+- 本机 Docker 自动重启规则详见 `AGENTS.md`

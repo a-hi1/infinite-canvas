@@ -1,10 +1,11 @@
-import { App, Modal, Select, Spin } from "antd";
-import { useCallback, useEffect, useState } from "react";
+import { App, Input, Modal, Select, Spin } from "antd";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
     WORKSPACE_ITEM_KIND,
     WORKSPACE_ITEM_SOURCE,
     createWorkspaceItem,
+    listWorkspaceItems,
     listWorkspaces,
     mapPool,
     peekWorkspaceListCache,
@@ -18,6 +19,12 @@ import type { Asset } from "@/stores/use-asset-store";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 import { assetTitleFromPrompt } from "@/lib/asset-display";
 import { resolveCategoryOrSuggest, suggestAssetCategory } from "@/lib/asset-category";
+import {
+    collectWorkspaceFolders,
+    normalizeWorkspaceFolder,
+    resolveWorkspaceFolderForSave,
+    workspaceFolderSelectOptions,
+} from "@/lib/workspace-folder";
 import { getLastWorkspaceId, setLastWorkspaceId } from "@/lib/workspace-preference";
 
 export type ShareDraft = {
@@ -114,6 +121,9 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
     const [sharing, setSharing] = useState(false);
     const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
     const [workspaceId, setWorkspaceId] = useState<string>();
+    const [folder, setFolder] = useState<string>("");
+    const [folderNames, setFolderNames] = useState<string[]>([]);
+    const [folderLoading, setFolderLoading] = useState(false);
     const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
     const load = useCallback(async () => {
@@ -143,10 +153,41 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
         if (!open) {
             setProgress(null);
             setSharing(false);
+            setFolder("");
+            setFolderNames([]);
             return;
         }
         void load();
     }, [load, open]);
+
+    useEffect(() => {
+        if (!open || !workspaceId || !user) {
+            setFolderNames([]);
+            return;
+        }
+        let active = true;
+        setFolderLoading(true);
+        void listWorkspaceItems(workspaceId, { pageSize: 100 })
+            .then((data) => {
+                if (!active) return;
+                setFolderNames(collectWorkspaceFolders(data.items || []));
+            })
+            .catch(() => {
+                if (!active) return;
+                setFolderNames([]);
+            })
+            .finally(() => {
+                if (active) setFolderLoading(false);
+            });
+        return () => {
+            active = false;
+        };
+    }, [open, workspaceId, user]);
+
+    const folderOptions = useMemo(
+        () => workspaceFolderSelectOptions(folderNames.map((name) => ({ folder: name })), folder),
+        [folderNames, folder],
+    );
 
     const handleOk = async () => {
         if (!user) {
@@ -161,6 +202,7 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
             message.warning("没有可分享的内容");
             return;
         }
+        const folderForShare = resolveWorkspaceFolderForSave(folder);
         setSharing(true);
         setProgress({ done: 0, total: drafts.length });
         let ok = 0;
@@ -184,6 +226,7 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
                         title: draft.title,
                         note: draft.note,
                         category: resolveShareCategory(draft),
+                        folder: folderForShare,
                         tags: draft.tags,
                         prompt: draft.prompt,
                         model: draft.model,
@@ -211,7 +254,11 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
             });
             if (ok) {
                 setLastWorkspaceId(workspaceId);
-                message.success(`已分享 ${ok} 项到工作空间${failed ? `，失败 ${failed} 项` : ""}`);
+                message.success(
+                    `已分享 ${ok} 项到工作空间${folderForShare ? ` · 文件夹「${folderForShare}」` : ""}${
+                        failed ? `，失败 ${failed} 项` : ""
+                    }`,
+                );
             } else {
                 message.error("分享失败，请确认文件可读且已加入空间");
             }
@@ -241,24 +288,59 @@ export function ShareToWorkspaceModal({ open, onClose, drafts, onDone }: Props) 
             destroyOnHidden
         >
             <p className="mb-3 text-xs text-stone-500 dark:text-stone-400">
-                仅上传你选中的内容副本；不会自动同步全部本地资产。对方可预览/下载，并另存到自己的「我的资产」。无分类时会按标题/提示词自动推断分区，可在空间详情再改。
+                仅上传选中内容的副本，不会同步全部本地资产。建议：先选空间，再可选填「批次文件夹」（项目包）；内容分类会自动推断，可在空间详情再改。文件夹与分类互不替代。
             </p>
             {loading && !workspaces.length ? (
                 <div className="flex justify-center py-8">
                     <Spin />
                 </div>
             ) : workspaces.length ? (
-                <Select
-                    className="w-full"
-                    placeholder="选择工作空间"
-                    value={workspaceId}
-                    onChange={(value) => {
-                        setWorkspaceId(value);
-                        if (value) setLastWorkspaceId(value);
-                    }}
-                    options={workspaces.map((ws) => ({ label: ws.name, value: ws.id }))}
-                    disabled={sharing}
-                />
+                <div className="space-y-3">
+                    <Select
+                        className="w-full"
+                        placeholder="选择工作空间"
+                        value={workspaceId}
+                        onChange={(value) => {
+                            setWorkspaceId(value);
+                            setFolder("");
+                            if (value) setLastWorkspaceId(value);
+                        }}
+                        options={workspaces.map((ws) => ({ label: ws.name, value: ws.id }))}
+                        disabled={sharing}
+                    />
+                    <Select
+                        className="w-full"
+                        showSearch
+                        allowClear
+                        placeholder={folderLoading ? "加载文件夹…" : "可选：批次文件夹"}
+                        value={folder || undefined}
+                        options={folderOptions.filter((o) => o.value)}
+                        optionFilterProp="label"
+                        disabled={sharing || !workspaceId}
+                        loading={folderLoading}
+                        onChange={(value) => setFolder(typeof value === "string" ? value : "")}
+                        dropdownRender={(menu) => (
+                            <div>
+                                {menu}
+                                <div className="border-t border-stone-100 p-2 dark:border-stone-800">
+                                    <Input
+                                        size="small"
+                                        placeholder="新建文件夹名后回车"
+                                        maxLength={80}
+                                        disabled={sharing || !workspaceId}
+                                        onPressEnter={(event) => {
+                                            const next = normalizeWorkspaceFolder((event.target as HTMLInputElement).value);
+                                            if (!next) return;
+                                            setFolder(next);
+                                            setFolderNames((prev) => (prev.includes(next) ? prev : [...prev, next]));
+                                            (event.target as HTMLInputElement).value = "";
+                                        }}
+                                    />
+                                </div>
+                            </div>
+                        )}
+                    />
+                </div>
             ) : (
                 <div className="rounded-lg border border-dashed border-stone-300 p-4 text-sm text-stone-500 dark:border-stone-700">
                     你还没有工作空间。请先到「工作空间」页创建或用邀请码加入。

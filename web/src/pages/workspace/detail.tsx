@@ -8,6 +8,7 @@ import {
     Download,
     ExternalLink,
     FileUp,
+    Folder,
     GripVertical,
     Images,
     Paperclip,
@@ -36,6 +37,15 @@ import {
     standardAssetCategoryOptions,
     suggestAssetCategory,
 } from "@/lib/asset-category";
+import {
+    ALL_FOLDERS_VALUE,
+    WORKSPACE_UNFILED_VALUE,
+    buildWorkspaceFolderFilterOptions,
+    matchesWorkspaceFolderFilter,
+    normalizeWorkspaceFolder,
+    resolveWorkspaceFolderForSave,
+    workspaceFolderSelectOptions,
+} from "@/lib/workspace-folder";
 import {
     isWorkspaceDocumentFile,
     parseCsvPreview,
@@ -216,12 +226,18 @@ export default function WorkspaceDetailPage() {
     const [detailItem, setDetailItem] = useState<WorkspaceItem | null>(null);
     const [assetCategoryFilter, setAssetCategoryFilter] = useState(ALL_CATEGORIES_VALUE);
     const [genCategoryFilter, setGenCategoryFilter] = useState(ALL_CATEGORIES_VALUE);
+    /** Wall folder filter — orthogonal to category chips. */
+    const [assetFolderFilter, setAssetFolderFilter] = useState(ALL_FOLDERS_VALUE);
+    const [genFolderFilter, setGenFolderFilter] = useState(ALL_FOLDERS_VALUE);
     /** Wall view focus: all | finals only — keeps material wall scannable. */
     const [assetFinalOnly, setAssetFinalOnly] = useState(false);
     const [genFinalOnly, setGenFinalOnly] = useState(false);
     /** Multi-select on material/gen walls (same pattern as 我的资产). */
     const [selectedItemIds, setSelectedItemIds] = useState<string[]>([]);
     const [batchCategory, setBatchCategory] = useState<string | undefined>();
+    const [batchFolder, setBatchFolder] = useState<string | undefined>();
+    /** Target folder for local uploads (empty = unfiled). */
+    const [uploadFolder, setUploadFolder] = useState<string>("");
     const [batchBusy, setBatchBusy] = useState(false);
     const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
     const [dragOverStatus, setDragOverStatus] = useState<string | null>(null);
@@ -330,23 +346,27 @@ export default function WorkspaceDetailPage() {
             sortFinalsFirst(
                 assetItems.filter((item) => {
                     if (assetFinalOnly && !item.is_final) return false;
+                    if (!matchesWorkspaceFolderFilter(item.folder, assetFolderFilter)) return false;
                     return matchesAssetCategoryFilter(item.category, assetCategoryFilter);
                 }),
             ),
-        [assetItems, assetCategoryFilter, assetFinalOnly],
+        [assetItems, assetCategoryFilter, assetFolderFilter, assetFinalOnly],
     );
     const filteredGenItems = useMemo(
         () =>
             sortFinalsFirst(
                 genItems.filter((item) => {
                     if (genFinalOnly && !item.is_final) return false;
+                    if (!matchesWorkspaceFolderFilter(item.folder, genFolderFilter)) return false;
                     return matchesAssetCategoryFilter(item.category, genCategoryFilter);
                 }),
             ),
-        [genItems, genCategoryFilter, genFinalOnly],
+        [genItems, genCategoryFilter, genFolderFilter, genFinalOnly],
     );
     const assetCategoryOptions = useMemo(() => buildAssetCategoryFilterOptions(assetItems), [assetItems]);
     const genCategoryOptions = useMemo(() => buildAssetCategoryFilterOptions(genItems), [genItems]);
+    const assetFolderOptions = useMemo(() => buildWorkspaceFolderFilterOptions(assetItems), [assetItems]);
+    const genFolderOptions = useMemo(() => buildWorkspaceFolderFilterOptions(genItems), [genItems]);
     /** Detail category select: standards + any categories already used in this workspace. */
     const categoryEditOptions = useMemo(() => {
         const names = collectAssetCategories(items);
@@ -358,6 +378,12 @@ export default function WorkspaceDetailPage() {
     const batchCategoryOptions = useMemo(
         () => collectAssetCategories(items).map((name) => ({ label: name, value: name })),
         [items],
+    );
+    const folderSelectOptions = useMemo(() => workspaceFolderSelectOptions(items), [items]);
+    const batchFolderOptions = useMemo(() => workspaceFolderSelectOptions(items), [items]);
+    const uploadFolderOptions = useMemo(
+        () => workspaceFolderSelectOptions(items, uploadFolder),
+        [items, uploadFolder],
     );
     const itemTitleById = useMemo(() => {
         const map = new Map<string, string>();
@@ -521,7 +547,14 @@ export default function WorkspaceDetailPage() {
 
     const handleUpdateItemMeta = async (
         item: WorkspaceItem,
-        patch: { title?: string; category?: string; version?: string; replacesItemId?: string | null; isFinal?: boolean },
+        patch: {
+            title?: string;
+            category?: string;
+            folder?: string;
+            version?: string;
+            replacesItemId?: string | null;
+            isFinal?: boolean;
+        },
         options?: { silent?: boolean },
     ) => {
         try {
@@ -577,6 +610,44 @@ export default function WorkspaceDetailPage() {
                 );
             } else {
                 message.error("批量设分类失败");
+            }
+            clearSelection();
+        } finally {
+            setBatchBusy(false);
+        }
+    };
+
+    const handleBatchSetFolder = async () => {
+        if (!selectedEditable.length) {
+            message.warning(selectedOnWall.length ? "所选条目中没有你可编辑的项" : "请先勾选条目");
+            return;
+        }
+        // Undefined means user hasn't picked yet; empty string means unfiled.
+        if (batchFolder === undefined) {
+            message.warning("请先选择目标文件夹");
+            return;
+        }
+        const folder = resolveWorkspaceFolderForSave(batchFolder);
+        setBatchBusy(true);
+        let ok = 0;
+        let failed = 0;
+        try {
+            await mapPool(selectedEditable, 4, async (item) => {
+                try {
+                    await handleUpdateItemMeta(item, { folder }, { silent: true });
+                    ok += 1;
+                } catch {
+                    failed += 1;
+                }
+            });
+            if (ok) {
+                message.success(
+                    folder
+                        ? `已将 ${ok} 项移入「${folder}」${failed ? `，失败 ${failed}` : ""}`
+                        : `已将 ${ok} 项移出文件夹${failed ? `，失败 ${failed}` : ""}`,
+                );
+            } else {
+                message.error("批量移入文件夹失败");
             }
             clearSelection();
         } finally {
@@ -904,6 +975,12 @@ export default function WorkspaceDetailPage() {
         setUploadBusy(true);
         let ok = 0;
         let fail = 0;
+        // Prefer explicit upload select; if empty, inherit active named folder on material wall.
+        const folderForUpload =
+            resolveWorkspaceFolderForSave(uploadFolder) ||
+            (assetFolderFilter !== ALL_FOLDERS_VALUE && assetFolderFilter !== WORKSPACE_UNFILED_VALUE
+                ? resolveWorkspaceFolderForSave(assetFolderFilter)
+                : "");
         try {
             for (const file of fileList) {
                 const isImage = file.type.startsWith("image/");
@@ -934,6 +1011,7 @@ export default function WorkspaceDetailPage() {
                             kind: WORKSPACE_ITEM_KIND.ASSET_DOCUMENT,
                             title,
                             category: suggested,
+                            folder: folderForUpload,
                             sourceType: WORKSPACE_ITEM_SOURCE.LOCAL_UPLOAD,
                             mime,
                             bytes: file.size,
@@ -954,6 +1032,7 @@ export default function WorkspaceDetailPage() {
                         kind: isImage ? WORKSPACE_ITEM_KIND.ASSET_IMAGE : WORKSPACE_ITEM_KIND.ASSET_VIDEO,
                         title,
                         category: suggested,
+                        folder: folderForUpload,
                         sourceType: WORKSPACE_ITEM_SOURCE.LOCAL_UPLOAD,
                         mime: file.type,
                         bytes: file.size,
@@ -980,9 +1059,9 @@ export default function WorkspaceDetailPage() {
                     );
                 }).length;
                 message.success(
-                    `已上传 ${ok} 个文件到素材墙${fail ? `，${fail} 个失败` : ""}${
-                        withCat ? `（其中 ${Math.min(withCat, ok)} 个已自动分类）` : "（可在详情手动设分类）"
-                    }`,
+                    `已上传 ${ok} 个文件到素材墙${folderForUpload ? ` · 文件夹「${folderForUpload}」` : ""}${
+                        fail ? `，${fail} 个失败` : ""
+                    }${withCat ? `（其中 ${Math.min(withCat, ok)} 个已自动分类）` : "（可在详情手动设分类）"}`,
                 );
             }
         } finally {
@@ -1118,10 +1197,50 @@ export default function WorkspaceDetailPage() {
                             children: (
                                 <div className="space-y-3">
                                     <div className="flex flex-wrap items-center justify-between gap-2">
-                                        <div className="text-xs text-stone-500">
-                                            团队可复用素材 · 本地上传图片/视频/文档（md/txt/csv）或从「我的资产」分享
+                                        <div className="max-w-xl text-xs text-stone-500">
+                                            可上传图片/视频/文档，或从我的资产分享 · 文件夹=批次，分类=人物/场景
                                         </div>
-                                        <div className="flex flex-wrap gap-2">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <Select
+                                                size="small"
+                                                showSearch
+                                                allowClear
+                                                className="min-w-38"
+                                                placeholder="放入：未归入"
+                                                value={uploadFolder || undefined}
+                                                options={uploadFolderOptions.filter((o) => o.value)}
+                                                optionFilterProp="label"
+                                                disabled={uploadBusy}
+                                                onChange={(value) => setUploadFolder(typeof value === "string" ? value : "")}
+                                                labelRender={({ label, value }) => (
+                                                    <span className="inline-flex max-w-full items-center gap-1 truncate">
+                                                        <Folder className="size-3.5 shrink-0 text-violet-600 dark:text-violet-300" />
+                                                        <span className="truncate">
+                                                            放入：{value ? String(label || value) : "未归入"}
+                                                        </span>
+                                                    </span>
+                                                )}
+                                                dropdownRender={(menu) => (
+                                                    <div>
+                                                        {menu}
+                                                        <div className="border-t border-stone-100 p-2 dark:border-stone-800">
+                                                            <Input
+                                                                size="small"
+                                                                placeholder="新建文件夹名后回车"
+                                                                maxLength={80}
+                                                                onPressEnter={(event) => {
+                                                                    const next = normalizeWorkspaceFolder(
+                                                                        (event.target as HTMLInputElement).value,
+                                                                    );
+                                                                    if (!next) return;
+                                                                    setUploadFolder(next);
+                                                                    (event.target as HTMLInputElement).value = "";
+                                                                }}
+                                                            />
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            />
                                             <Button size="small" icon={<Images className="size-3.5" />} onClick={() => navigate("/assets")}>
                                                 从资产分享
                                             </Button>
@@ -1133,6 +1252,9 @@ export default function WorkspaceDetailPage() {
                                         </div>
                                     </div>
                                     <WallFilterBar
+                                        folderOptions={assetFolderOptions}
+                                        folderValue={assetFolderFilter}
+                                        onFolderChange={setAssetFolderFilter}
                                         categoryOptions={assetCategoryOptions}
                                         categoryValue={assetCategoryFilter}
                                         onCategoryChange={setAssetCategoryFilter}
@@ -1150,6 +1272,8 @@ export default function WorkspaceDetailPage() {
                                         batchBusy={batchBusy}
                                         batchCategory={batchCategory}
                                         batchCategoryOptions={batchCategoryOptions}
+                                        batchFolder={batchFolder}
+                                        batchFolderOptions={batchFolderOptions}
                                         uncategorizedEditableCount={tab === "assets" ? uncategorizedEditableCount : 0}
                                         canBatchEdit={selectedEditable.length > 0}
                                         canBatchDelete={selectedDeletable.length > 0}
@@ -1159,6 +1283,8 @@ export default function WorkspaceDetailPage() {
                                         }}
                                         onBatchCategoryChange={setBatchCategory}
                                         onApplyCategory={() => void handleBatchSetCategory()}
+                                        onBatchFolderChange={setBatchFolder}
+                                        onApplyFolder={() => void handleBatchSetFolder()}
                                         onAutoClassify={() => void handleAutoClassifyWall()}
                                         onMarkFinal={() => void handleBatchSetFinal(true)}
                                         onClearFinal={() => void handleBatchSetFinal(false)}
@@ -1190,8 +1316,8 @@ export default function WorkspaceDetailPage() {
                             children: (
                                 <div className="space-y-3">
                                     <div className="flex flex-wrap items-center justify-between gap-2">
-                                        <div className="text-xs text-stone-500">
-                                            工作台过程快照 · 在图/视频历史点「分享到工作空间」
+                                        <div className="max-w-xl text-xs text-stone-500">
+                                            工作台过程快照 · 先按批次文件夹浏览，再按内容分类筛选
                                         </div>
                                         <div className="flex flex-wrap gap-2">
                                             <Button size="small" icon={<Images className="size-3.5" />} onClick={() => navigate("/image")}>
@@ -1203,6 +1329,9 @@ export default function WorkspaceDetailPage() {
                                         </div>
                                     </div>
                                     <WallFilterBar
+                                        folderOptions={genFolderOptions}
+                                        folderValue={genFolderFilter}
+                                        onFolderChange={setGenFolderFilter}
                                         categoryOptions={genCategoryOptions}
                                         categoryValue={genCategoryFilter}
                                         onCategoryChange={setGenCategoryFilter}
@@ -1220,6 +1349,8 @@ export default function WorkspaceDetailPage() {
                                         batchBusy={batchBusy}
                                         batchCategory={batchCategory}
                                         batchCategoryOptions={batchCategoryOptions}
+                                        batchFolder={batchFolder}
+                                        batchFolderOptions={batchFolderOptions}
                                         uncategorizedEditableCount={tab === "gens" ? uncategorizedEditableCount : 0}
                                         canBatchEdit={selectedEditable.length > 0}
                                         canBatchDelete={selectedDeletable.length > 0}
@@ -1229,6 +1360,8 @@ export default function WorkspaceDetailPage() {
                                         }}
                                         onBatchCategoryChange={setBatchCategory}
                                         onApplyCategory={() => void handleBatchSetCategory()}
+                                        onBatchFolderChange={setBatchFolder}
+                                        onApplyFolder={() => void handleBatchSetFolder()}
                                         onAutoClassify={() => void handleAutoClassifyWall()}
                                         onMarkFinal={() => void handleBatchSetFinal(true)}
                                         onClearFinal={() => void handleBatchSetFinal(false)}
@@ -1487,6 +1620,7 @@ export default function WorkspaceDetailPage() {
                     item={detailItem}
                     items={items}
                     categoryOptions={categoryEditOptions}
+                    folderOptions={folderSelectOptions}
                     currentUserId={userId}
                     isOwner={isOwner}
                     canEdit={Boolean(detailItem && (detailItem.created_by === userId || isOwner))}
@@ -1536,8 +1670,11 @@ function CategoryFilterChips({
     );
 }
 
-/** Category chips + 仅终稿 toggle for material / gen walls. */
+/** Browse path: batch folders (primary) + content category / final (secondary). */
 function WallFilterBar({
+    folderOptions,
+    folderValue,
+    onFolderChange,
     categoryOptions,
     categoryValue,
     onCategoryChange,
@@ -1547,6 +1684,9 @@ function WallFilterBar({
     shownCount,
     totalCount,
 }: {
+    folderOptions: Array<{ label: string; value: string; count?: number }>;
+    folderValue: string;
+    onFolderChange: (next: string) => void;
     categoryOptions: Array<{ label: string; value: string }>;
     categoryValue: string;
     onCategoryChange: (next: string) => void;
@@ -1556,9 +1696,76 @@ function WallFilterBar({
     shownCount: number;
     totalCount: number;
 }) {
+    // Chips are only named folders + 未归入 (no 「全部」). Default filter = show all.
+    const showFolderChips = folderOptions.length > 0;
+    const folderFiltered = folderValue !== ALL_FOLDERS_VALUE;
+    const countLabel =
+        shownCount !== totalCount ? `${shownCount}/${totalCount}` : `${shownCount}`;
+
     return (
-        <div className="space-y-2">
+        <div className="space-y-2 rounded-xl border border-stone-200/80 bg-card/40 px-3 py-2.5 dark:border-stone-800">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+                <span
+                    className="inline-flex shrink-0 items-center gap-1 text-[11px] font-medium text-violet-700 dark:text-violet-300"
+                    title="按项目批次收纳；不点任何 chip 即显示全部。再点已选 chip 可取消筛选"
+                >
+                    <Folder className="size-3.5" />
+                    批次文件夹
+                </span>
+                {showFolderChips ? (
+                    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                        {folderOptions.map((opt) => {
+                            const active = folderValue === opt.value;
+                            const isUnfiled = opt.value === WORKSPACE_UNFILED_VALUE;
+                            return (
+                                <button
+                                    key={opt.value}
+                                    type="button"
+                                    title={active ? "再次点击取消筛选（显示全部）" : isUnfiled ? "只看未归入" : `只看「${opt.label}」`}
+                                    onClick={() => onFolderChange(active ? ALL_FOLDERS_VALUE : opt.value)}
+                                    className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] transition ${
+                                        active
+                                            ? "border-violet-500 bg-violet-50 font-medium text-violet-900 shadow-sm ring-1 ring-violet-400/40 dark:border-violet-400 dark:bg-violet-950/50 dark:text-violet-100 dark:ring-violet-500/30"
+                                            : "border-stone-200 bg-card/80 text-stone-600 hover:border-stone-400 hover:bg-stone-50 dark:border-stone-700 dark:text-stone-300 dark:hover:bg-stone-900"
+                                    }`}
+                                >
+                                    {!isUnfiled ? <Folder className="size-3 opacity-70" /> : null}
+                                    {opt.label}
+                                    {typeof opt.count === "number" ? (
+                                        <span className="tabular-nums opacity-70">{opt.count}</span>
+                                    ) : null}
+                                </button>
+                            );
+                        })}
+                        {folderFiltered ? (
+                            <button
+                                type="button"
+                                className="text-[11px] text-stone-400 underline-offset-2 hover:text-stone-600 hover:underline dark:hover:text-stone-300"
+                                onClick={() => onFolderChange(ALL_FOLDERS_VALUE)}
+                                title="清除文件夹筛选"
+                            >
+                                清除
+                            </button>
+                        ) : null}
+                    </div>
+                ) : (
+                    <span className="min-w-0 flex-1 text-[11px] text-stone-400">
+                        尚未建立文件夹 · 上传或勾选后「移入」会出现在这里
+                    </span>
+                )}
+                <span className="shrink-0 text-[11px] tabular-nums text-stone-400" title="当前筛选 / 全部">
+                    {countLabel}
+                    {finalOnly ? " · 仅终稿" : ""}
+                </span>
+            </div>
+            <div className="border-t border-stone-100 dark:border-stone-800" />
             <div className="flex flex-wrap items-center gap-2">
+                <span
+                    className="shrink-0 text-[11px] font-medium text-stone-500"
+                    title="人物 / 场景 / 道具等类型分区"
+                >
+                    内容分类
+                </span>
                 <CategoryFilterChips options={categoryOptions} value={categoryValue} onChange={onCategoryChange} />
                 <button
                     type="button"
@@ -1575,17 +1782,12 @@ function WallFilterBar({
                     {finalCount > 0 ? <span className="tabular-nums opacity-80">· {finalCount}</span> : null}
                 </button>
             </div>
-            <div className="text-[11px] text-stone-400">
-                显示 {shownCount}
-                {shownCount !== totalCount ? ` / ${totalCount}` : ""}
-                {finalOnly ? " · 已筛选终稿（置顶）" : finalCount > 0 ? " · 终稿优先排列" : ""}
-            </div>
         </div>
     );
 }
 
 
-/** Batch toolbar for material / gen walls — mirrors 我的资产 selection UX. */
+/** Organize path: idle = select-all only; selected = grouped batch actions. */
 function WallBatchBar({
     wallCount,
     selectedCount,
@@ -1594,12 +1796,16 @@ function WallBatchBar({
     batchBusy,
     batchCategory,
     batchCategoryOptions,
+    batchFolder,
+    batchFolderOptions,
     uncategorizedEditableCount,
     canBatchEdit,
     canBatchDelete,
     onToggleSelectAll,
     onBatchCategoryChange,
     onApplyCategory,
+    onBatchFolderChange,
+    onApplyFolder,
     onAutoClassify,
     onMarkFinal,
     onClearFinal,
@@ -1614,12 +1820,16 @@ function WallBatchBar({
     batchBusy: boolean;
     batchCategory?: string;
     batchCategoryOptions: Array<{ label: string; value: string }>;
+    batchFolder?: string;
+    batchFolderOptions: Array<{ label: string; value: string }>;
     uncategorizedEditableCount: number;
     canBatchEdit: boolean;
     canBatchDelete: boolean;
     onToggleSelectAll: (checked: boolean) => void;
     onBatchCategoryChange: (value?: string) => void;
     onApplyCategory: () => void;
+    onBatchFolderChange: (value?: string) => void;
+    onApplyFolder: () => void;
     onAutoClassify: () => void;
     onMarkFinal: () => void;
     onClearFinal: () => void;
@@ -1627,8 +1837,10 @@ function WallBatchBar({
     onDelete: () => void;
     onClearSelection: () => void;
 }) {
+    const hasSelection = selectedCount > 0;
+
     return (
-        <SelectionToolbar active={selectedCount > 0}>
+        <SelectionToolbar active={hasSelection}>
             <div className="flex min-w-0 flex-wrap items-center gap-3">
                 <SelectCheckbox
                     variant="toolbar"
@@ -1641,51 +1853,113 @@ function WallBatchBar({
                 />
                 <SelectionCount
                     count={selectedCount}
-                    idleHint="勾选卡片后可批量分类 / 终稿 / 存资产 / 删除"
-                    activeHint="已选 · 单卡详情与操作仍可用"
+                    idleHint="勾选卡片后可批量整理"
+                    activeHint="已选 · 单卡详情仍可用"
                 />
                 <button
                     type="button"
                     disabled={batchBusy || !uncategorizedEditableCount}
                     className="inline-flex items-center gap-1 text-xs font-medium text-stone-600 underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-45 dark:text-stone-300"
                     onClick={onAutoClassify}
-                    title="按标题/提示词/备注智能归类当前筛选中的未分类条目（仅可编辑项）"
+                    title="按标题/提示词/备注推断内容分类（只动分类，不猜文件夹）"
                 >
                     <Sparkles className="size-3.5" />
                     智能归类未分类{uncategorizedEditableCount ? `（${uncategorizedEditableCount}）` : ""}
                 </button>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-                <Select
-                    size="small"
-                    allowClear
-                    showSearch
-                    className="min-w-36"
-                    placeholder="批量设分类"
-                    value={batchCategory}
-                    options={batchCategoryOptions}
-                    disabled={!selectedCount || batchBusy || !canBatchEdit}
-                    onChange={(value) => onBatchCategoryChange(typeof value === "string" ? value : undefined)}
-                />
-                <Button size="small" disabled={!selectedCount || batchBusy || !canBatchEdit} loading={batchBusy} onClick={onApplyCategory}>
-                    应用分类
-                </Button>
-                <Button size="small" disabled={!selectedCount || batchBusy || !canBatchEdit} onClick={onMarkFinal}>
-                    标终稿
-                </Button>
-                <Button size="small" disabled={!selectedCount || batchBusy || !canBatchEdit} onClick={onClearFinal}>
-                    取消终稿
-                </Button>
-                <Button size="small" disabled={!selectedCount || batchBusy} onClick={onSaveToAssets}>
-                    存到我的资产
-                </Button>
-                <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedCount || batchBusy || !canBatchDelete} onClick={onDelete}>
-                    删除选中
-                </Button>
-                <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!selectedCount || batchBusy} onClick={onClearSelection}>
-                    清空选择
-                </Button>
-            </div>
+            {hasSelection ? (
+                <div className="flex w-full flex-wrap items-end gap-x-3 gap-y-2 sm:w-auto">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] font-medium uppercase tracking-wide text-stone-400">分类</span>
+                        <Select
+                            size="small"
+                            allowClear
+                            showSearch
+                            className="min-w-32"
+                            placeholder="设分类"
+                            value={batchCategory}
+                            options={batchCategoryOptions}
+                            disabled={batchBusy || !canBatchEdit}
+                            onChange={(value) => onBatchCategoryChange(typeof value === "string" ? value : undefined)}
+                        />
+                        <Button size="small" disabled={batchBusy || !canBatchEdit} loading={batchBusy} onClick={onApplyCategory}>
+                            应用
+                        </Button>
+                    </div>
+                    <div className="hidden h-6 w-px bg-stone-200 sm:block dark:bg-stone-700" aria-hidden />
+                    <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] font-medium uppercase tracking-wide text-violet-500/80">文件夹</span>
+                        <Select
+                            size="small"
+                            allowClear
+                            showSearch
+                            className="min-w-32"
+                            placeholder="移入…"
+                            value={batchFolder}
+                            options={batchFolderOptions}
+                            disabled={batchBusy || !canBatchEdit}
+                            optionFilterProp="label"
+                            onChange={(value) => onBatchFolderChange(typeof value === "string" ? value : "")}
+                            dropdownRender={(menu) => (
+                                <div>
+                                    {menu}
+                                    <div className="border-t border-stone-100 p-2 dark:border-stone-800">
+                                        <Input
+                                            size="small"
+                                            placeholder="新建文件夹名后回车"
+                                            maxLength={80}
+                                            onPressEnter={(event) => {
+                                                const next = normalizeWorkspaceFolder((event.target as HTMLInputElement).value);
+                                                if (!next) return;
+                                                onBatchFolderChange(next);
+                                                (event.target as HTMLInputElement).value = "";
+                                            }}
+                                        />
+                                    </div>
+                                </div>
+                            )}
+                        />
+                        <Button
+                            size="small"
+                            disabled={batchBusy || !canBatchEdit || batchFolder === undefined}
+                            loading={batchBusy}
+                            onClick={onApplyFolder}
+                        >
+                            移入
+                        </Button>
+                    </div>
+                    <div className="hidden h-6 w-px bg-stone-200 sm:block dark:bg-stone-700" aria-hidden />
+                    <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] font-medium uppercase tracking-wide text-amber-600/70 dark:text-amber-400/80">
+                            终稿
+                        </span>
+                        <Button size="small" disabled={batchBusy || !canBatchEdit} onClick={onMarkFinal}>
+                            标终稿
+                        </Button>
+                        <Button size="small" disabled={batchBusy || !canBatchEdit} onClick={onClearFinal}>
+                            取消
+                        </Button>
+                    </div>
+                    <div className="hidden h-6 w-px bg-stone-200 sm:block dark:bg-stone-700" aria-hidden />
+                    <div className="flex flex-wrap items-center gap-1.5">
+                        <Button size="small" disabled={batchBusy} onClick={onSaveToAssets}>
+                            存到我的资产
+                        </Button>
+                        <Button
+                            size="small"
+                            danger
+                            icon={<Trash2 className="size-3.5" />}
+                            disabled={batchBusy || !canBatchDelete}
+                            onClick={onDelete}
+                        >
+                            删除
+                        </Button>
+                        <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={batchBusy} onClick={onClearSelection}>
+                            清空选择
+                        </Button>
+                    </div>
+                </div>
+            ) : null}
         </SelectionToolbar>
     );
 }
@@ -2368,7 +2642,19 @@ function WorkspaceItemCard({
                 <div className="flex flex-wrap gap-1">
                     <Tag className="m-0 text-[11px]">{kindLabel(item.kind)}</Tag>
                     <Tag className="m-0 text-[11px]">{sourceTypeLabel(item.source_type)}</Tag>
-                    {item.category ? <Tag className="m-0 text-[11px]">{assetCategoryLabel(item.category)}</Tag> : null}
+                    {item.folder ? (
+                        <Tag className="m-0 border-violet-200/70 bg-violet-50/70 text-[10px] font-normal text-violet-700/90 dark:border-violet-900 dark:bg-violet-950/30 dark:text-violet-300/90">
+                            <span className="inline-flex max-w-30 items-center gap-0.5 truncate" title={`批次：${item.folder}`}>
+                                <Folder className="size-2.5 shrink-0 opacity-80" />
+                                <span className="truncate">{item.folder}</span>
+                            </span>
+                        </Tag>
+                    ) : null}
+                    {item.category ? (
+                        <Tag className="m-0 text-[11px]" title="内容分类">
+                            {assetCategoryLabel(item.category)}
+                        </Tag>
+                    ) : null}
                     {item.version ? <Tag className="m-0 text-[11px]">{item.version}</Tag> : null}
                     {displayModelName(item.model) ? <Tag className="m-0 text-[11px]">{displayModelName(item.model)}</Tag> : null}
                 </div>
@@ -2433,6 +2719,7 @@ function ItemDetailModal({
     item,
     items,
     categoryOptions,
+    folderOptions,
     currentUserId,
     isOwner,
     canEdit,
@@ -2447,6 +2734,7 @@ function ItemDetailModal({
     item: WorkspaceItem | null;
     items: WorkspaceItem[];
     categoryOptions: Array<{ label: string; value: string }>;
+    folderOptions: Array<{ label: string; value: string }>;
     currentUserId: string;
     isOwner: boolean;
     canEdit: boolean;
@@ -2456,7 +2744,14 @@ function ItemDetailModal({
     onDelete: (item: WorkspaceItem) => void;
     onUpdateMeta: (
         item: WorkspaceItem,
-        patch: { title?: string; category?: string; version?: string; replacesItemId?: string | null; isFinal?: boolean },
+        patch: {
+            title?: string;
+            category?: string;
+            folder?: string;
+            version?: string;
+            replacesItemId?: string | null;
+            isFinal?: boolean;
+        },
     ) => Promise<WorkspaceItem | void>;
     onUpsertReaction: (item: WorkspaceItem, resolution: string, comment?: string) => Promise<WorkspaceItem | void>;
     onClearReaction: (item: WorkspaceItem, targetUserId?: string) => Promise<WorkspaceItem | void>;
@@ -2573,6 +2868,7 @@ function ItemDetailModal({
     const runMeta = async (patch: {
         title?: string;
         category?: string;
+        folder?: string;
         version?: string;
         replacesItemId?: string | null;
         isFinal?: boolean;
@@ -2745,6 +3041,14 @@ function ItemDetailModal({
                                 <div className="mt-1.5 flex flex-wrap items-center gap-1">
                                     <Tag className="m-0 rounded-full text-[11px]">{kindLabel(item.kind)}</Tag>
                                     <Tag className="m-0 rounded-full text-[11px]">{sourceTypeLabel(item.source_type)}</Tag>
+                                    {item.folder ? (
+                                        <Tag className="m-0 rounded-full border-violet-200 bg-violet-50 text-[11px] text-violet-800 dark:border-violet-800 dark:bg-violet-950/40 dark:text-violet-200">
+                                            <span className="inline-flex items-center gap-0.5">
+                                                <Folder className="size-3" />
+                                                {item.folder}
+                                            </span>
+                                        </Tag>
+                                    ) : null}
                                     {item.category ? <Tag className="m-0 rounded-full text-[11px]">{assetCategoryLabel(item.category)}</Tag> : null}
                                     {item.version ? <Tag className="m-0 rounded-full text-[11px]">{item.version}</Tag> : null}
                                     {item.is_final ? (
@@ -2773,23 +3077,72 @@ function ItemDetailModal({
 
                         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 py-3 text-sm">
                             {canEdit ? (
-                                <div className="space-y-1.5">
-                                    <div className="text-[11px] font-medium uppercase tracking-wide text-stone-400">分类分区</div>
-                                    <Select
-                                        size="small"
-                                        className="w-full"
-                                        showSearch
-                                        allowClear
-                                        placeholder="人物 / 场景 / 道具…"
-                                        value={item.category || undefined}
-                                        disabled={metaBusy}
-                                        options={categoryOptions.filter((o) => o.value !== "")}
-                                        optionFilterProp="label"
-                                        onChange={(value) => {
-                                            const next = resolveAssetCategoryForSave(typeof value === "string" ? value : undefined) || "";
-                                            void runMeta({ category: next });
-                                        }}
-                                    />
+                                <div className="space-y-3">
+                                    <div className="space-y-1.5">
+                                        <div className="text-[11px] font-medium uppercase tracking-wide text-violet-500/80">
+                                            批次文件夹
+                                        </div>
+                                        <Select
+                                            size="small"
+                                            className="w-full"
+                                            showSearch
+                                            allowClear
+                                            placeholder="未归入"
+                                            value={item.folder || undefined}
+                                            disabled={metaBusy}
+                                            options={folderOptions.filter((o) => o.value !== "")}
+                                            optionFilterProp="label"
+                                            onChange={(value) => {
+                                                const next = resolveWorkspaceFolderForSave(typeof value === "string" ? value : "");
+                                                void runMeta({ folder: next });
+                                            }}
+                                            dropdownRender={(menu) => (
+                                                <div>
+                                                    {menu}
+                                                    <div className="border-t border-stone-100 p-2 dark:border-stone-800">
+                                                        <Input
+                                                            size="small"
+                                                            placeholder="新建文件夹名后回车"
+                                                            maxLength={80}
+                                                            onPressEnter={(event) => {
+                                                                const next = normalizeWorkspaceFolder(
+                                                                    (event.target as HTMLInputElement).value,
+                                                                );
+                                                                if (!next) return;
+                                                                void runMeta({ folder: next });
+                                                                (event.target as HTMLInputElement).value = "";
+                                                            }}
+                                                        />
+                                                    </div>
+                                                </div>
+                                            )}
+                                        />
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <div className="text-[11px] font-medium uppercase tracking-wide text-stone-400">
+                                            内容分类
+                                        </div>
+                                        <Select
+                                            size="small"
+                                            className="w-full"
+                                            showSearch
+                                            allowClear
+                                            placeholder="人物 / 场景 / 道具…"
+                                            value={item.category || undefined}
+                                            disabled={metaBusy}
+                                            options={categoryOptions.filter((o) => o.value !== "")}
+                                            optionFilterProp="label"
+                                            onChange={(value) => {
+                                                const next = resolveAssetCategoryForSave(typeof value === "string" ? value : undefined) || "";
+                                                void runMeta({ category: next });
+                                            }}
+                                        />
+                                    </div>
+                                </div>
+                            ) : item.folder ? (
+                                <div className="text-xs text-stone-500">
+                                    批次文件夹：
+                                    <span className="font-medium text-stone-700 dark:text-stone-200">{item.folder}</span>
                                 </div>
                             ) : null}
 

@@ -725,6 +725,8 @@ export function createDb(dataDir) {
                 title: String(record.title || "").slice(0, 200),
                 note: String(record.note || "").slice(0, 1000),
                 category: String(record.category || "").slice(0, 80),
+                // Orthogonal to category: batch/group label ("定妆包"), empty = unfiled.
+                folder: String(record.folder || "").slice(0, 80),
                 tags: Array.isArray(record.tags) ? record.tags.map((t) => String(t).slice(0, 40)).slice(0, 20) : [],
                 prompt: String(record.prompt || "").slice(0, 4000),
                 model: String(record.model || "").slice(0, 120),
@@ -754,7 +756,7 @@ export function createDb(dataDir) {
             return item;
         },
 
-        listWorkspaceItems(workspaceId, { kind, category, page = 1, pageSize = 50 } = {}) {
+        listWorkspaceItems(workspaceId, { kind, category, folder, page = 1, pageSize = 50 } = {}) {
             let rows = state.workspace_items.filter((i) => i.workspace_id === workspaceId && !i.deleted_at);
             if (kind) {
                 const kinds = String(kind)
@@ -776,6 +778,19 @@ export function createDb(dataDir) {
                     });
                 }
             }
+            if (folder) {
+                const folders = String(folder)
+                    .split(",")
+                    .map((f) => f.trim())
+                    .filter(Boolean);
+                if (folders.length) {
+                    rows = rows.filter((i) => {
+                        const value = String(i.folder || "").trim();
+                        // "__unfiled__" matches empty folder (client sentinel).
+                        return folders.some((f) => (f === "__unfiled__" ? !value : value === f));
+                    });
+                }
+            }
             const total = rows.length;
             const start = Math.max(0, (page - 1) * pageSize);
             return { items: rows.slice(start, start + pageSize), total, page, page_size: pageSize };
@@ -787,7 +802,7 @@ export function createDb(dataDir) {
 
         /**
          * Metadata-only patch for workspace items (no media re-upload).
-         * Supports category/tags/title/note + version / replaces / is_final.
+         * Supports category/folder/tags/title/note + version / replaces / is_final.
          */
         updateWorkspaceItem(itemId, workspaceId, patch = {}) {
             const item = this.findWorkspaceItem(itemId, workspaceId);
@@ -795,6 +810,7 @@ export function createDb(dataDir) {
             if (patch.title !== undefined) item.title = String(patch.title || "").slice(0, 200);
             if (patch.note !== undefined) item.note = String(patch.note || "").slice(0, 1000);
             if (patch.category !== undefined) item.category = String(patch.category || "").slice(0, 80);
+            if (patch.folder !== undefined) item.folder = String(patch.folder || "").slice(0, 80);
             if (patch.tags !== undefined) {
                 item.tags = Array.isArray(patch.tags)
                     ? patch.tags.map((t) => String(t).slice(0, 40)).slice(0, 20)
@@ -808,6 +824,7 @@ export function createDb(dataDir) {
                 item.is_final = Boolean(patch.isFinal ?? patch.is_final);
             }
             // Ensure older rows still have the optional keys when first patched.
+            if (item.folder == null) item.folder = "";
             if (item.version == null) item.version = "";
             if (item.replaces_item_id == null) item.replaces_item_id = "";
             if (item.is_final == null) item.is_final = false;
@@ -1120,6 +1137,7 @@ export function publicWorkspaceItem(item, extra = {}) {
         title: item.title,
         note: item.note || "",
         category: item.category || "",
+        folder: item.folder || "",
         tags: Array.isArray(item.tags) ? item.tags : [],
         prompt: item.prompt || "",
         model: item.model || "",

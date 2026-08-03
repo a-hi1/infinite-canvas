@@ -4,6 +4,8 @@
   "defaultOpen": true,
   "pages": [
     "[更新日志](/docs/progress/changelog)",
+    "session-handoff",
+    "ops-daily",
     "local-agent-integration-plan",
     "p05c-acceptance",
     "checklist-implementation-status",

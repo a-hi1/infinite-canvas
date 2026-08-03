@@ -2,6 +2,16 @@
 
 本文档给后续 Claude / AI 助手快速了解当前仓库使用。开发规范仍以 `AGENTS.md` 为准；本文件主要记录项目上下文、常用工作流、部署状态和当前已知注意事项。
 
+## 新会话必读（了解项目 / 继续开发）
+
+用户要求「了解项目」「接管上下文」「继续开发」或新对话开局时，**先读并按其中清单执行**：
+
+→ **[docs/content/docs/progress/session-handoff.mdx](docs/content/docs/progress/session-handoff.mdx)**（会话接手）
+
+该文档含：三套部署端口（本机 3011 / 美国 3001 / 公司 `ic3011:3011`）、Git/remote、硬约束、主线摘要、禁止提交清单、中文汇报模板。细节实现与待验项仍以代码 + `pending-test` / `todo` / `upstream-follow` 为准。
+
+**后续开发必须同步更新文档：** 实质改动后按 `session-handoff` 文内「文档同步规则」更新对应 MDX/`CLAUDE.md`/`AGENTS.md`（有变化才改）。部署端口、主线里程碑、硬约束、未推风险变化时**优先改 session-handoff**，再视需要改本文件摘要。
+
 ## 项目定位
 
 `infinite-canvas` 是一个面向图片与视觉创作流程的开源 AI 工作台。核心应用是浏览器端 Vite + React 静态前端，提供无限画布、AI 图片/视频/音频生成、提示词库、素材库、画布助手、本地 Canvas Agent 与 Codex 插件集成。
@@ -278,11 +288,15 @@ sudo docker compose -f docker-compose.local.yml up -d --build
 
 ## 文档规范提醒
 
-继续遵循 `AGENTS.md`：
+继续遵循 `AGENTS.md`，并维护会话接手文档：
 
+- **新会话入口：** `docs/content/docs/progress/session-handoff.mdx`（了解项目 / 继续开发时先读）。
 - README 保持简洁。
 - 详细功能文档放入 `docs/content/docs/`。
 - 后续待办写入 `docs/content/docs/progress/todo.mdx`。
 - 已实现但仍需用户确认测试的事项写入 `docs/content/docs/progress/pending-test.mdx`。
-- 涉及项目方向、部署、限制、已知问题或长期工作流变化时，同步更新本文件和 `AGENTS.md`，保证新会话能快速接手。
+- 上游切片状态写入 `docs/content/docs/progress/upstream-follow.mdx`。
+- 运维最短命令写入 `docs/content/docs/progress/ops-daily.mdx`。
+- **实质改动后必须同步文档（有变化才改）：** 部署端口 / remote / 硬约束 / 主线里程碑 / 未推风险 → 优先更新 `session-handoff.mdx`；长期架构摘要 → 本文件；可执行规则 → `AGENTS.md`；产品说明 → 对应 overview。完整对照表见 session-handoff 文内「文档同步规则」。
+- 涉及项目方向、部署、限制、已知问题或长期工作流变化时，同步更新本文件、`AGENTS.md` 与 `session-handoff.mdx`，保证新会话能快速接手。
 - 文档正文保持中文，不写过期日期。

@@ -48,6 +48,8 @@ export type WorkspaceItem = {
     title: string;
     note?: string;
     category?: string;
+    /** Orthogonal batch label (e.g. "定妆包"); empty = unfiled. */
+    folder?: string;
     tags?: string[];
     prompt?: string;
     model?: string;
@@ -191,11 +193,15 @@ const workspaceItemsInflight = new Map<
 const workspaceTasksCache = new Map<string, CacheEntry<{ items: WorkspaceTask[]; total: number }>>();
 const workspaceTasksInflight = new Map<string, Promise<{ items: WorkspaceTask[]; total: number }>>();
 
-function cacheKeyItems(workspaceId: string, input?: { kind?: string; category?: string; page?: number; pageSize?: number }) {
+function cacheKeyItems(
+    workspaceId: string,
+    input?: { kind?: string; category?: string; folder?: string; page?: number; pageSize?: number },
+) {
     return [
         workspaceId,
         input?.kind || "",
         input?.category || "",
+        input?.folder || "",
         String(input?.page || 1),
         String(input?.pageSize || 50),
     ].join("|");
@@ -217,7 +223,7 @@ export function peekWorkspaceDetailCache(workspaceId: string) {
 
 export function peekWorkspaceItemsCache(
     workspaceId: string,
-    input?: { kind?: string; category?: string; page?: number; pageSize?: number },
+    input?: { kind?: string; category?: string; folder?: string; page?: number; pageSize?: number },
 ) {
     return readCache(workspaceItemsCache.get(cacheKeyItems(workspaceId, input)), ITEMS_TTL_MS);
 }
@@ -337,12 +343,12 @@ export function archiveWorkspace(workspaceId: string) {
 
 export function listWorkspaceItems(
     workspaceId: string,
-    input?: { kind?: string; category?: string; page?: number; pageSize?: number },
+    input?: { kind?: string; category?: string; folder?: string; page?: number; pageSize?: number },
     options?: { force?: boolean },
 ) {
     const key = cacheKeyItems(workspaceId, input);
     // Only cache the common unfiltered first page used by detail/share pickers.
-    const cacheable = !input?.kind && !input?.category && (input?.page || 1) === 1;
+    const cacheable = !input?.kind && !input?.category && !input?.folder && (input?.page || 1) === 1;
     if (cacheable && !options?.force) {
         const cached = peekWorkspaceItemsCache(workspaceId, input);
         if (cached) return Promise.resolve(cached);
@@ -352,6 +358,7 @@ export function listWorkspaceItems(
     const params = new URLSearchParams();
     if (input?.kind) params.set("kind", input.kind);
     if (input?.category) params.set("category", input.category);
+    if (input?.folder) params.set("folder", input.folder);
     if (input?.page) params.set("page", String(input.page));
     if (input?.pageSize) params.set("page_size", String(input.pageSize));
     const qs = params.toString();
@@ -374,6 +381,8 @@ export type ShareWorkspaceItemInput = {
     title?: string;
     note?: string;
     category?: string;
+    /** Orthogonal batch folder label. */
+    folder?: string;
     tags?: string[];
     prompt?: string;
     model?: string;
@@ -406,6 +415,7 @@ export function createWorkspaceItem(workspaceId: string, input: ShareWorkspaceIt
                 title: input.title || "",
                 note: input.note || "",
                 category: input.category || "",
+                folder: input.folder || "",
                 tags: input.tags || [],
                 prompt: input.prompt || "",
                 model: input.model || "",
@@ -423,6 +433,7 @@ export function createWorkspaceItem(workspaceId: string, input: ShareWorkspaceIt
     form.append("title", input.title || "");
     form.append("note", input.note || "");
     form.append("category", input.category || "");
+    form.append("folder", input.folder || "");
     form.append("tags", JSON.stringify(input.tags || []));
     form.append("prompt", input.prompt || "");
     form.append("model", input.model || "");
@@ -450,6 +461,7 @@ export type UpdateWorkspaceItemInput = {
     title?: string;
     note?: string;
     category?: string;
+    folder?: string;
     tags?: string[];
     version?: string;
     replacesItemId?: string | null;
@@ -461,6 +473,7 @@ export function updateWorkspaceItem(workspaceId: string, itemId: string, patch: 
     if (patch.title !== undefined) body.title = patch.title;
     if (patch.note !== undefined) body.note = patch.note;
     if (patch.category !== undefined) body.category = patch.category;
+    if (patch.folder !== undefined) body.folder = patch.folder;
     if (patch.tags !== undefined) body.tags = patch.tags;
     if (patch.version !== undefined) body.version = patch.version;
     if (patch.replacesItemId !== undefined) body.replaces_item_id = patch.replacesItemId || "";

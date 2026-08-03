@@ -1898,7 +1898,8 @@ function handleListWorkspaceItems(req, res, workspaceId, url) {
     const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get("page_size") || url.searchParams.get("pageSize") || 50) || 50));
     const kind = String(url.searchParams.get("kind") || "").trim();
     const category = String(url.searchParams.get("category") || "").trim();
-    const result = workspacesRepo.listItems(workspaceId, { kind, category, page, pageSize });
+    const folder = String(url.searchParams.get("folder") || "").trim();
+    const result = workspacesRepo.listItems(workspaceId, { kind, category, folder, page, pageSize });
     json(res, 200, {
         items: result.items.map((item) => decorateWorkspaceItem(item)),
         total: result.total,
@@ -2034,6 +2035,7 @@ async function handleCreateWorkspaceItem(req, res, workspaceId) {
         title: String(fields.title || "").trim() || defaultTitle,
         note: String(fields.note || ""),
         category: String(fields.category || ""),
+        folder: String(fields.folder || ""),
         tags,
         prompt: String(fields.prompt || ""),
         model: String(fields.model || ""),
@@ -2078,6 +2080,7 @@ async function handleUpdateWorkspaceItem(req, res, workspaceId, itemId) {
     if (body.title !== undefined) patch.title = body.title;
     if (body.note !== undefined) patch.note = body.note;
     if (body.category !== undefined) patch.category = body.category;
+    if (body.folder !== undefined) patch.folder = body.folder;
     if (body.tags !== undefined) {
         let tags = body.tags;
         if (typeof tags === "string") {
