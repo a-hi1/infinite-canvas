@@ -3,6 +3,7 @@ import type { UploadProps } from "antd";
 import {
     ArrowLeft,
     BadgeCheck,
+    CheckSquare,
     Copy,
     Download,
     ExternalLink,
@@ -13,6 +14,7 @@ import {
     Pencil,
     RefreshCw,
     Share2,
+    Sparkles,
     Trash2,
     Upload as UploadIcon,
     UserMinus,
@@ -23,6 +25,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { saveAs } from "file-saver";
 
+import { SelectCheckbox, SelectionCount, SelectionToolbar } from "@/components/ui/select-checkbox";
 import {
     ALL_CATEGORIES_VALUE,
     assetCategoryLabel,
@@ -65,6 +68,7 @@ import {
     itemUploaderLabel,
     listWorkspaceItems,
     listWorkspaceTasks,
+    mapPool,
     memberDisplayName,
     peekWorkspaceDetailCache,
     peekWorkspaceItemsCache,
@@ -215,6 +219,10 @@ export default function WorkspaceDetailPage() {
     /** Wall view focus: all | finals only — keeps material wall scannable. */
     const [assetFinalOnly, setAssetFinalOnly] = useState(false);
     const [genFinalOnly, setGenFinalOnly] = useState(false);
+    /** Multi-select on material/gen walls (same pattern as 我的资产). */
+    const [selectedItemIds, setSelectedItemIds] = useState<string[]>([]);
+    const [batchCategory, setBatchCategory] = useState<string | undefined>();
+    const [batchBusy, setBatchBusy] = useState(false);
     const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
     const [dragOverStatus, setDragOverStatus] = useState<string | null>(null);
     const hasShellRef = useRef(false);
@@ -346,11 +354,79 @@ export default function WorkspaceDetailPage() {
         const merged = [...new Set([...standard, ...names])];
         return [{ label: "未分类", value: "" }, ...merged.map((name) => ({ label: name, value: name }))];
     }, [items]);
+    /** Batch-set category dropdown: standards + any categories already used in this workspace. */
+    const batchCategoryOptions = useMemo(
+        () => collectAssetCategories(items).map((name) => ({ label: name, value: name })),
+        [items],
+    );
     const itemTitleById = useMemo(() => {
         const map = new Map<string, string>();
         for (const item of items) map.set(item.id, item.title || item.id.slice(0, 8));
         return map;
     }, [items]);
+
+    const canEditItem = useCallback(
+        (item: WorkspaceItem) => item.created_by === userId || Boolean(isOwner),
+        [isOwner, userId],
+    );
+
+    /** Selection applies to the active wall tab's currently filtered list. */
+    const wallItemsForSelection = useMemo(
+        () => (tab === "gens" ? filteredGenItems : filteredAssetItems),
+        [filteredAssetItems, filteredGenItems, tab],
+    );
+    const wallItemIds = useMemo(() => wallItemsForSelection.map((item) => item.id), [wallItemsForSelection]);
+    const selectedOnWall = useMemo(
+        () => selectedItemIds.filter((itemId) => wallItemIds.includes(itemId)),
+        [selectedItemIds, wallItemIds],
+    );
+    const selectedItems = useMemo(() => {
+        const set = new Set(selectedOnWall);
+        return wallItemsForSelection.filter((item) => set.has(item.id));
+    }, [selectedOnWall, wallItemsForSelection]);
+    const allWallSelected = wallItemIds.length > 0 && wallItemIds.every((itemId) => selectedItemIds.includes(itemId));
+    const someWallSelected = wallItemIds.some((itemId) => selectedItemIds.includes(itemId));
+    const uncategorizedEditableCount = useMemo(
+        () => wallItemsForSelection.filter((item) => canEditItem(item) && !String(item.category || "").trim()).length,
+        [canEditItem, wallItemsForSelection],
+    );
+    const selectedEditable = useMemo(() => selectedItems.filter((item) => canEditItem(item)), [canEditItem, selectedItems]);
+    const selectedDeletable = selectedEditable;
+
+    const clearSelection = useCallback(() => {
+        setSelectedItemIds([]);
+        setBatchCategory(undefined);
+    }, []);
+
+    const toggleItemSelected = useCallback((itemId: string, checked: boolean) => {
+        setSelectedItemIds((prev) => {
+            if (checked) return prev.includes(itemId) ? prev : [...prev, itemId];
+            return prev.filter((id) => id !== itemId);
+        });
+    }, []);
+
+    const selectAllWall = useCallback(() => {
+        setSelectedItemIds((prev) => {
+            const set = new Set(prev);
+            for (const itemId of wallItemIds) set.add(itemId);
+            return Array.from(set);
+        });
+    }, [wallItemIds]);
+
+    // Drop selections that no longer exist (deleted / left the workspace).
+    useEffect(() => {
+        setSelectedItemIds((prev) => {
+            if (!prev.length) return prev;
+            const known = new Set(items.map((item) => item.id));
+            const next = prev.filter((itemId) => known.has(itemId));
+            return next.length === prev.length ? prev : next;
+        });
+    }, [items]);
+
+    // Switching tabs keeps only ids still relevant; clear batch category draft.
+    useEffect(() => {
+        setBatchCategory(undefined);
+    }, [tab]);
 
     const handleResetInvite = () => {
         if (!workspace) return;
@@ -446,16 +522,212 @@ export default function WorkspaceDetailPage() {
     const handleUpdateItemMeta = async (
         item: WorkspaceItem,
         patch: { title?: string; category?: string; version?: string; replacesItemId?: string | null; isFinal?: boolean },
+        options?: { silent?: boolean },
     ) => {
         try {
             const updated = await updateWorkspaceItem(id, item.id, patch);
             applyItemPatch(updated);
-            message.success("已更新");
+            if (!options?.silent) message.success("已更新");
             return updated;
         } catch (error) {
-            message.error(error instanceof Error ? error.message : "更新失败");
+            if (!options?.silent) message.error(error instanceof Error ? error.message : "更新失败");
             throw error;
         }
+    };
+
+    /** Card-level quick category change (creator/owner only). */
+    const handleQuickCategory = async (item: WorkspaceItem, next?: string | null) => {
+        if (!canEditItem(item)) {
+            message.warning("只能改自己分享的条目（所有者可改全部）");
+            return;
+        }
+        const category = resolveAssetCategoryForSave(next) || "";
+        try {
+            await handleUpdateItemMeta(item, { category }, { silent: true });
+            message.success(category ? `已设为「${assetCategoryLabel(category)}」` : "已清除分类");
+        } catch {
+            // error already shown when silent fails via throw path — re-show briefly
+            message.error("分类更新失败");
+        }
+    };
+
+    const handleBatchSetCategory = async () => {
+        if (!selectedEditable.length) {
+            message.warning(selectedOnWall.length ? "所选条目中没有你可编辑的项" : "请先勾选条目");
+            return;
+        }
+        const category = resolveAssetCategoryForSave(batchCategory) || "";
+        setBatchBusy(true);
+        let ok = 0;
+        let failed = 0;
+        try {
+            await mapPool(selectedEditable, 4, async (item) => {
+                try {
+                    await handleUpdateItemMeta(item, { category }, { silent: true });
+                    ok += 1;
+                } catch {
+                    failed += 1;
+                }
+            });
+            if (ok) {
+                message.success(
+                    category
+                        ? `已将 ${ok} 项设为「${assetCategoryLabel(category)}」${failed ? `，失败 ${failed}` : ""}`
+                        : `已清除 ${ok} 项分类${failed ? `，失败 ${failed}` : ""}`,
+                );
+            } else {
+                message.error("批量设分类失败");
+            }
+            clearSelection();
+        } finally {
+            setBatchBusy(false);
+        }
+    };
+
+    const handleBatchSetFinal = async (isFinal: boolean) => {
+        if (!selectedEditable.length) {
+            message.warning(selectedOnWall.length ? "所选条目中没有你可编辑的项" : "请先勾选条目");
+            return;
+        }
+        setBatchBusy(true);
+        let ok = 0;
+        let failed = 0;
+        try {
+            await mapPool(selectedEditable, 4, async (item) => {
+                try {
+                    if (Boolean(item.is_final) === isFinal) {
+                        ok += 1;
+                        return;
+                    }
+                    await handleUpdateItemMeta(item, { isFinal }, { silent: true });
+                    ok += 1;
+                } catch {
+                    failed += 1;
+                }
+            });
+            if (ok) message.success(isFinal ? `已标记 ${ok} 项为终稿${failed ? `，失败 ${failed}` : ""}` : `已取消 ${ok} 项终稿${failed ? `，失败 ${failed}` : ""}`);
+            else message.error("批量更新终稿失败");
+            clearSelection();
+        } finally {
+            setBatchBusy(false);
+        }
+    };
+
+    /** Smart-classify uncategorized editable items on the active wall (same rules as 我的资产). */
+    const handleAutoClassifyWall = async () => {
+        const targets = wallItemsForSelection.filter((item) => canEditItem(item) && !String(item.category || "").trim());
+        if (!targets.length) {
+            message.info("当前筛选下没有可归类的未分类条目（只能改自己的，或所有者改全部）");
+            return;
+        }
+        setBatchBusy(true);
+        let classified = 0;
+        let skipped = 0;
+        let failed = 0;
+        try {
+            await mapPool(targets, 4, async (item) => {
+                const suggested = suggestAssetCategory({
+                    title: item.title,
+                    tags: item.tags,
+                    note: item.note,
+                    content: item.text_content,
+                    prompt: item.prompt,
+                    fileName: item.title,
+                    kind: isVideoKind(item.kind) ? "video" : item.kind === WORKSPACE_ITEM_KIND.ASSET_TEXT || isDocumentKind(item.kind) ? "text" : "image",
+                });
+                if (!suggested) {
+                    skipped += 1;
+                    return;
+                }
+                try {
+                    await handleUpdateItemMeta(item, { category: suggested }, { silent: true });
+                    classified += 1;
+                } catch {
+                    failed += 1;
+                }
+            });
+            if (classified) {
+                message.success(
+                    `已智能归类 ${classified} 项${skipped ? `，另有 ${skipped} 项证据不足仍未分类` : ""}${failed ? `，失败 ${failed}` : ""}`,
+                );
+            } else if (skipped) {
+                message.info(`证据不足，${skipped} 项仍保持未分类`);
+            } else {
+                message.error("智能归类失败");
+            }
+        } finally {
+            setBatchBusy(false);
+        }
+    };
+
+    const handleBatchSaveToAssets = async () => {
+        if (!selectedItems.length) {
+            message.warning("请先勾选条目");
+            return;
+        }
+        setBatchBusy(true);
+        let ok = 0;
+        let failed = 0;
+        try {
+            // Serial: local IndexedDB writes are safer one-by-one.
+            for (const item of selectedItems) {
+                const saved = await handleSaveToAssets(item, { silent: selectedItems.length > 1 });
+                if (saved) ok += 1;
+                else failed += 1;
+            }
+            if (selectedItems.length > 1) {
+                if (ok) message.success(`已保存 ${ok} 项到我的资产${failed ? `，失败 ${failed}` : ""}`);
+                else message.error("批量保存失败");
+            }
+            clearSelection();
+        } finally {
+            setBatchBusy(false);
+        }
+    };
+
+    const handleBatchDelete = () => {
+        if (!selectedDeletable.length) {
+            message.warning(selectedOnWall.length ? "所选条目中没有你可删除的项" : "请先勾选条目");
+            return;
+        }
+        modal.confirm({
+            title: "批量删除分享",
+            content: `将从工作空间移除 ${selectedDeletable.length} 项（不会删除对方本地资产）。`,
+            okText: "删除",
+            okButtonProps: { danger: true },
+            onOk: async () => {
+                setBatchBusy(true);
+                let ok = 0;
+                let failed = 0;
+                try {
+                    await mapPool(selectedDeletable, 4, async (item) => {
+                        try {
+                            await deleteWorkspaceItem(id, item.id);
+                            ok += 1;
+                        } catch {
+                            failed += 1;
+                        }
+                    });
+                    // Always re-sync after batch delete so partial failures stay accurate.
+                    try {
+                        const itemRes = await listWorkspaceItems(id, { pageSize: 100 }, { force: true });
+                        setItems(itemRes.items || []);
+                    } catch {
+                        if (ok) {
+                            // Fallback: drop the ones we attempted if list refresh failed.
+                            const attempted = new Set(selectedDeletable.map((item) => item.id));
+                            setItems((list) => list.filter((x) => !attempted.has(x.id)));
+                        }
+                    }
+                    if (detailItem && selectedDeletable.some((item) => item.id === detailItem.id)) setDetailItem(null);
+                    clearSelection();
+                    if (ok) message.success(`已删除 ${ok} 项${failed ? `，失败 ${failed}` : ""}`);
+                    else message.error("批量删除失败");
+                } finally {
+                    setBatchBusy(false);
+                }
+            },
+        });
     };
 
     /** Any member can cast 用/弃/改 on shared items. */
@@ -502,7 +774,7 @@ export default function WorkspaceDetailPage() {
         }
     };
 
-    const handleSaveToAssets = async (item: WorkspaceItem) => {
+    const handleSaveToAssets = async (item: WorkspaceItem, options?: { silent?: boolean }) => {
         try {
             if (item.kind === WORKSPACE_ITEM_KIND.ASSET_TEXT) {
                 addAsset({
@@ -516,13 +788,13 @@ export default function WorkspaceDetailPage() {
                     metadata: { prompt: item.prompt, fromWorkspaceItemId: item.id },
                     data: { content: item.text_content || "" },
                 });
-                message.success("已保存到我的资产");
-                return;
+                if (!options?.silent) message.success("已保存到我的资产");
+                return true;
             }
             if (isDocumentKind(item.kind)) {
                 if (!item.file_url) {
                     message.error("没有可保存的文档");
-                    return;
+                    return false;
                 }
                 const content = await workspaceFileText(item.file_url);
                 addAsset({
@@ -541,12 +813,12 @@ export default function WorkspaceDetailPage() {
                     },
                     data: { content },
                 });
-                message.success("已保存到我的资产（文本）");
-                return;
+                if (!options?.silent) message.success("已保存到我的资产（文本）");
+                return true;
             }
             if (!item.file_url) {
                 message.error("没有可保存的文件");
-                return;
+                return false;
             }
             const objectUrl = await workspaceFileObjectUrl(item.file_url);
             // Shared session cache — do not revoke.
@@ -594,9 +866,11 @@ export default function WorkspaceDetailPage() {
                     },
                 });
             }
-            message.success("已保存到我的资产");
+            if (!options?.silent) message.success("已保存到我的资产");
+            return true;
         } catch (error) {
             message.error(error instanceof Error ? error.message : "保存失败");
+            return false;
         }
     };
 
@@ -868,15 +1142,43 @@ export default function WorkspaceDetailPage() {
                                         shownCount={filteredAssetItems.length}
                                         totalCount={assetItems.length}
                                     />
+                                    <WallBatchBar
+                                        wallCount={filteredAssetItems.length}
+                                        selectedCount={tab === "assets" ? selectedOnWall.length : 0}
+                                        allSelected={tab === "assets" && allWallSelected}
+                                        someSelected={tab === "assets" && someWallSelected}
+                                        batchBusy={batchBusy}
+                                        batchCategory={batchCategory}
+                                        batchCategoryOptions={batchCategoryOptions}
+                                        uncategorizedEditableCount={tab === "assets" ? uncategorizedEditableCount : 0}
+                                        canBatchEdit={selectedEditable.length > 0}
+                                        canBatchDelete={selectedDeletable.length > 0}
+                                        onToggleSelectAll={(checked) => {
+                                            if (checked) selectAllWall();
+                                            else clearSelection();
+                                        }}
+                                        onBatchCategoryChange={setBatchCategory}
+                                        onApplyCategory={() => void handleBatchSetCategory()}
+                                        onAutoClassify={() => void handleAutoClassifyWall()}
+                                        onMarkFinal={() => void handleBatchSetFinal(true)}
+                                        onClearFinal={() => void handleBatchSetFinal(false)}
+                                        onSaveToAssets={() => void handleBatchSaveToAssets()}
+                                        onDelete={handleBatchDelete}
+                                        onClearSelection={clearSelection}
+                                    />
                                     <ItemGrid
                                         items={filteredAssetItems}
                                         currentUserId={userId}
                                         isOwner={Boolean(isOwner)}
                                         emptyHint={assetFinalOnly ? "终稿" : "素材墙"}
                                         itemTitleById={itemTitleById}
+                                        selectedIds={selectedItemIds}
+                                        categoryOptions={batchCategoryOptions}
                                         onOpen={setDetailItem}
                                         onDelete={handleDeleteItem}
                                         onSave={(item) => void handleSaveToAssets(item)}
+                                        onToggleSelected={toggleItemSelected}
+                                        onQuickCategory={(item, next) => void handleQuickCategory(item, next)}
                                         onGoShare={() => navigate("/assets")}
                                     />
                                 </div>
@@ -910,15 +1212,43 @@ export default function WorkspaceDetailPage() {
                                         shownCount={filteredGenItems.length}
                                         totalCount={genItems.length}
                                     />
+                                    <WallBatchBar
+                                        wallCount={filteredGenItems.length}
+                                        selectedCount={tab === "gens" ? selectedOnWall.length : 0}
+                                        allSelected={tab === "gens" && allWallSelected}
+                                        someSelected={tab === "gens" && someWallSelected}
+                                        batchBusy={batchBusy}
+                                        batchCategory={batchCategory}
+                                        batchCategoryOptions={batchCategoryOptions}
+                                        uncategorizedEditableCount={tab === "gens" ? uncategorizedEditableCount : 0}
+                                        canBatchEdit={selectedEditable.length > 0}
+                                        canBatchDelete={selectedDeletable.length > 0}
+                                        onToggleSelectAll={(checked) => {
+                                            if (checked) selectAllWall();
+                                            else clearSelection();
+                                        }}
+                                        onBatchCategoryChange={setBatchCategory}
+                                        onApplyCategory={() => void handleBatchSetCategory()}
+                                        onAutoClassify={() => void handleAutoClassifyWall()}
+                                        onMarkFinal={() => void handleBatchSetFinal(true)}
+                                        onClearFinal={() => void handleBatchSetFinal(false)}
+                                        onSaveToAssets={() => void handleBatchSaveToAssets()}
+                                        onDelete={handleBatchDelete}
+                                        onClearSelection={clearSelection}
+                                    />
                                     <ItemGrid
                                         items={filteredGenItems}
                                         currentUserId={userId}
                                         isOwner={Boolean(isOwner)}
                                         emptyHint={genFinalOnly ? "终稿" : "生成分享"}
                                         itemTitleById={itemTitleById}
+                                        selectedIds={selectedItemIds}
+                                        categoryOptions={batchCategoryOptions}
                                         onOpen={setDetailItem}
                                         onDelete={handleDeleteItem}
                                         onSave={(item) => void handleSaveToAssets(item)}
+                                        onToggleSelected={toggleItemSelected}
+                                        onQuickCategory={(item, next) => void handleQuickCategory(item, next)}
                                         onGoShare={() => navigate("/image")}
                                     />
                                 </div>
@@ -1251,6 +1581,112 @@ function WallFilterBar({
                 {finalOnly ? " · 已筛选终稿（置顶）" : finalCount > 0 ? " · 终稿优先排列" : ""}
             </div>
         </div>
+    );
+}
+
+
+/** Batch toolbar for material / gen walls — mirrors 我的资产 selection UX. */
+function WallBatchBar({
+    wallCount,
+    selectedCount,
+    allSelected,
+    someSelected,
+    batchBusy,
+    batchCategory,
+    batchCategoryOptions,
+    uncategorizedEditableCount,
+    canBatchEdit,
+    canBatchDelete,
+    onToggleSelectAll,
+    onBatchCategoryChange,
+    onApplyCategory,
+    onAutoClassify,
+    onMarkFinal,
+    onClearFinal,
+    onSaveToAssets,
+    onDelete,
+    onClearSelection,
+}: {
+    wallCount: number;
+    selectedCount: number;
+    allSelected: boolean;
+    someSelected: boolean;
+    batchBusy: boolean;
+    batchCategory?: string;
+    batchCategoryOptions: Array<{ label: string; value: string }>;
+    uncategorizedEditableCount: number;
+    canBatchEdit: boolean;
+    canBatchDelete: boolean;
+    onToggleSelectAll: (checked: boolean) => void;
+    onBatchCategoryChange: (value?: string) => void;
+    onApplyCategory: () => void;
+    onAutoClassify: () => void;
+    onMarkFinal: () => void;
+    onClearFinal: () => void;
+    onSaveToAssets: () => void;
+    onDelete: () => void;
+    onClearSelection: () => void;
+}) {
+    return (
+        <SelectionToolbar active={selectedCount > 0}>
+            <div className="flex min-w-0 flex-wrap items-center gap-3">
+                <SelectCheckbox
+                    variant="toolbar"
+                    checked={allSelected}
+                    indeterminate={!allSelected && someSelected}
+                    disabled={!wallCount || batchBusy}
+                    label={`全选当前筛选（${wallCount}）`}
+                    aria-label="全选当前筛选"
+                    onChange={onToggleSelectAll}
+                />
+                <SelectionCount
+                    count={selectedCount}
+                    idleHint="勾选卡片后可批量分类 / 终稿 / 存资产 / 删除"
+                    activeHint="已选 · 单卡详情与操作仍可用"
+                />
+                <button
+                    type="button"
+                    disabled={batchBusy || !uncategorizedEditableCount}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-stone-600 underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-45 dark:text-stone-300"
+                    onClick={onAutoClassify}
+                    title="按标题/提示词/备注智能归类当前筛选中的未分类条目（仅可编辑项）"
+                >
+                    <Sparkles className="size-3.5" />
+                    智能归类未分类{uncategorizedEditableCount ? `（${uncategorizedEditableCount}）` : ""}
+                </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+                <Select
+                    size="small"
+                    allowClear
+                    showSearch
+                    className="min-w-36"
+                    placeholder="批量设分类"
+                    value={batchCategory}
+                    options={batchCategoryOptions}
+                    disabled={!selectedCount || batchBusy || !canBatchEdit}
+                    onChange={(value) => onBatchCategoryChange(typeof value === "string" ? value : undefined)}
+                />
+                <Button size="small" disabled={!selectedCount || batchBusy || !canBatchEdit} loading={batchBusy} onClick={onApplyCategory}>
+                    应用分类
+                </Button>
+                <Button size="small" disabled={!selectedCount || batchBusy || !canBatchEdit} onClick={onMarkFinal}>
+                    标终稿
+                </Button>
+                <Button size="small" disabled={!selectedCount || batchBusy || !canBatchEdit} onClick={onClearFinal}>
+                    取消终稿
+                </Button>
+                <Button size="small" disabled={!selectedCount || batchBusy} onClick={onSaveToAssets}>
+                    存到我的资产
+                </Button>
+                <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedCount || batchBusy || !canBatchDelete} onClick={onDelete}>
+                    删除选中
+                </Button>
+                <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!selectedCount || batchBusy} onClick={onClearSelection}>
+                    清空选择
+                </Button>
+            </div>
+        </SelectionToolbar>
     );
 }
 
@@ -1673,9 +2109,13 @@ function ItemGrid({
     isOwner,
     emptyHint,
     itemTitleById,
+    selectedIds,
+    categoryOptions,
     onOpen,
     onDelete,
     onSave,
+    onToggleSelected,
+    onQuickCategory,
     onGoShare,
 }: {
     items: WorkspaceItem[];
@@ -1683,9 +2123,13 @@ function ItemGrid({
     isOwner: boolean;
     emptyHint: string;
     itemTitleById?: Map<string, string>;
+    selectedIds: string[];
+    categoryOptions: Array<{ label: string; value: string }>;
     onOpen: (item: WorkspaceItem) => void;
     onDelete: (item: WorkspaceItem) => void;
     onSave: (item: WorkspaceItem) => void;
+    onToggleSelected: (itemId: string, checked: boolean) => void;
+    onQuickCategory: (item: WorkspaceItem, next?: string | null) => void;
     onGoShare?: () => void;
 }) {
     if (!items.length) {
@@ -1723,10 +2167,15 @@ function ItemGrid({
                     key={item.id}
                     item={item}
                     replacesLabel={item.replaces_item_id ? itemTitleById?.get(item.replaces_item_id) : undefined}
+                    selected={selectedIds.includes(item.id)}
                     canDelete={item.created_by === currentUserId || isOwner}
+                    canEdit={item.created_by === currentUserId || isOwner}
+                    categoryOptions={categoryOptions}
+                    onSelectedChange={(checked) => onToggleSelected(item.id, checked)}
                     onOpen={() => onOpen(item)}
                     onDelete={() => onDelete(item)}
                     onSave={() => onSave(item)}
+                    onQuickCategory={(next) => onQuickCategory(item, next)}
                 />
             ))}
         </div>
@@ -1736,17 +2185,27 @@ function ItemGrid({
 function WorkspaceItemCard({
     item,
     replacesLabel,
+    selected,
     canDelete,
+    canEdit,
+    categoryOptions,
+    onSelectedChange,
     onOpen,
     onDelete,
     onSave,
+    onQuickCategory,
 }: {
     item: WorkspaceItem;
     replacesLabel?: string;
+    selected: boolean;
     canDelete: boolean;
+    canEdit: boolean;
+    categoryOptions: Array<{ label: string; value: string }>;
+    onSelectedChange: (checked: boolean) => void;
     onOpen: () => void;
     onDelete: () => void;
     onSave: () => void;
+    onQuickCategory: (next?: string | null) => void;
 }) {
     const { message } = App.useApp();
     const [previewUrl, setPreviewUrl] = useState("");
@@ -1832,9 +2291,11 @@ function WorkspaceItemCard({
     return (
         <div
             className={`overflow-hidden rounded-xl border bg-card transition ${
-                item.is_final
-                    ? "border-amber-400 shadow-[0_0_0_1px_rgba(251,191,36,0.35)] ring-1 ring-amber-300/50 dark:border-amber-500 dark:shadow-[0_0_0_1px_rgba(245,158,11,0.35)] dark:ring-amber-600/40"
-                    : "border-stone-200 hover:border-stone-300 dark:border-stone-800 dark:hover:border-stone-600"
+                selected
+                    ? "border-stone-900 ring-2 ring-stone-900/15 dark:border-stone-100 dark:ring-stone-100/20"
+                    : item.is_final
+                      ? "border-amber-400 shadow-[0_0_0_1px_rgba(251,191,36,0.35)] ring-1 ring-amber-300/50 dark:border-amber-500 dark:shadow-[0_0_0_1px_rgba(245,158,11,0.35)] dark:ring-amber-600/40"
+                      : "border-stone-200 hover:border-stone-300 dark:border-stone-800 dark:hover:border-stone-600"
             }`}
         >
             <button
@@ -1865,8 +2326,20 @@ function WorkspaceItemCard({
                     <div className="flex size-full items-center justify-center text-xs text-stone-500">{previewError ? "预览失败" : "加载中…"}</div>
                 )}
                 <span className="absolute bottom-2 left-2 rounded-md bg-black/55 px-1.5 py-0.5 text-[10px] text-white">点击详情</span>
+                <span
+                    className={`absolute left-2 z-10 ${item.is_final ? "top-8" : "top-2"}`}
+                    onClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => event.stopPropagation()}
+                >
+                    <SelectCheckbox
+                        variant="overlay"
+                        checked={selected}
+                        aria-label="选择条目"
+                        onChange={onSelectedChange}
+                    />
+                </span>
                 {item.is_final ? (
-                    <span className="absolute left-2 top-2 inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-400 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-amber-950 shadow-sm">
+                    <span className="absolute left-10 top-2 inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-400 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-amber-950 shadow-sm">
                         <BadgeCheck className="size-3" />
                         终稿
                     </span>
@@ -1919,6 +2392,19 @@ function WorkspaceItemCard({
                 </div>
                 {item.replaces_item_id ? (
                     <div className="text-[11px] text-stone-500">修订自：{replacesLabel || item.replaces_item_id.slice(0, 8)}</div>
+                ) : null}
+                {canEdit ? (
+                    <Select
+                        size="small"
+                        allowClear
+                        showSearch
+                        className="w-full"
+                        placeholder="快速设分类"
+                        value={item.category || undefined}
+                        options={categoryOptions.filter((o) => o.value)}
+                        onClick={(event) => event.stopPropagation()}
+                        onChange={(value) => onQuickCategory(typeof value === "string" ? value : null)}
+                    />
                 ) : null}
                 <div className="flex flex-wrap gap-2">
                     <Button size="small" onClick={onOpen}>
