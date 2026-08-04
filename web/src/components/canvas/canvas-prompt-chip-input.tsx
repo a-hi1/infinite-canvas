@@ -42,6 +42,9 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, c
     const [mention, setMention] = useState<MentionState | null>(null);
     const [activeIndex, setActiveIndex] = useState(0);
     const [imagePreview, setImagePreview] = useState<string | null>(null);
+    // IME 组合输入时 value 尚未更新，需用 DOM 内容 + composing 状态隐藏灰字占位，避免挡字
+    const [editorOccupied, setEditorOccupied] = useState(() => Boolean(value.trim()));
+    const [isComposing, setIsComposing] = useState(false);
 
     const activeReferences = useMemo(() => references.filter((item) => item.active), [references]);
     const referenceByLabel = useMemo(() => new Map(activeReferences.map((item) => [item.label, item])), [activeReferences]);
@@ -55,6 +58,17 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, c
         if (!query) return activeReferences;
         return activeReferences.filter((item) => `${item.label} ${item.title} ${item.kind} ${item.text || ""}`.toLowerCase().includes(query));
     }, [disabled, mention, activeReferences]);
+
+    const refreshEditorOccupied = () => {
+        const editor = editorRef.current;
+        if (!editor) {
+            setEditorOccupied(Boolean(value.trim()));
+            return;
+        }
+        // 组合态下 textContent 已有预上屏字，但 serialize 可能仍空
+        const occupied = Boolean(editor.textContent?.replace(/​/g, "").trim()) || Boolean(editor.querySelector("[data-ref-label]"));
+        setEditorOccupied(occupied);
+    };
 
     // DOM ← value:未聚焦时按 value 重建;聚焦时仅当 value 是外部改动(非本组件回声)才重建。
     useEffect(() => {
@@ -72,6 +86,7 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, c
             else editor.append(document.createTextNode(token.label));
         });
         lastEmittedRef.current = value;
+        setEditorOccupied(Boolean(value.trim()) || Boolean(editor.querySelector("[data-ref-label]")));
     }, [tokens, referenceByLabel, theme, value]);
 
     useEffect(() => {
@@ -83,6 +98,7 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, c
     const emit = (next: string) => {
         lastEmittedRef.current = next;
         onChange(next);
+        setEditorOccupied(Boolean(next.trim()));
     };
 
     const closeMention = () => {
@@ -95,6 +111,7 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, c
         const editor = editorRef.current;
         if (!editor) return;
         emit(serializeEditor(editor));
+        refreshEditorOccupied();
         syncMention();
     };
 
@@ -137,12 +154,13 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, c
         emit(serializeEditor(editor));
     };
 
-    const showPlaceholder = !value.trim();
+    // value 空但 IME 预上屏 / DOM 已有字时也要藏占位，否则灰字叠在输入上
+    const showPlaceholder = Boolean(placeholder) && !value.trim() && !editorOccupied && !isComposing;
 
     return (
         <div className="relative w-full">
-            {showPlaceholder && placeholder ? (
-                <div className="pointer-events-none absolute left-3 top-2 text-sm leading-5" style={{ color: theme.node.placeholder }}>
+            {showPlaceholder ? (
+                <div className="pointer-events-none absolute left-3 top-2 z-0 text-sm leading-5" style={{ color: theme.node.placeholder }}>
                     {placeholder}
                 </div>
             ) : null}
@@ -153,18 +171,25 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, c
                 role="textbox"
                 aria-multiline="true"
                 aria-disabled={disabled || undefined}
-                className={`${className || ""} overflow-y-auto whitespace-pre-wrap break-words outline-none ${disabled ? "pointer-events-none cursor-not-allowed opacity-60" : ""}`}
+                className={`${className || ""} relative z-1 overflow-y-auto whitespace-pre-wrap break-words outline-none ${disabled ? "pointer-events-none cursor-not-allowed opacity-60" : ""}`}
                 style={{ ...style, cursor: disabled ? "not-allowed" : "text" }}
                 onInput={() => {
-                    if (disabled || composingRef.current) return;
+                    if (disabled) return;
+                    // 组合输入中也刷新占位可见性，但不向父级 emit（避免打断 IME）
+                    refreshEditorOccupied();
+                    if (composingRef.current) return;
                     syncFromEditor();
                 }}
                 onCompositionStart={() => {
                     composingRef.current = true;
+                    setIsComposing(true);
+                    refreshEditorOccupied();
                 }}
                 onCompositionEnd={() => {
                     composingRef.current = false;
+                    setIsComposing(false);
                     if (!disabled) syncFromEditor();
+                    else refreshEditorOccupied();
                 }}
                 onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
                     event.stopPropagation();
