@@ -70,15 +70,17 @@ export async function optimizeGenerationPrompt(config: AiConfig, prompt: string,
 
 function buildOptimizeUserMessage(source: string, label: string, intent: PromptOptimizeIntent) {
     const intentHint =
-        intent === "character"
-            ? "内容偏向人物/角色，请按人物生产维度补全，但不要改成另一个人。"
-            : intent === "scene"
-              ? "内容偏向场景/环境，请按场景生产维度补全。"
-              : intent === "prop"
-                ? "内容偏向道具/物件，请按道具生产维度补全。"
-                : intent === "storyboard"
-                  ? "内容偏向分镜/镜头，请按镜头语言补全。"
-                  : "请按原文重心补全，不要强行改成人物设定图。";
+        intent === "character_sheet"
+            ? "内容偏向角色九宫格/表情表，请写成单张 3×3 九宫格角色表提示词：同一人、九格等分、只变表情/微姿态/机位，不要写成九个无关镜头。"
+            : intent === "character"
+              ? "内容偏向人物/角色，请按人物生产维度补全，但不要改成另一个人。"
+              : intent === "scene"
+                ? "内容偏向场景/环境，请按场景生产维度补全。"
+                : intent === "prop"
+                  ? "内容偏向道具/物件，请按道具生产维度补全。"
+                  : intent === "storyboard"
+                    ? "内容偏向分镜/镜头，请按镜头语言补全。"
+                    : "请按原文重心补全，不要强行改成人物设定图。";
 
     return `请优化以下${label}提示词。
 ${intentHint}
@@ -89,6 +91,7 @@ ${source}`;
 }
 
 function sanitizeOptimizedPrompt(text: string) {
+    // 九宫格描述更长，不在这里硬截断；只剥包装语与代码块
     return text
         .trim()
         .replace(/^```[\w-]*\s*/i, "")

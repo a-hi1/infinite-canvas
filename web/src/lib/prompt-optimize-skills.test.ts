@@ -16,9 +16,18 @@ describe("prompt optimize skills", () => {
         expect(detectPromptOptimizeIntent("温暖一点")).toBe("generic");
     });
 
+    it("detects character sheet / nine-grid ahead of generic character", () => {
+        expect(detectPromptOptimizeIntent("女主九宫格表情表")).toBe("character_sheet");
+        expect(detectPromptOptimizeIntent("角色表 3x3 character sheet")).toBe("character_sheet");
+        expect(detectPromptOptimizeIntent("3×3 设定板，渔民老人")).toBe("character_sheet");
+        // 普通人物仍走 character，不误伤
+        expect(detectPromptOptimizeIntent("女主半身肖像，定妆")).toBe("character");
+    });
+
     it("respects preferred intent over auto detection", () => {
         expect(resolvePromptOptimizeIntent("女主肖像", "scene")).toBe("scene");
         expect(resolvePromptOptimizeIntent("女主肖像", "auto")).toBe("character");
+        expect(resolvePromptOptimizeIntent("女主肖像", "character_sheet")).toBe("character_sheet");
     });
 
     it("builds image system prompt with character skill and output contract", () => {
@@ -33,6 +42,20 @@ describe("prompt optimize skills", () => {
         expect(system).toContain("保持真实皮肤质感");
         expect(system).not.toContain("90年代日式动画");
         expect(system).not.toContain("江洪渔港");
+    });
+
+    it("builds image system prompt with character sheet skill and longer budget", () => {
+        const system = buildOptimizeSystemPrompt({
+            mode: "image",
+            prompt: "女主九宫格表情表，渔民老人",
+        });
+        expect(system).toContain("角色九宫格");
+        expect(system).toContain("3×3");
+        expect(system).toContain("160-420");
+        expect(system).toContain("格内构图锁");
+        expect(system).toContain("输出契约");
+        expect(system).not.toContain("人物/角色生产手册");
+        expect(system).not.toContain("90年代日式动画");
     });
 
     it("builds video system prompt with motion skill", () => {
@@ -51,12 +74,14 @@ describe("prompt optimize skills", () => {
         const audioSystem = buildOptimizeSystemPrompt({ mode: "audio", prompt: "温柔女声" });
         expect(textSystem).toContain("文本生成手册");
         expect(textSystem).not.toContain("人物/角色生产手册");
+        expect(textSystem).not.toContain("角色九宫格");
         expect(audioSystem).toContain("音频/旁白手册");
         expect(audioSystem).not.toContain("场景生产手册");
     });
 
     it("labels intents for UI copy", () => {
         expect(describeOptimizeIntent("character")).toContain("人物");
+        expect(describeOptimizeIntent("character_sheet")).toContain("九宫格");
         expect(describeOptimizeIntent("generic")).toContain("通用");
     });
 });

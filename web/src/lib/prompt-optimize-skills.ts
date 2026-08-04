@@ -2,9 +2,12 @@
  * 画布 / 工作台 AI 润色的内置「生产手册」。
  * 结构借鉴 Toonflow art_skills（角色/场景/道具/分镜 + 衍生一致性），
  * 但刻意做成风格无关：不锁死某一画风包，只补全可执行维度。
+ *
+ * 九宫格/角色表走独立 intent `character_sheet`：挂在既有 AI 优化入口上，
+ * 不新增「九宫格 App」；检测关键词命中时自动注入网格布局手册。
  */
 
-export type PromptOptimizeIntent = "auto" | "character" | "scene" | "prop" | "storyboard" | "generic";
+export type PromptOptimizeIntent = "auto" | "character" | "character_sheet" | "scene" | "prop" | "storyboard" | "generic";
 
 const CHARACTER_SKILL = `【人物/角色生产手册】
 当描述像人物、角色、人像、定妆、立绘时优先遵循：
@@ -14,6 +17,19 @@ const CHARACTER_SKILL = `【人物/角色生产手册】
 4. 一致性：若原文像设定图/多角度/四视图，写明同一人跨视角一致（特写+正/侧/背或等价表述），中性背景、柔和主光。
 5. 若原文是单镜头人像：补构图景别、姿态、表情微差与光位，不要强行改成四视图。
 6. 严禁：换脸式重设、与原文冲突的年龄/性别、夸张畸形肢体、无来由的现代网红脸（除非原文要求）。`;
+
+const CHARACTER_SHEET_SKILL = `【角色九宫格 / 表情表生产手册】
+当描述像九宫格、角色表、表情表、character sheet、3×3 设定板时优先遵循：
+1. 同一人锚点：性别/年龄段/气质/职业、发型发色、五官、体型、默认定妆服装与配色——全文只写一个主体，禁止九格换脸或换装成另一人。
+2. 版式（对齐优先）：单张严格 3×3 等分网格 character sheet；九格宽高完全一致；直线细分割线横平竖直、贯穿全图；无外框圆角裁切、无透视倾斜、无随机留白不均。
+3. 格内构图锁（最重要）：九格统一半身/胸像景别；头顶到上边距、下巴到下边距、双肩水平位置尽量一致；头部大小一致，禁止某一格突然放大/缩小或冲出格子。
+4. 九格内容（按用户意图取舍，用户未指定时用默认）：
+   - 默认只变表情与微姿态：正面中性、微笑、大笑、惊讶、生气、认真、侧脸、3/4 视角、正面定妆等；
+   - 若用户要多角度：正/侧/背 + 表情特写，仍保持同一景别与头高；
+   - 禁止单格改成全身冲刺、大幅出拳、大透视动态，以免破坏网格对齐。
+5. 光色：九格同一光源与色温；中性浅底；柔和均匀主光，避免剧情场景抢戏。
+6. 风格：保留用户已写画风；未写时用克制画质词，不锁死某一 IP/画风包。
+7. 严禁：分集分镜故事板、九个无关镜头、不同角色、无来由暴露/畸形肢体。`;
 
 const SCENE_SKILL = `【场景生产手册】
 当描述像场景、环境、背景、室内外空间时优先遵循：
@@ -77,8 +93,10 @@ export function detectPromptOptimizeIntent(prompt: string, fallback: PromptOptim
     const text = prompt.toLowerCase();
     const has = (re: RegExp) => re.test(prompt) || re.test(text);
 
+    // 九宫格/角色表最具体，优先于普通人物与分镜
+    if (has(/九宫格|角色表|表情表|设定表|三视图九宫|character\s*sheet|expression\s*sheet|3\s*[x×]\s*3|3\s*乘\s*3/)) return "character_sheet";
     // 更具体的分镜/运镜优先
-    if (has(/分镜|故事板|storyboard|镜头语言|运镜|推拉摇移|景别|首尾帧|关键镜|缓缓推进|镜头推进|镜头拉远/)) return "storyboard";
+    if (has(/分镜|故事板|storyboard|镜头语言|运镜|推拉摇移|景别|首尾帧|空镜|缓缓推进|镜头推进|镜头拉远/)) return "storyboard";
     if (has(/道具|物件|武器|兵器|器物|静物|产品图|铁锚|prop\b|item\b|weapon/)) return "prop";
     if (has(/场景|背景|环境|室内|室外|街景|风景|夜景|日景|港湾|渔港|外景|内景|landscape|environment|background|scene\b/)) return "scene";
     if (has(/人物|角色|人像|肖像|立绘|定妆|四视图|半身|全身像|女主|男主|女孩|男孩|女人|男人|老人|少女|少年|character|portrait|girl|boy|woman|man/)) return "character";
@@ -94,6 +112,8 @@ function skillForIntent(intent: PromptOptimizeIntent) {
     switch (intent) {
         case "character":
             return CHARACTER_SKILL;
+        case "character_sheet":
+            return CHARACTER_SHEET_SKILL;
         case "scene":
             return SCENE_SKILL;
         case "prop":
@@ -120,7 +140,8 @@ export type BuildOptimizeSystemPromptInput = {
 export function buildOptimizeSystemPrompt(input: BuildOptimizeSystemPromptInput) {
     const intent = resolvePromptOptimizeIntent(input.prompt, input.intent);
     const modeBase = modeBaseInstruction(input.mode);
-    const modeSkill = modeSkillInstruction(input.mode);
+    const modeSkill = modeSkillInstruction(input.mode, intent);
+    // 九宫格手册仅在图/视模式注入；视频里若写到角色表，仍可用同一一致性约束
     const intentSkill = input.mode === "image" || input.mode === "video" ? skillForIntent(intent) : "";
     const contextBlock = formatContextNotes(input.contextNotes);
 
@@ -131,6 +152,8 @@ export function describeOptimizeIntent(intent: PromptOptimizeIntent) {
     switch (intent) {
         case "character":
             return "人物/定妆";
+        case "character_sheet":
+            return "九宫格/角色表";
         case "scene":
             return "场景";
         case "prop":
@@ -158,7 +181,7 @@ function modeBaseInstruction(mode: BuildOptimizeSystemPromptInput["mode"]) {
     }
 }
 
-function modeSkillInstruction(mode: BuildOptimizeSystemPromptInput["mode"]) {
+function modeSkillInstruction(mode: BuildOptimizeSystemPromptInput["mode"], intent?: PromptOptimizeIntent) {
     switch (mode) {
         case "video":
             return `${VIDEO_GENERIC_SKILL}
@@ -174,6 +197,12 @@ function modeSkillInstruction(mode: BuildOptimizeSystemPromptInput["mode"]) {
 字数：通常 40-160 字；信息密度高，避免空话。`;
         case "image":
         default:
+            // 九宫格需写清 9 格内容，给更长预算；其它图片意图保持原区间
+            if (intent === "character_sheet") {
+                return `${IMAGE_GENERIC_SKILL}
+
+字数：通常 160-420 字；信息密度高，避免空话。必须写清「单张 3×3 九宫格」与同一人一致性；非视频时不要堆运镜时长术语。`;
+            }
             return `${IMAGE_GENERIC_SKILL}
 
 字数：通常 80-240 字；信息密度高，避免空话。适合文生图/图生图，非视频时不要堆运镜时长术语。`;

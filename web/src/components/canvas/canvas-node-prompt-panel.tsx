@@ -322,7 +322,7 @@ function optimizeTooltip(mode: PromptOptimizeMode) {
     if (mode === "video") return "AI 优化：动作/运镜/节奏，并按人物·场景·道具·分镜手册增强（保留原意与已连接参考）";
     if (mode === "audio") return "AI 优化：语气/节奏/旁白，适合 TTS 朗读";
     if (mode === "text") return "AI 优化：目标/结构/语气，不改成画面镜头词";
-    return "AI 优化：自动识别人物/场景/道具，补全可执行画面维度（保留原意与已连接参考）";
+    return "AI 优化：自动识别人物/九宫格角色表/场景/道具，补全可执行画面维度（保留原意与已连接参考）";
 }
 
 /** 润色附加上下文：仅文本摘要，不改生成链路、不上传额外媒体 */

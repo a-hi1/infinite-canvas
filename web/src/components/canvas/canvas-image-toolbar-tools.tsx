@@ -101,7 +101,7 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         defaultVisible: true,
         panelLabel: "切图",
         label: "切图",
-        title: "按行列切分图片",
+        title: "按行列切分图片（含角色九宫格 3×3 预设）",
         icon: () => <Grid2x2 className="size-4" />,
         run: (node, handlers) => handlers.onSplit(node),
     },

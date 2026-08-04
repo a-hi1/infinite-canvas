@@ -1,12 +1,13 @@
 import { ArrowLeft, ArrowRight, BookOpen, ClipboardPaste, Download, FolderPlus, History, ImageIcon, LoaderCircle, Music2, Plus, Share2, SlidersHorizontal, Sparkles, Square, Trash2, Upload, VideoIcon, WandSparkles } from "lucide-react";
-import { useEffect, useRef, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { useSearchParams } from "react-router-dom";
-import { App, Button, Drawer, Empty, Image, Input, Modal, Segmented, Switch, Tag, Typography } from "antd";
+import { App, Button, Drawer, Empty, Image, Modal, Segmented, Switch, Tag, Typography } from "antd";
 import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { saveAs } from "file-saver";
 
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
+import { CanvasPromptChipInput } from "@/components/canvas/canvas-prompt-chip-input";
 import { SelectCheckbox } from "@/components/ui/select-checkbox";
 import { ShareToWorkspaceModal, type ShareDraft } from "@/components/workspace/share-to-workspace-modal";
 import { ModelPicker } from "@/components/model-picker";
@@ -34,6 +35,7 @@ import {
     soraVeoReferenceImageMaxBytes,
 } from "@/lib/openai-compatible-video";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
+import { workbenchVideoPromptReferences } from "@/lib/workbench-prompt-references";
 import { clampVideoConfigToCapability } from "@/lib/model-capability";
 import { boolConfig, isSeedanceVideoConfig, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import {
@@ -130,6 +132,7 @@ export default function VideoPage() {
     const [references, setReferences] = useState<ReferenceImage[]>([]);
     const [videoReferences, setVideoReferences] = useState<ReferenceVideo[]>([]);
     const [audioReferences, setAudioReferences] = useState<ReferenceAudio[]>([]);
+    const promptReferences = useMemo(() => workbenchVideoPromptReferences(references, videoReferences, audioReferences), [references, videoReferences, audioReferences]);
     const [results, setResults] = useState<GenerationResult[]>([]);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
     const [running, setRunning] = useState(false);
@@ -937,7 +940,14 @@ export default function VideoPage() {
                                         </Button>
                                     </div>
                                 </div>
-                                <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder="描述镜头运动、主体动作、场景氛围和画面风格" disabled={optimizingPrompt} />
+                                <CanvasPromptChipInput
+                                    value={prompt}
+                                    references={promptReferences}
+                                    onChange={setPrompt}
+                                    disabled={optimizingPrompt}
+                                    placeholder="描述镜头运动、主体动作、场景氛围和画面风格；有参考素材时可输入 @ 选择"
+                                    className="min-h-42 max-h-70 w-full rounded-md border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm dark:border-stone-700 dark:bg-stone-950 dark:text-stone-100"
+                                />
                                 <div className="mt-1.5 text-xs text-stone-500 dark:text-stone-400">AI 优化会使用当前文本模型，补全镜头运动、动作节奏与画面风格；若描述像人物/场景/分镜，会按对应生产维度增强。</div>
                             </div>
 

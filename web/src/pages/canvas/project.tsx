@@ -2042,20 +2042,30 @@ function InfiniteCanvasPage() {
             const cellHeight = node.height / params.rows;
             const startX = node.position.x + node.width + 96;
             const startY = node.position.y;
+            const isSheetGrid = params.rows === 3 && params.columns === 3;
             const childNodes = await Promise.all(
                 pieces.map(async (piece) => {
                     const image = await uploadImage(piece.dataUrl);
                     const id = nanoid();
+                    const cellLabel = `${piece.row + 1}-${piece.column + 1}`;
                     return {
                         id,
                         type: CanvasNodeType.Image,
-                        title: `${node.title || "图片"} ${piece.row + 1}-${piece.column + 1}`,
+                        title: `${node.title || "图片"} ${cellLabel}`,
                         position: { x: startX + piece.column * (cellWidth + gap), y: startY + piece.row * (cellHeight + gap) },
                         width: cellWidth,
                         height: cellHeight,
                         metadata: {
                             ...imageMetadata(image),
                             prompt: node.metadata?.prompt,
+                            // 任意行列切图都写格子坐标，便于后续 keep/drop / I2V；3×3 额外标记来源整表
+                            sheetCell: {
+                                row: piece.row + 1,
+                                col: piece.column + 1,
+                                label: cellLabel,
+                            },
+                            sourceSheetNodeId: node.id,
+                            ...(isSheetGrid ? { sheetPick: null } : {}),
                         },
                     } satisfies CanvasNodeData;
                 }),

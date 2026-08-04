@@ -1,7 +1,7 @@
 import { ArrowLeft, ArrowRight, BookOpen, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, Share2, SlidersHorizontal, Sparkles, Square, Trash2, Upload, WandSparkles } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { App, Button, Drawer, Empty, Image, Input, Modal, Segmented, Switch, Tag, Tooltip, Typography } from "antd";
+import { App, Button, Drawer, Empty, Image, Modal, Segmented, Switch, Tag, Tooltip, Typography } from "antd";
 import localforage from "localforage";
 import { saveAs } from "file-saver";
 
@@ -9,6 +9,7 @@ import { ImageSettingsPanel } from "@/components/image-settings-panel";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
+import { CanvasPromptChipInput } from "@/components/canvas/canvas-prompt-chip-input";
 import { SelectCheckbox } from "@/components/ui/select-checkbox";
 import { ShareToWorkspaceModal, type ShareDraft } from "@/components/workspace/share-to-workspace-modal";
 import { suggestAssetCategory } from "@/lib/asset-category";
@@ -25,6 +26,7 @@ import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { describeImageRequestMode, IMAGE_EDIT_DEGRADED_DEFAULT } from "@/lib/image-request-mode";
 import { clampImageConfigToCapability } from "@/lib/model-capability";
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
+import { workbenchImagePromptReferences } from "@/lib/workbench-prompt-references";
 import { getImageCompatStrategy, modelOptionLabel, resolveModelChannel, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
@@ -114,6 +116,7 @@ export default function ImagePage() {
     const refreshUsage = useAuthStore((state) => state.refreshUsage);
     const [prompt, setPrompt] = useState("");
     const [references, setReferences] = useState<ReferenceImage[]>([]);
+    const promptReferences = useMemo(() => workbenchImagePromptReferences(references), [references]);
     const [results, setResults] = useState<GenerationResult[]>([]);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
     const [running, setRunning] = useState(false);
@@ -1016,8 +1019,15 @@ export default function ImagePage() {
                                         </Button>
                                     </div>
                                 </div>
-                                <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder="描述画面主体、风格、构图、光线和用途" disabled={optimizingPrompt} />
-                                <div className="mt-1.5 text-xs text-stone-500 dark:text-stone-400">AI 优化会使用当前文本模型，自动识别人物/场景/道具等，把简短描述扩写成更准确、可执行的生图提示词。</div>
+                                <CanvasPromptChipInput
+                                    value={prompt}
+                                    references={promptReferences}
+                                    onChange={setPrompt}
+                                    disabled={optimizingPrompt}
+                                    placeholder="描述画面主体、风格、构图、光线和用途；有参考图时可输入 @ 选择"
+                                    className="min-h-42 max-h-70 w-full rounded-md border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 shadow-sm dark:border-stone-700 dark:bg-stone-950 dark:text-stone-100"
+                                />
+                                <div className="mt-1.5 text-xs text-stone-500 dark:text-stone-400">AI 优化会使用当前文本模型，自动识别人物/场景/道具等，把简短描述扩写成更准确、可执行的生图提示词。已添加参考图时可用 @ 插入「图片N」缩略图引用。</div>
                             </div>
 
                             <div className="min-w-0">

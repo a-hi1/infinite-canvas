@@ -1,19 +1,29 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { Button, Modal } from "antd";
-import { Grid2x2, Plus, RotateCcw, Trash2 } from "lucide-react";
+import { Grid2x2, LayoutGrid, Plus, RotateCcw, Trash2 } from "lucide-react";
 
 import { readImageMeta } from "@/lib/image-utils";
 import type { ImageSplitParams } from "@/lib/canvas/canvas-image-data";
 
 export type CanvasImageSplitParams = ImageSplitParams;
 
+/** 默认 2×2，保持既有切图行为 */
 const defaultParams: CanvasImageSplitParams = {
     rows: 2,
     columns: 2,
     horizontalLines: [0.5],
     verticalLines: [0.5],
 };
+
+/** 角色九宫格 / 表情表：等分 3×3 */
+const sheet3x3Params: CanvasImageSplitParams = {
+    rows: 3,
+    columns: 3,
+    horizontalLines: [1 / 3, 2 / 3],
+    verticalLines: [1 / 3, 2 / 3],
+};
+
 const maxLines = 11;
 
 export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { dataUrl: string; open: boolean; onClose: () => void; onConfirm: (params: CanvasImageSplitParams) => void }) {
@@ -54,7 +64,10 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
             <div className="space-y-5">
                 <div>
                     <h2 className="text-xl font-semibold">切分图片</h2>
-                    <p className="mt-1 text-sm opacity-60">拖动分割线调整网格，生成 {total} 个图片子节点到画布右侧</p>
+                    <p className="mt-1 text-sm opacity-60">
+                        拖动分割线对齐原图分割缝，生成 {total} 个图片子节点到画布右侧
+                        {rows === 3 && columns === 3 ? " · 九宫格预设为等分 1/3；若原图格子不齐请手动拖线" : ""}
+                    </p>
                 </div>
                 <div className="grid gap-6 md:grid-cols-[minmax(280px,1fr)_280px]">
                     <div className="rounded-xl border p-4">
@@ -91,6 +104,15 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
                         </div>
 
                         <div className="grid grid-cols-2 gap-2">
+                            <Button
+                                type={rows === 3 && columns === 3 ? "primary" : "default"}
+                                ghost={rows === 3 && columns === 3}
+                                icon={<LayoutGrid className="size-4" />}
+                                onClick={() => setParams(sheet3x3Params)}
+                                className="col-span-2"
+                            >
+                                角色九宫格 3×3
+                            </Button>
                             <Button icon={<Plus className="size-4" />} disabled={(params.verticalLines?.length || 0) >= maxLines} onClick={() => setParams((current) => ({ ...current, verticalLines: addLine(current.verticalLines || []), columns: (current.verticalLines?.length || 0) + 2 }))}>
                                 竖线
                             </Button>
@@ -117,7 +139,7 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
                                 删末线
                             </Button>
                             <Button icon={<RotateCcw className="size-4" />} onClick={() => setParams(defaultParams)}>
-                                重置
+                                重置 2×2
                             </Button>
                         </div>
 

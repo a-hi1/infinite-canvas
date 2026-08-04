@@ -63,6 +63,20 @@ export type CanvasNodeMetadata = {
     durationMs?: number;
     /** Parent group node id when this node is nested in a group. */
     groupId?: string;
+    /**
+     * 九宫格/角色表切图子节点坐标（1-based label 用 row-col）。
+     * 仅由切图写入；生成请求不依赖此字段。
+     */
+    sheetCell?: {
+        row: number;
+        col: number;
+        /** 显示用标签，如 "1-1" / "3-3" */
+        label: string;
+    };
+    /** 来源整张九宫格节点 id（切图父节点） */
+    sourceSheetNodeId?: string;
+    /** 后续 keep/drop 筛选；当前切片可只写 null */
+    sheetPick?: "keep" | "drop" | null;
 };
 
 export type CanvasNodeData = {

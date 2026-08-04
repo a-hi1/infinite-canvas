@@ -199,6 +199,8 @@ docker compose -p ic3011 -f docker-compose.local.yml ps
 
 - 工作台并发 + 按任务停止（AbortController）
 - 画布并发生成（runningNodeIds + runId；有内容再生成新建子节点）
+- **九宫格/角色表轻量切片（无独立 App）**：AI 优化 `character_sheet` intent + 切图 3×3 预设 + 子节点 `sheetCell`/`sourceSheetNodeId`；keep/drop/lock/I2V 后置
+- **工作台提示词 `@` 引用**：图/视频工作台复用 `CanvasPromptChipInput`，选择已添加参考素材插入 `图片N` 等 label（见 pending-test）
 - 部署体验：`/assets` 刷新、资产导入顺序、nginx 不误跳 :3000
 - 其它以代码与 pending-test 为准
 

@@ -17,6 +17,8 @@ type Props = {
     className?: string;
     style?: CSSProperties;
     placeholder?: string;
+    /** 工作台 AI 优化中等场景禁用编辑；画布默认不传 */
+    disabled?: boolean;
 };
 
 type MentionState = {
@@ -30,7 +32,7 @@ type Token =
 
 // 提示词面板专用的 contentEditable 输入框:@ 引用图片时直接内嵌真实缩略图 chip,而不是「图片1」文字。
 // 序列化时 chip → 引用 label 文本(如「图片1」),保证发给生成的 value 语义与旧 textarea 版一致。
-export function CanvasPromptChipInput({ value, references, onChange, onSubmit, className, style, placeholder }: Props) {
+export function CanvasPromptChipInput({ value, references, onChange, onSubmit, className, style, placeholder, disabled = false }: Props) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const editorRef = useRef<HTMLDivElement>(null);
     const composingRef = useRef(false);
@@ -48,11 +50,11 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, c
     const tokens = useMemo(() => parseTokens(value, activeLabels), [value, activeLabels]);
 
     const candidates = useMemo(() => {
-        if (!mention) return [];
+        if (disabled || !mention) return [];
         const query = mention.query.trim().toLowerCase();
         if (!query) return activeReferences;
         return activeReferences.filter((item) => `${item.label} ${item.title} ${item.kind} ${item.text || ""}`.toLowerCase().includes(query));
-    }, [mention, activeReferences]);
+    }, [disabled, mention, activeReferences]);
 
     // DOM ← value:未聚焦时按 value 重建;聚焦时仅当 value 是外部改动(非本组件回声)才重建。
     useEffect(() => {
@@ -72,12 +74,24 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, c
         lastEmittedRef.current = value;
     }, [tokens, referenceByLabel, theme, value]);
 
+    useEffect(() => {
+        if (!disabled) return;
+        setMention(null);
+        setActiveIndex(0);
+    }, [disabled]);
+
     const emit = (next: string) => {
         lastEmittedRef.current = next;
         onChange(next);
     };
 
+    const closeMention = () => {
+        setMention(null);
+        setActiveIndex(0);
+    };
+
     const syncFromEditor = () => {
+        if (disabled) return;
         const editor = editorRef.current;
         if (!editor) return;
         emit(serializeEditor(editor));
@@ -85,6 +99,10 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, c
     };
 
     const syncMention = () => {
+        if (disabled) {
+            closeMention();
+            return;
+        }
         const text = textBeforeCaret();
         const match = /@([^\s@]*)$/.exec(text);
         if (!match || !activeReferences.length) {
@@ -95,12 +113,8 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, c
         setActiveIndex(0);
     };
 
-    const closeMention = () => {
-        setMention(null);
-        setActiveIndex(0);
-    };
-
     const insertReference = (reference: CanvasResourceReference) => {
+        if (disabled) return;
         const editor = editorRef.current;
         if (!editor) return;
         removeActiveMention();
@@ -134,24 +148,30 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, c
             ) : null}
             <div
                 ref={editorRef}
-                contentEditable
+                contentEditable={!disabled}
                 suppressContentEditableWarning
                 role="textbox"
                 aria-multiline="true"
-                className={`${className || ""} overflow-y-auto whitespace-pre-wrap break-words outline-none`}
-                style={{ ...style, cursor: "text" }}
+                aria-disabled={disabled || undefined}
+                className={`${className || ""} overflow-y-auto whitespace-pre-wrap break-words outline-none ${disabled ? "pointer-events-none cursor-not-allowed opacity-60" : ""}`}
+                style={{ ...style, cursor: disabled ? "not-allowed" : "text" }}
                 onInput={() => {
-                    if (!composingRef.current) syncFromEditor();
+                    if (disabled || composingRef.current) return;
+                    syncFromEditor();
                 }}
                 onCompositionStart={() => {
                     composingRef.current = true;
                 }}
                 onCompositionEnd={() => {
                     composingRef.current = false;
-                    syncFromEditor();
+                    if (!disabled) syncFromEditor();
                 }}
                 onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
                     event.stopPropagation();
+                    if (disabled) {
+                        event.preventDefault();
+                        return;
+                    }
                     if (isImeComposing(event)) return;
                     if (mention && candidates.length) {
                         if (event.key === "ArrowDown") {
@@ -189,7 +209,7 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, c
                 }}
                 onBlur={() => window.setTimeout(closeMention, 120)}
             />
-            {mention && candidates.length ? (
+            {!disabled && mention && candidates.length ? (
                 <MentionMenu rect={mention.rect} references={candidates} activeIndex={Math.min(activeIndex, candidates.length - 1)} theme={theme} onSelect={insertReference} />
             ) : null}
             {imagePreview ? <Image src={imagePreview} alt="引用图片预览" style={{ display: "none" }} preview={{ visible: true, src: imagePreview, onVisibleChange: (visible) => !visible && setImagePreview(null) }} /> : null}
