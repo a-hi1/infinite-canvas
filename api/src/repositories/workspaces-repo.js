@@ -49,6 +49,9 @@ export function createWorkspacesRepo(db) {
         updateItem(itemId, workspaceId, patch) {
             return db.updateWorkspaceItem(itemId, workspaceId, patch);
         },
+        reorderItems(workspaceId, input) {
+            return db.reorderWorkspaceItems(workspaceId, input);
+        },
         upsertItemReaction(itemId, workspaceId, input) {
             return db.upsertWorkspaceItemReaction(itemId, workspaceId, input);
         },

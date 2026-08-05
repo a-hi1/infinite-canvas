@@ -254,6 +254,9 @@ const server = http.createServer(async (req, res) => {
         if (req.method === "POST" && /^\/workspaces\/[^/]+\/items$/.test(route)) {
             return await handleCreateWorkspaceItem(req, res, route.split("/")[2]);
         }
+        if (req.method === "PUT" && /^\/workspaces\/[^/]+\/items\/reorder$/.test(route)) {
+            return await handleReorderWorkspaceItems(req, res, route.split("/")[2]);
+        }
         if (req.method === "PATCH" && /^\/workspaces\/[^/]+\/items\/[^/]+$/.test(route)) {
             const parts = route.split("/");
             return await handleUpdateWorkspaceItem(req, res, parts[2], parts[4]);
@@ -2112,6 +2115,9 @@ async function handleUpdateWorkspaceItem(req, res, workspaceId, itemId) {
         patch.isFinal =
             raw === true || raw === 1 || raw === "1" || String(raw || "").toLowerCase() === "true";
     }
+    if (body.folder_sort_order !== undefined || body.folderSortOrder !== undefined) {
+        patch.folderSortOrder = Number(body.folder_sort_order ?? body.folderSortOrder);
+    }
 
     if (!Object.keys(patch).length) {
         return fail(res, 400, "没有可更新的字段", CLOUD_ERROR_REASON.BAD_REQUEST);
@@ -2138,6 +2144,49 @@ async function handleUpdateWorkspaceItem(req, res, workspaceId, itemId) {
     const updated = workspacesRepo.updateItem(itemId, workspaceId, patch);
     if (!updated) return fail(res, 404, "分享条目不存在", CLOUD_ERROR_REASON.WORKSPACE_ITEM_NOT_FOUND);
     json(res, 200, decorateWorkspaceItem(updated), "已更新");
+}
+
+/** Owner can reorder any items in a folder; members only their own. */
+async function handleReorderWorkspaceItems(req, res, workspaceId) {
+    const ctx = requireWorkspaceMember(req, res, workspaceId);
+    if (!ctx) return;
+    const body = await readJson(req, Math.min(maxBodyBytes, 256 * 1024));
+    const orderedIds = Array.isArray(body.ordered_ids)
+        ? body.ordered_ids
+        : Array.isArray(body.orderedIds)
+          ? body.orderedIds
+          : [];
+    // Empty string / omit = unfiled. Client sentinel __unfiled__ must not be stored.
+    let folder = body.folder;
+    if (folder === "__unfiled__") folder = "";
+    if (folder === undefined || folder === null) folder = "";
+    folder = String(folder || "")
+        .replace(/[\x00-\x1F\x7F]/g, "")
+        .trim()
+        .slice(0, 80);
+
+    if (!orderedIds.length) {
+        return fail(res, 400, "ordered_ids 不能为空", CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+
+    const isOwner = ctx.membership.role === WORKSPACE_ROLE.OWNER || ctx.workspace.owner_id === ctx.user.id;
+    if (!isOwner) {
+        for (const rawId of orderedIds) {
+            const itemId = String(rawId || "").trim();
+            const item = workspacesRepo.findItem(itemId, workspaceId);
+            if (!item) return fail(res, 404, "分享条目不存在", CLOUD_ERROR_REASON.WORKSPACE_ITEM_NOT_FOUND);
+            if (item.created_by !== ctx.user.id) {
+                return fail(res, 403, "只能排序自己的分享，或由所有者排序", CLOUD_ERROR_REASON.WORKSPACE_FORBIDDEN);
+            }
+        }
+    }
+
+    const result = workspacesRepo.reorderItems(workspaceId, { folder, orderedIds });
+    if (result?.error) {
+        return fail(res, 400, result.error, CLOUD_ERROR_REASON.BAD_REQUEST);
+    }
+    const items = (result.items || []).map((item) => decorateWorkspaceItem(item));
+    json(res, 200, { items, updated: result.updated || items.length }, "已更新排序");
 }
 
 /** Any member can set their own 用/弃/改 vote (+ optional short comment). */

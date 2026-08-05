@@ -174,8 +174,9 @@ docker compose -p ic3011 -f docker-compose.local.yml ps
 
 - MVP：素材墙 / 生成分享 / 进度板 / 本地上传（含 md/txt/csv）/ 分类墙 / 终稿 / 决议 / 画布发布 / 批量与智能归类
 - **文件夹 `folder` 与 `category` 正交**：扁平字符串 max 80；空 = 未归入；智能归类**只动分类不猜文件夹**
-- 墙面 UI 分层（不删功能）：**放入**（上传旁）→ **浏览**（批次文件夹 chips + 内容分类）→ **整理**（勾选后才展开批量条）
-- 实现位置：`api` create/list/update + `web/src/lib/workspace-folder.ts` + `detail.tsx` + 分享弹窗
+- **卡片按文件夹可拖排序**：`folder_sort_order` + `PUT .../items/reorder`；每 folder（含未归入）独立；「全部」只读；owner 全量 / 成员仅自己的
+- 墙面 UI 分层（不删功能）：**放入**（上传旁）→ **浏览**（批次文件夹 chips + 内容分类 + 拖排序提示）→ **整理**（勾选后才展开批量条）
+- 实现位置：`api` create/list/update/reorder + `web/src/lib/workspace-folder.ts` + `workspace-item-sort.ts` + `detail.tsx` + 分享弹窗
 - **若未 commit/push，服务器与公司机还没有**——以 `git status` 与 [pending-test](/docs/progress/pending-test) 首条为准
 - 权限：创建者或 owner 改元数据；显式分享，不自动全量同步私有库
 

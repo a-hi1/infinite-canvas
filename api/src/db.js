@@ -86,6 +86,62 @@ export function createDb(dataDir) {
         return new Date().toISOString();
     }
 
+    /** Folder label for wall order scope (empty = unfiled). */
+    function normalizeWorkspaceItemFolder(value) {
+        return String(value || "")
+            .replace(/[\x00-\x1F\x7F]/g, "")
+            .trim()
+            .slice(0, 80);
+    }
+
+    function hasExplicitFolderSortOrder(item) {
+        return item != null && item.folder_sort_order != null && Number.isFinite(Number(item.folder_sort_order));
+    }
+
+    /** Append rank for a folder; excludeId skips self when re-assigning after folder move. */
+    function nextWorkspaceItemFolderSortOrder(dbState, workspaceId, folder, excludeId = "") {
+        const folderKey = normalizeWorkspaceItemFolder(folder);
+        let max = 0;
+        let found = false;
+        for (const row of dbState.workspace_items || []) {
+            if (!row || row.workspace_id !== workspaceId || row.deleted_at) continue;
+            if (excludeId && row.id === excludeId) continue;
+            if (normalizeWorkspaceItemFolder(row.folder) !== folderKey) continue;
+            if (!hasExplicitFolderSortOrder(row)) continue;
+            found = true;
+            const n = Number(row.folder_sort_order);
+            if (n > max) max = n;
+        }
+        if (!found) return Date.now();
+        return max + 1024;
+    }
+
+    /**
+     * Stable list order: folder name, then folder_sort_order when customized,
+     * else finals-first + newest for legacy rows without order.
+     */
+    function compareWorkspaceItemsForList(a, b) {
+        const fa = normalizeWorkspaceItemFolder(a?.folder);
+        const fb = normalizeWorkspaceItemFolder(b?.folder);
+        if (fa !== fb) {
+            if (!fa) return 1;
+            if (!fb) return -1;
+            return fa.localeCompare(fb, "zh-CN");
+        }
+        const aHas = hasExplicitFolderSortOrder(a);
+        const bHas = hasExplicitFolderSortOrder(b);
+        if (aHas || bHas) {
+            const ao = aHas ? Number(a.folder_sort_order) : Number.MAX_SAFE_INTEGER;
+            const bo = bHas ? Number(b.folder_sort_order) : Number.MAX_SAFE_INTEGER;
+            if (ao !== bo) return ao - bo;
+            return String(b?.created_at || "").localeCompare(String(a?.created_at || "")) || String(a?.id || "").localeCompare(String(b?.id || ""));
+        }
+        const af = a?.is_final ? 1 : 0;
+        const bf = b?.is_final ? 1 : 0;
+        if (af !== bf) return bf - af;
+        return String(b?.created_at || "").localeCompare(String(a?.created_at || "")) || String(a?.id || "").localeCompare(String(b?.id || ""));
+    }
+
     return {
         path: dbPath,
         flush: persist,
@@ -718,6 +774,7 @@ export function createDb(dataDir) {
         },
 
         createWorkspaceItem(record) {
+            const folder = normalizeWorkspaceItemFolder(record.folder);
             const item = {
                 id: randomId(),
                 workspace_id: record.workspaceId,
@@ -726,7 +783,7 @@ export function createDb(dataDir) {
                 note: String(record.note || "").slice(0, 1000),
                 category: String(record.category || "").slice(0, 80),
                 // Orthogonal to category: batch/group label ("定妆包"), empty = unfiled.
-                folder: String(record.folder || "").slice(0, 80),
+                folder,
                 tags: Array.isArray(record.tags) ? record.tags.map((t) => String(t).slice(0, 40)).slice(0, 20) : [],
                 prompt: String(record.prompt || "").slice(0, 4000),
                 model: String(record.model || "").slice(0, 120),
@@ -742,6 +799,11 @@ export function createDb(dataDir) {
                 version: String(record.version || "").slice(0, 40),
                 replaces_item_id: String(record.replacesItemId || record.replaces_item_id || "").slice(0, 80),
                 is_final: Boolean(record.isFinal ?? record.is_final),
+                // Per-folder wall order (smaller first). New items append to folder tail.
+                folder_sort_order:
+                    record.folderSortOrder != null || record.folder_sort_order != null
+                        ? Number(record.folderSortOrder ?? record.folder_sort_order) || Date.now()
+                        : nextWorkspaceItemFolderSortOrder(state, record.workspaceId, folder),
                 // Review reactions (用/弃/改); per-user one vote, array on item.
                 reactions: [],
                 created_by: record.createdBy,
@@ -791,6 +853,7 @@ export function createDb(dataDir) {
                     });
                 }
             }
+            rows = rows.slice().sort(compareWorkspaceItemsForList);
             const total = rows.length;
             const start = Math.max(0, (page - 1) * pageSize);
             return { items: rows.slice(start, start + pageSize), total, page, page_size: pageSize };
@@ -802,7 +865,7 @@ export function createDb(dataDir) {
 
         /**
          * Metadata-only patch for workspace items (no media re-upload).
-         * Supports category/folder/tags/title/note + version / replaces / is_final.
+         * Supports category/folder/tags/title/note + version / replaces / is_final + folder_sort_order.
          */
         updateWorkspaceItem(itemId, workspaceId, patch = {}) {
             const item = this.findWorkspaceItem(itemId, workspaceId);
@@ -810,7 +873,8 @@ export function createDb(dataDir) {
             if (patch.title !== undefined) item.title = String(patch.title || "").slice(0, 200);
             if (patch.note !== undefined) item.note = String(patch.note || "").slice(0, 1000);
             if (patch.category !== undefined) item.category = String(patch.category || "").slice(0, 80);
-            if (patch.folder !== undefined) item.folder = String(patch.folder || "").slice(0, 80);
+            const prevFolder = normalizeWorkspaceItemFolder(item.folder);
+            if (patch.folder !== undefined) item.folder = normalizeWorkspaceItemFolder(patch.folder);
             if (patch.tags !== undefined) {
                 item.tags = Array.isArray(patch.tags)
                     ? patch.tags.map((t) => String(t).slice(0, 40)).slice(0, 20)
@@ -823,17 +887,58 @@ export function createDb(dataDir) {
             if (patch.isFinal !== undefined || patch.is_final !== undefined) {
                 item.is_final = Boolean(patch.isFinal ?? patch.is_final);
             }
+            if (patch.folderSortOrder !== undefined || patch.folder_sort_order !== undefined) {
+                item.folder_sort_order = Number(patch.folderSortOrder ?? patch.folder_sort_order) || 0;
+            } else if (patch.folder !== undefined && normalizeWorkspaceItemFolder(item.folder) !== prevFolder) {
+                // Moving folder: append to target folder tail (do not keep old folder's rank).
+                item.folder_sort_order = nextWorkspaceItemFolderSortOrder(state, workspaceId, item.folder, item.id);
+            }
             // Ensure older rows still have the optional keys when first patched.
             if (item.folder == null) item.folder = "";
             if (item.version == null) item.version = "";
             if (item.replaces_item_id == null) item.replaces_item_id = "";
             if (item.is_final == null) item.is_final = false;
+            if (item.folder_sort_order == null) item.folder_sort_order = Date.parse(item.created_at || "") || Date.now();
             if (!Array.isArray(item.reactions)) item.reactions = [];
             item.updated_at = now();
             const ws = this.findWorkspaceById(workspaceId);
             if (ws) ws.updated_at = now();
             schedulePersist();
             return item;
+        },
+
+        /**
+         * Batch set folder_sort_order for ids in one folder. Only listed ids are rewritten;
+         * other items in the same folder keep their order.
+         * @returns {{ items: object[], updated: number } | { error: string }}
+         */
+        reorderWorkspaceItems(workspaceId, { folder, orderedIds } = {}) {
+            const folderKey = normalizeWorkspaceItemFolder(folder);
+            const ids = Array.isArray(orderedIds)
+                ? orderedIds.map((id) => String(id || "").trim()).filter(Boolean)
+                : [];
+            if (!ids.length) return { error: "ordered_ids 不能为空" };
+            if (ids.length > 200) return { error: "一次最多排序 200 条" };
+            const seen = new Set();
+            for (const id of ids) {
+                if (seen.has(id)) return { error: "ordered_ids 含重复 id" };
+                seen.add(id);
+            }
+            const updated = [];
+            for (let index = 0; index < ids.length; index += 1) {
+                const item = this.findWorkspaceItem(ids[index], workspaceId);
+                if (!item) return { error: `条目不存在：${ids[index]}` };
+                if (normalizeWorkspaceItemFolder(item.folder) !== folderKey) {
+                    return { error: "只能排序同一文件夹内的条目" };
+                }
+                item.folder_sort_order = (index + 1) * 1024;
+                item.updated_at = now();
+                updated.push(item);
+            }
+            const ws = this.findWorkspaceById(workspaceId);
+            if (ws) ws.updated_at = now();
+            schedulePersist();
+            return { items: updated, updated: updated.length };
         },
 
         /**
@@ -1152,6 +1257,10 @@ export function publicWorkspaceItem(item, extra = {}) {
         version: item.version || "",
         replaces_item_id: item.replaces_item_id || "",
         is_final: Boolean(item.is_final),
+        folder_sort_order:
+            item.folder_sort_order != null && Number.isFinite(Number(item.folder_sort_order))
+                ? Number(item.folder_sort_order)
+                : undefined,
         reactions: normalizeWorkspaceItemReactions(item.reactions),
         created_by: item.created_by,
         created_by_name: extra.created_by_name || "",

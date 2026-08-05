@@ -67,6 +67,8 @@ export type WorkspaceItem = {
     replaces_item_id?: string;
     /** Final draft flag on material wall. */
     is_final?: boolean;
+    /** Per-folder wall order (smaller first); independent per folder key. */
+    folder_sort_order?: number;
     /** Member votes: 用/弃/改 (+ optional short comment). */
     reactions?: WorkspaceItemReaction[];
     created_by: string;
@@ -466,6 +468,7 @@ export type UpdateWorkspaceItemInput = {
     version?: string;
     replacesItemId?: string | null;
     isFinal?: boolean;
+    folderSortOrder?: number;
 };
 
 export function updateWorkspaceItem(workspaceId: string, itemId: string, patch: UpdateWorkspaceItemInput) {
@@ -478,6 +481,7 @@ export function updateWorkspaceItem(workspaceId: string, itemId: string, patch: 
     if (patch.version !== undefined) body.version = patch.version;
     if (patch.replacesItemId !== undefined) body.replaces_item_id = patch.replacesItemId || "";
     if (patch.isFinal !== undefined) body.is_final = patch.isFinal;
+    if (patch.folderSortOrder !== undefined) body.folder_sort_order = patch.folderSortOrder;
     return request<WorkspaceItem>(
         `/workspaces/${encodeURIComponent(workspaceId)}/items/${encodeURIComponent(itemId)}`,
         {
@@ -487,6 +491,26 @@ export function updateWorkspaceItem(workspaceId: string, itemId: string, patch: 
     ).then((item) => {
         invalidateWorkspaceItemsCache(workspaceId);
         return item;
+    });
+}
+
+/** Reorder items inside one folder (empty folder = unfiled). Only listed ids get new ranks. */
+export function reorderWorkspaceItems(
+    workspaceId: string,
+    input: { folder?: string; orderedIds: string[] },
+) {
+    return request<{ items: WorkspaceItem[]; updated: number }>(
+        `/workspaces/${encodeURIComponent(workspaceId)}/items/reorder`,
+        {
+            method: "PUT",
+            body: JSON.stringify({
+                folder: input.folder ?? "",
+                ordered_ids: input.orderedIds,
+            }),
+        },
+    ).then((result) => {
+        invalidateWorkspaceItemsCache(workspaceId);
+        return result;
     });
 }
 

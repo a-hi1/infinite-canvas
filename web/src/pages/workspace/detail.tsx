@@ -47,6 +47,13 @@ import {
     workspaceFolderSelectOptions,
 } from "@/lib/workspace-folder";
 import {
+    applyLocalReorder,
+    canDragReorderFolder,
+    folderParamForReorderApi,
+    moveOrderedId,
+    sortWorkspaceItemsForDisplay,
+} from "@/lib/workspace-item-sort";
+import {
     isWorkspaceDocumentFile,
     parseCsvPreview,
     renderSimpleMarkdown,
@@ -86,6 +93,7 @@ import {
     prefetchWorkspaceThumbs,
     reactionCounts,
     removeWorkspaceMember,
+    reorderWorkspaceItems,
     resetWorkspaceInvite,
     resolutionLabel,
     sourceTypeLabel,
@@ -167,16 +175,6 @@ function isAssetWallKind(kind: string) {
 
 function isDownloadableKind(kind: string) {
     return isMediaKind(kind) || isDocumentKind(kind);
-}
-
-/** Keep finals easy to scan: finals first, then newest. */
-function sortFinalsFirst(list: WorkspaceItem[]) {
-    return [...list].sort((a, b) => {
-        const af = a.is_final ? 1 : 0;
-        const bf = b.is_final ? 1 : 0;
-        if (af !== bf) return bf - af;
-        return String(b.created_at || "").localeCompare(String(a.created_at || ""));
-    });
 }
 
 function formatTime(value?: string) {
@@ -343,23 +341,25 @@ export default function WorkspaceDetailPage() {
     const genFinalCount = useMemo(() => genItems.filter((item) => item.is_final).length, [genItems]);
     const filteredAssetItems = useMemo(
         () =>
-            sortFinalsFirst(
+            sortWorkspaceItemsForDisplay(
                 assetItems.filter((item) => {
                     if (assetFinalOnly && !item.is_final) return false;
                     if (!matchesWorkspaceFolderFilter(item.folder, assetFolderFilter)) return false;
                     return matchesAssetCategoryFilter(item.category, assetCategoryFilter);
                 }),
+                { folderFilter: assetFolderFilter },
             ),
         [assetItems, assetCategoryFilter, assetFolderFilter, assetFinalOnly],
     );
     const filteredGenItems = useMemo(
         () =>
-            sortFinalsFirst(
+            sortWorkspaceItemsForDisplay(
                 genItems.filter((item) => {
                     if (genFinalOnly && !item.is_final) return false;
                     if (!matchesWorkspaceFolderFilter(item.folder, genFolderFilter)) return false;
                     return matchesAssetCategoryFilter(item.category, genCategoryFilter);
                 }),
+                { folderFilter: genFolderFilter },
             ),
         [genItems, genCategoryFilter, genFolderFilter, genFinalOnly],
     );
@@ -845,6 +845,38 @@ export default function WorkspaceDetailPage() {
         }
     };
 
+    /**
+     * Reorder visible wall cards inside the active folder filter.
+     * Only listed (visible) ids get new folder_sort_order; other kinds in same folder keep rank.
+     */
+    const handleWallReorder = async (visibleItems: WorkspaceItem[], orderedIds: string[], folderFilter: string) => {
+        if (!canDragReorderFolder(folderFilter) || !orderedIds.length) return;
+        if (orderedIds.join(",") === visibleItems.map((item) => item.id).join(",")) return;
+        const moved = visibleItems.filter((item) => orderedIds.includes(item.id));
+        if (!isOwner) {
+            const foreign = moved.find((item) => item.created_by !== userId);
+            if (foreign) {
+                message.warning("只能排序自己的分享，或由所有者排序");
+                return;
+            }
+        }
+        const snapshot = items;
+        setItems((list) => applyLocalReorder(list, orderedIds));
+        try {
+            const result = await reorderWorkspaceItems(id, {
+                folder: folderParamForReorderApi(folderFilter),
+                orderedIds,
+            });
+            if (result.items?.length) {
+                const byId = new Map(result.items.map((item) => [item.id, item]));
+                setItems((list) => list.map((item) => byId.get(item.id) || item));
+            }
+        } catch (error) {
+            setItems(snapshot);
+            message.error(error instanceof Error ? error.message : "排序保存失败");
+        }
+    };
+
     const handleSaveToAssets = async (item: WorkspaceItem, options?: { silent?: boolean }) => {
         try {
             if (item.kind === WORKSPACE_ITEM_KIND.ASSET_TEXT) {
@@ -1263,6 +1295,7 @@ export default function WorkspaceDetailPage() {
                                         finalCount={assetFinalCount}
                                         shownCount={filteredAssetItems.length}
                                         totalCount={assetItems.length}
+                                        reorderHint
                                     />
                                     <WallBatchBar
                                         wallCount={filteredAssetItems.length}
@@ -1300,6 +1333,8 @@ export default function WorkspaceDetailPage() {
                                         itemTitleById={itemTitleById}
                                         selectedIds={selectedItemIds}
                                         categoryOptions={batchCategoryOptions}
+                                        reorderEnabled={canDragReorderFolder(assetFolderFilter) && !batchBusy}
+                                        onReorder={(orderedIds) => void handleWallReorder(filteredAssetItems, orderedIds, assetFolderFilter)}
                                         onOpen={setDetailItem}
                                         onDelete={handleDeleteItem}
                                         onSave={(item) => void handleSaveToAssets(item)}
@@ -1340,6 +1375,7 @@ export default function WorkspaceDetailPage() {
                                         finalCount={genFinalCount}
                                         shownCount={filteredGenItems.length}
                                         totalCount={genItems.length}
+                                        reorderHint
                                     />
                                     <WallBatchBar
                                         wallCount={filteredGenItems.length}
@@ -1377,6 +1413,8 @@ export default function WorkspaceDetailPage() {
                                         itemTitleById={itemTitleById}
                                         selectedIds={selectedItemIds}
                                         categoryOptions={batchCategoryOptions}
+                                        reorderEnabled={canDragReorderFolder(genFolderFilter) && !batchBusy}
+                                        onReorder={(orderedIds) => void handleWallReorder(filteredGenItems, orderedIds, genFolderFilter)}
                                         onOpen={setDetailItem}
                                         onDelete={handleDeleteItem}
                                         onSave={(item) => void handleSaveToAssets(item)}
@@ -1683,6 +1721,7 @@ function WallFilterBar({
     finalCount,
     shownCount,
     totalCount,
+    reorderHint,
 }: {
     folderOptions: Array<{ label: string; value: string; count?: number }>;
     folderValue: string;
@@ -1695,12 +1734,19 @@ function WallFilterBar({
     finalCount: number;
     shownCount: number;
     totalCount: number;
+    /** Show drag-sort tip when folder scope is selected. */
+    reorderHint?: boolean;
 }) {
     // Chips are only named folders + 未归入 (no 「全部」). Default filter = show all.
     const showFolderChips = folderOptions.length > 0;
     const folderFiltered = folderValue !== ALL_FOLDERS_VALUE;
     const countLabel =
         shownCount !== totalCount ? `${shownCount}/${totalCount}` : `${shownCount}`;
+    const reorderTip = reorderHint
+        ? folderFiltered
+            ? "拖卡片手柄调整本文件夹顺序（云端保存）"
+            : "选中批次文件夹后可拖拽排序"
+        : "";
 
     return (
         <div className="space-y-2 rounded-xl border border-stone-200/80 bg-card/40 px-3 py-2.5 dark:border-stone-800">
@@ -1758,6 +1804,12 @@ function WallFilterBar({
                     {finalOnly ? " · 仅终稿" : ""}
                 </span>
             </div>
+            {reorderTip ? (
+                <div className="flex items-center gap-1 text-[11px] text-stone-400">
+                    <GripVertical className="size-3 opacity-70" />
+                    {reorderTip}
+                </div>
+            ) : null}
             <div className="border-t border-stone-100 dark:border-stone-800" />
             <div className="flex flex-wrap items-center gap-2">
                 <span
@@ -2377,6 +2429,8 @@ function TaskRow({
     );
 }
 
+const WALL_ITEM_DRAG_TYPE = "text/workspace-item-id";
+
 function ItemGrid({
     items,
     currentUserId,
@@ -2385,6 +2439,8 @@ function ItemGrid({
     itemTitleById,
     selectedIds,
     categoryOptions,
+    reorderEnabled,
+    onReorder,
     onOpen,
     onDelete,
     onSave,
@@ -2399,6 +2455,8 @@ function ItemGrid({
     itemTitleById?: Map<string, string>;
     selectedIds: string[];
     categoryOptions: Array<{ label: string; value: string }>;
+    reorderEnabled?: boolean;
+    onReorder?: (orderedIds: string[]) => void;
     onOpen: (item: WorkspaceItem) => void;
     onDelete: (item: WorkspaceItem) => void;
     onSave: (item: WorkspaceItem) => void;
@@ -2406,6 +2464,9 @@ function ItemGrid({
     onQuickCategory: (item: WorkspaceItem, next?: string | null) => void;
     onGoShare?: () => void;
 }) {
+    const [draggingItemId, setDraggingItemId] = useState<string | null>(null);
+    const [dragOverItemId, setDragOverItemId] = useState<string | null>(null);
+
     if (!items.length) {
         return (
             <Empty
@@ -2434,24 +2495,55 @@ function ItemGrid({
             </Empty>
         );
     }
+
+    const commitDrop = (targetId: string, clientX: number, targetWidth: number) => {
+        if (!reorderEnabled || !onReorder || !draggingItemId) return;
+        const insertBefore = clientX < targetWidth / 2;
+        const orderedIds = moveOrderedId(
+            items.map((item) => item.id),
+            draggingItemId,
+            targetId,
+            insertBefore,
+        );
+        setDraggingItemId(null);
+        setDragOverItemId(null);
+        onReorder(orderedIds);
+    };
+
     return (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {items.map((item) => (
-                <WorkspaceItemCard
-                    key={item.id}
-                    item={item}
-                    replacesLabel={item.replaces_item_id ? itemTitleById?.get(item.replaces_item_id) : undefined}
-                    selected={selectedIds.includes(item.id)}
-                    canDelete={item.created_by === currentUserId || isOwner}
-                    canEdit={item.created_by === currentUserId || isOwner}
-                    categoryOptions={categoryOptions}
-                    onSelectedChange={(checked) => onToggleSelected(item.id, checked)}
-                    onOpen={() => onOpen(item)}
-                    onDelete={() => onDelete(item)}
-                    onSave={() => onSave(item)}
-                    onQuickCategory={(next) => onQuickCategory(item, next)}
-                />
-            ))}
+            {items.map((item) => {
+                const canEdit = item.created_by === currentUserId || isOwner;
+                return (
+                    <WorkspaceItemCard
+                        key={item.id}
+                        item={item}
+                        replacesLabel={item.replaces_item_id ? itemTitleById?.get(item.replaces_item_id) : undefined}
+                        selected={selectedIds.includes(item.id)}
+                        canDelete={canEdit}
+                        canEdit={canEdit}
+                        categoryOptions={categoryOptions}
+                        reorderEnabled={Boolean(reorderEnabled) && canEdit}
+                        isDragging={draggingItemId === item.id}
+                        isDragOver={dragOverItemId === item.id && draggingItemId !== item.id}
+                        onDragHandleStart={(itemId) => setDraggingItemId(itemId)}
+                        onDragHandleEnd={() => {
+                            setDraggingItemId(null);
+                            setDragOverItemId(null);
+                        }}
+                        onCardDragOver={(itemId) => {
+                            if (!reorderEnabled || !draggingItemId || draggingItemId === itemId) return;
+                            if (dragOverItemId !== itemId) setDragOverItemId(itemId);
+                        }}
+                        onCardDrop={(itemId, clientX, width) => commitDrop(itemId, clientX, width)}
+                        onSelectedChange={(checked) => onToggleSelected(item.id, checked)}
+                        onOpen={() => onOpen(item)}
+                        onDelete={() => onDelete(item)}
+                        onSave={() => onSave(item)}
+                        onQuickCategory={(next) => onQuickCategory(item, next)}
+                    />
+                );
+            })}
         </div>
     );
 }
@@ -2463,6 +2555,13 @@ function WorkspaceItemCard({
     canDelete,
     canEdit,
     categoryOptions,
+    reorderEnabled,
+    isDragging,
+    isDragOver,
+    onDragHandleStart,
+    onDragHandleEnd,
+    onCardDragOver,
+    onCardDrop,
     onSelectedChange,
     onOpen,
     onDelete,
@@ -2475,6 +2574,13 @@ function WorkspaceItemCard({
     canDelete: boolean;
     canEdit: boolean;
     categoryOptions: Array<{ label: string; value: string }>;
+    reorderEnabled?: boolean;
+    isDragging?: boolean;
+    isDragOver?: boolean;
+    onDragHandleStart?: (itemId: string) => void;
+    onDragHandleEnd?: () => void;
+    onCardDragOver?: (itemId: string) => void;
+    onCardDrop?: (itemId: string, clientX: number, width: number) => void;
     onSelectedChange: (checked: boolean) => void;
     onOpen: () => void;
     onDelete: () => void;
@@ -2565,12 +2671,28 @@ function WorkspaceItemCard({
     return (
         <div
             className={`overflow-hidden rounded-xl border bg-card transition ${
-                selected
-                    ? "border-stone-900 ring-2 ring-stone-900/15 dark:border-stone-100 dark:ring-stone-100/20"
-                    : item.is_final
-                      ? "border-amber-400 shadow-[0_0_0_1px_rgba(251,191,36,0.35)] ring-1 ring-amber-300/50 dark:border-amber-500 dark:shadow-[0_0_0_1px_rgba(245,158,11,0.35)] dark:ring-amber-600/40"
-                      : "border-stone-200 hover:border-stone-300 dark:border-stone-800 dark:hover:border-stone-600"
+                isDragging
+                    ? "opacity-60 ring-2 ring-violet-400/60"
+                    : isDragOver
+                      ? "border-violet-400 ring-2 ring-violet-400/40 dark:border-violet-500"
+                      : selected
+                        ? "border-stone-900 ring-2 ring-stone-900/15 dark:border-stone-100 dark:ring-stone-100/20"
+                        : item.is_final
+                          ? "border-amber-400 shadow-[0_0_0_1px_rgba(251,191,36,0.35)] ring-1 ring-amber-300/50 dark:border-amber-500 dark:shadow-[0_0_0_1px_rgba(245,158,11,0.35)] dark:ring-amber-600/40"
+                          : "border-stone-200 hover:border-stone-300 dark:border-stone-800 dark:hover:border-stone-600"
             }`}
+            onDragOver={(event) => {
+                if (!reorderEnabled) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                onCardDragOver?.(item.id);
+            }}
+            onDrop={(event) => {
+                if (!reorderEnabled) return;
+                event.preventDefault();
+                const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+                onCardDrop?.(item.id, event.clientX - rect.left, rect.width || 1);
+            }}
         >
             <button
                 ref={mediaRootRef}
@@ -2601,10 +2723,31 @@ function WorkspaceItemCard({
                 )}
                 <span className="absolute bottom-2 left-2 rounded-md bg-black/55 px-1.5 py-0.5 text-[10px] text-white">点击详情</span>
                 <span
-                    className={`absolute left-2 z-10 ${item.is_final ? "top-8" : "top-2"}`}
+                    className={`absolute left-2 z-10 flex items-center gap-1 ${item.is_final ? "top-8" : "top-2"}`}
                     onClick={(event) => event.stopPropagation()}
                     onKeyDown={(event) => event.stopPropagation()}
                 >
+                    {reorderEnabled ? (
+                        <span
+                            draggable
+                            title="拖动调整本文件夹顺序"
+                            className="inline-flex cursor-grab items-center justify-center rounded-md border border-white/20 bg-black/55 p-1 text-white active:cursor-grabbing"
+                            onDragStart={(event) => {
+                                event.stopPropagation();
+                                event.dataTransfer.effectAllowed = "move";
+                                event.dataTransfer.setData(WALL_ITEM_DRAG_TYPE, item.id);
+                                event.dataTransfer.setData("text/plain", item.id);
+                                onDragHandleStart?.(item.id);
+                            }}
+                            onDragEnd={(event) => {
+                                event.stopPropagation();
+                                onDragHandleEnd?.();
+                            }}
+                            onClick={(event) => event.stopPropagation()}
+                        >
+                            <GripVertical className="size-3.5" />
+                        </span>
+                    ) : null}
                     <SelectCheckbox
                         variant="overlay"
                         checked={selected}
@@ -2613,7 +2756,11 @@ function WorkspaceItemCard({
                     />
                 </span>
                 {item.is_final ? (
-                    <span className="absolute left-10 top-2 inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-400 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-amber-950 shadow-sm">
+                    <span
+                        className={`absolute top-2 inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-400 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-amber-950 shadow-sm ${
+                            reorderEnabled ? "left-16" : "left-10"
+                        }`}
+                    >
                         <BadgeCheck className="size-3" />
                         终稿
                     </span>
