@@ -30,6 +30,7 @@ import { workbenchImagePromptReferences } from "@/lib/workbench-prompt-reference
 import { getImageCompatStrategy, modelOptionLabel, resolveModelChannel, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
+import { useLiveElapsedMs } from "@/hooks/use-live-elapsed-ms";
 import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { requestEdit, requestGeneration, resolveImageModelForReferences } from "@/services/api/image";
 import { CloudHistoryPanel } from "@/components/cloud-history-panel";
@@ -1527,6 +1528,10 @@ function LogCard({
 }) {
     const thumbnails = (log.thumbnails || []).filter(Boolean).slice(0, 4);
     const syncLabel = cloudSyncLabel(log.cloudSync);
+    const isGenerating = log.status === "生成中";
+    // Concurrent jobs keep durationMs=0 until done; tick from createdAt so multi-task cards don't stick at 0秒.
+    const liveElapsedMs = useLiveElapsedMs(log.createdAt, isGenerating);
+    const displayDurationMs = isGenerating ? liveElapsedMs : log.durationMs;
 
     return (
         <div
@@ -1596,7 +1601,7 @@ function LogCard({
                     <div className="flex flex-wrap justify-end gap-1">
                         <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none">{log.imageCount} 张</Tag>
                         <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color="green">
-                            {formatDuration(log.durationMs)}
+                            {formatDuration(displayDurationMs)}
                         </Tag>
                         {syncLabel ? (
                             <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color={cloudSyncColor(log.cloudSync)}>

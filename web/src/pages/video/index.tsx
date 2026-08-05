@@ -25,6 +25,7 @@ import {
     shouldIgnoreClipboardPasteTarget,
 } from "@/lib/clipboard-images";
 import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS, grokResolutionShortfallMessage, grokVideoModeGuide, isGrokVideoConfig, normalizeGrokResolution, videoResolutionDisplay } from "@/lib/grok-video";
+import { useLiveElapsedMs } from "@/hooks/use-live-elapsed-ms";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import {
     isSoraOrVeoVideoConfig,
@@ -1537,6 +1538,10 @@ function LogCard({
     onStop?: () => void;
 }) {
     const syncLabel = cloudSyncLabel(log.cloudSync);
+    const isGenerating = log.status === "生成中";
+    // Concurrent jobs keep durationMs=0 until done; tick from createdAt so multi-task cards don't stick at 0秒.
+    const liveElapsedMs = useLiveElapsedMs(log.createdAt, isGenerating);
+    const displayDurationMs = isGenerating ? liveElapsedMs : log.durationMs;
     const clarity = videoResolutionDisplay(
         log.task?.requestedResolution || log.resolution || log.config?.vquality || "",
         log.video?.width,
@@ -1605,11 +1610,11 @@ function LogCard({
                     ) : null}
                 </div>
                 <div className="grid justify-items-end gap-2">
-                    <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color={log.status === "成功" ? "blue" : log.status === "生成中" ? "processing" : "red"}>
+                    <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color={log.status === "成功" ? "blue" : isGenerating ? "processing" : "red"}>
                         {log.status}
                     </Tag>
                     <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color="green">
-                        {formatDuration(log.durationMs)}
+                        {formatDuration(displayDurationMs)}
                     </Tag>
                 </div>
             </div>
