@@ -24,7 +24,7 @@ import {
     readClipboardImageBlobs,
     shouldIgnoreClipboardPasteTarget,
 } from "@/lib/clipboard-images";
-import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS, grokResolutionShortfallMessage, grokVideoModeGuide, isGrokVideoConfig, normalizeGrokResolution } from "@/lib/grok-video";
+import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS, grokResolutionShortfallMessage, grokVideoModeGuide, isGrokVideoConfig, normalizeGrokResolution, videoResolutionDisplay } from "@/lib/grok-video";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import {
     isSoraOrVeoVideoConfig,
@@ -75,6 +75,10 @@ type GenerationResult = {
     status: "pending" | "success" | "failed";
     video?: GeneratedVideo;
     error?: string;
+    /** 用户所选清晰度（如 1080p）；用于结果区「实 vs 选」标注 */
+    requestedResolution?: string;
+    /** 创建成功 body 里的 resolution（可能已降档） */
+    acceptedResolution?: string;
 };
 
 type GenerationLog = {
@@ -429,7 +433,16 @@ export default function VideoPage() {
                     };
                     await saveLog(successLog);
                     setLogs((value) => value.map((item) => (item.id === successLog.id ? successLog : item)));
-                    if (latestVideoJobIdRef.current === platformJobId) setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
+                    if (latestVideoJobIdRef.current === platformJobId) {
+                        setResults([
+                            {
+                                id: nextVideo.id,
+                                status: "success",
+                                video: nextVideo,
+                                requestedResolution: platformLog.resolution || platformLog.config?.vquality || "",
+                            },
+                        ]);
+                    }
                     message.success(platform.chargedCents ? `视频已生成（已扣 ${platform.chargedCents} 分）` : "视频已生成");
                     void refreshUsage();
                     if (loggedIn) setCloudRefreshKey((value) => value + 1);
@@ -748,7 +761,19 @@ export default function VideoPage() {
                         bytes: stored.bytes,
                         mimeType: stored.mimeType,
                     };
-                    if (latestVideoJobIdRef.current === log.id) setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
+                    const requestedResolution = log.task?.requestedResolution || pollingConfig.vquality || log.config?.vquality || log.resolution || "";
+                    const acceptedResolution = log.task?.acceptedResolution;
+                    if (latestVideoJobIdRef.current === log.id) {
+                        setResults([
+                            {
+                                id: nextVideo.id,
+                                status: "success",
+                                video: nextVideo,
+                                requestedResolution,
+                                acceptedResolution,
+                            },
+                        ]);
+                    }
                     const loggedIn = Boolean(useAuthStore.getState().user);
                     const successLog: GenerationLog = {
                         ...log,
@@ -762,12 +787,7 @@ export default function VideoPage() {
                     await saveLog(successLog);
                     setLogs((value) => value.map((item) => (item.id === successLog.id ? successLog : item)));
                     const shortfall = isGrokVideoConfig(pollingConfig)
-                        ? grokResolutionShortfallMessage(
-                              log.task?.requestedResolution || pollingConfig.vquality || log.config?.vquality || "",
-                              nextVideo.width,
-                              nextVideo.height,
-                              log.task?.acceptedResolution,
-                          )
+                        ? grokResolutionShortfallMessage(requestedResolution, nextVideo.width, nextVideo.height, acceptedResolution)
                         : "";
                     if (shortfall) {
                         message.warning(shortfall, 8);
@@ -893,7 +913,21 @@ export default function VideoPage() {
         if (log.config.videoSeconds) updateConfig("videoSeconds", log.config.videoSeconds);
         if (log.config.videoGenerateAudio) updateConfig("videoGenerateAudio", log.config.videoGenerateAudio);
         if (log.config.videoWatermark) updateConfig("videoWatermark", log.config.videoWatermark);
-        setResults(log.status === "生成中" ? [{ id: log.id, status: "pending" }] : log.video ? [{ id: log.video.id, status: "success", video: log.video }] : [{ id: log.id, status: "failed", error: log.error || "生成失败" }]);
+        setResults(
+            log.status === "生成中"
+                ? [{ id: log.id, status: "pending" }]
+                : log.video
+                  ? [
+                        {
+                            id: log.video.id,
+                            status: "success",
+                            video: log.video,
+                            requestedResolution: log.task?.requestedResolution || log.resolution || log.config?.vquality || "",
+                            acceptedResolution: log.task?.acceptedResolution,
+                        },
+                    ]
+                  : [{ id: log.id, status: "failed", error: log.error || "生成失败" }],
+        );
     };
 
     return (
@@ -1162,7 +1196,22 @@ export default function VideoPage() {
                         </div>
                         {results.length ? (
                             <div className="grid gap-4">
-                                {results.map((result) => (result.status === "success" && result.video ? <ResultVideoCard key={result.id} video={result.video} onDownload={downloadVideo} onSaveAsset={saveResultToAssets} /> : result.status === "failed" ? <FailedVideoCard key={result.id} error={result.error || "生成失败"} onRetry={retryResult} /> : <PendingVideoCard key={result.id} />))}
+                                {results.map((result) =>
+                                    result.status === "success" && result.video ? (
+                                        <ResultVideoCard
+                                            key={result.id}
+                                            video={result.video}
+                                            requestedResolution={result.requestedResolution || effectiveConfig.vquality}
+                                            acceptedResolution={result.acceptedResolution}
+                                            onDownload={downloadVideo}
+                                            onSaveAsset={saveResultToAssets}
+                                        />
+                                    ) : result.status === "failed" ? (
+                                        <FailedVideoCard key={result.id} error={result.error || "生成失败"} onRetry={retryResult} />
+                                    ) : (
+                                        <PendingVideoCard key={result.id} />
+                                    ),
+                                )}
                             </div>
                         ) : (
                             <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-stone-300 text-center dark:border-stone-700 lg:min-h-[560px]">
@@ -1236,7 +1285,19 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
     );
 }
 
-function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedVideo; onDownload: (video: GeneratedVideo) => void; onSaveAsset: (video: GeneratedVideo) => void }) {
+function ResultVideoCard({
+    video,
+    requestedResolution,
+    acceptedResolution,
+    onDownload,
+    onSaveAsset,
+}: {
+    video: GeneratedVideo;
+    requestedResolution?: string;
+    acceptedResolution?: string;
+    onDownload: (video: GeneratedVideo) => void;
+    onSaveAsset: (video: GeneratedVideo) => void;
+}) {
     const [previewError, setPreviewError] = useState(false);
     const rawUrl = video.url || "";
     // 历史远程直链若是 127.0.0.1，尽量改写到 /lan-ai；真正可播仍依赖生成时已落盘 blob
@@ -1246,6 +1307,7 @@ function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedV
     const isLan = playUrl.includes("/lan-ai/") || playUrl.startsWith("/lan-ai");
     const isProxy = playUrl.includes("/ai-proxy/media");
     const isRemote = /^https?:\/\//i.test(playUrl) && !isProxy && !isLan;
+    const clarity = videoResolutionDisplay(requestedResolution || "", video.width, video.height, acceptedResolution);
     return (
         <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
             {playUrl && !previewError ? (
@@ -1282,6 +1344,14 @@ function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedV
                     <span>
                         {video.width}x{video.height}
                     </span>
+                    {clarity.mismatched && clarity.actualLabel ? (
+                        <span className="font-medium text-amber-600 dark:text-amber-400" title={clarity.requestedLabel ? `所选 ${clarity.requestedLabel}，实测 ${clarity.actualLabel}` : `实测 ${clarity.actualLabel}`}>
+                            实 {clarity.actualLabel}
+                            {clarity.requestedLabel ? ` · 选 ${clarity.requestedLabel}` : ""}
+                        </span>
+                    ) : clarity.actualLabel ? (
+                        <span title="按源文件短边估算的清晰度档">{clarity.actualLabel}</span>
+                    ) : null}
                     <span>{formatBytes(video.bytes)}</span>
                     <span>{formatDuration(video.durationMs)}</span>
                     {isBlob || video.storageKey ? <span className="text-emerald-600 dark:text-emerald-400">本地可播</span> : null}
@@ -1467,6 +1537,13 @@ function LogCard({
     onStop?: () => void;
 }) {
     const syncLabel = cloudSyncLabel(log.cloudSync);
+    const clarity = videoResolutionDisplay(
+        log.task?.requestedResolution || log.resolution || log.config?.vquality || "",
+        log.video?.width,
+        log.video?.height,
+        log.task?.acceptedResolution,
+    );
+    const requestedTag = `${String(log.resolution || "").replace(/p$/i, "") || "?"}p`;
     return (
         <div
             role="button"
@@ -1486,7 +1563,18 @@ function LogCard({
                     <div className="truncate text-sm font-semibold leading-5">{log.title}</div>
                     <div className="mt-2 flex flex-wrap gap-1">
                         <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none">{log.size}</Tag>
-                        <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none">{log.resolution}p</Tag>
+                        {clarity.mismatched && clarity.actualLabel ? (
+                            <>
+                                <Tag color="orange" className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" title={`所选 ${clarity.requestedLabel || requestedTag}，实测 ${clarity.actualLabel}${clarity.pixelLabel ? `（${clarity.pixelLabel}）` : ""}`}>
+                                    实 {clarity.actualLabel}
+                                </Tag>
+                                <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none opacity-70" title="生成时选择的清晰度">
+                                    选 {clarity.requestedLabel || requestedTag}
+                                </Tag>
+                            </>
+                        ) : (
+                            <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none">{requestedTag}</Tag>
+                        )}
                         <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none">{log.seconds}s</Tag>
                         {syncLabel ? (
                             <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color={cloudSyncColor(log.cloudSync)}>

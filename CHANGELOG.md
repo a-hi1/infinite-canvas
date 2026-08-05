@@ -2,6 +2,8 @@
 
 ## Unreleased
 
++ [修复] Grok 完成态 `video.url` 晚写/空串：优先读官方 `video.url`，完成无地址等待约 3 分钟并补 content 回退；错误文案标明 url 形态。
++ [优化] 视频结果真实清晰度标注：实测低于所选时显示「实 720p · 选 1080p」，不虚标所选档位。
 + [新增] 图/视频工作台提示词支持 `@` 选择已添加参考素材（缩略图 chip，序列化为图片N/视频N/音频N）；不改生成 payload 与 Grok 多参考。
 + [新增] 画布九宫格/角色表轻量切片：AI 优化 `character_sheet` intent + 切图 3×3 预设 + 子节点 `sheetCell`/`sourceSheetNodeId`。
 + [优化] 版本更新弹窗：默认展示本机 CHANGELOG；上游 basketikun 日志折叠可展开对照，不再打开时整表覆盖本机条目。

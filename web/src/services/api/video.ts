@@ -1424,8 +1424,9 @@ export function readGrokTaskId(payload: GrokVideoResponse | Record<string, unkno
 }
 
 // 中转有时 status=done 但 video URL 晚几拍才写入；先宽容等待再失败
+// xAI / codex2api：progress=100 / status=done 后 video.url 仍可能空 1～3 分钟
 const grokDoneWithoutUrlCount = new Map<string, number>();
-const GROK_DONE_WITHOUT_URL_GRACE = 12; // ~12*5s
+const GROK_DONE_WITHOUT_URL_GRACE = 36; // ~36*5s ≈ 3 分钟
 
 async function pollGrokTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
@@ -1464,10 +1465,9 @@ async function pollGrokTask(config: AiConfig, task: VideoGenerationTask, options
             grokDoneWithoutUrlCount.set(key, n);
             if (n < GROK_DONE_WITHOUT_URL_GRACE) return { status: "pending" };
             grokDoneWithoutUrlCount.delete(key);
-            const keys = summarizeGrokPayloadKeys(raw);
             return {
                 status: "failed",
-                error: `Grok 任务显示已完成，但响应里没有可播放的视频地址。查询响应顶层字段：${keys || "（空）"}。请打开 Network 里 GET …/videos/…（不是 POST generations/edits）的「响应」JSON 发我`,
+                error: formatGrokDoneWithoutUrlError(raw, state, task.id),
             };
         }
 
@@ -1667,7 +1667,13 @@ function isGrokPollSoftNotFoundPayload(payload: unknown) {
 async function tryFetchGrokVideoContent(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationResult | null> {
     const id = encodeURIComponent(task.id);
     // codex 上 content 路径可能不存在；失败则静默跳过
-    const paths = [`/videos/${id}/content`, `/videos/${id}/download`];
+    const paths = [
+        `/videos/${id}/content`,
+        `/videos/${id}/download`,
+        `/videos/${id}/file`,
+        `/videos/generations/${id}/content`,
+        `/video/generations/${id}/content`,
+    ];
     for (const path of paths) {
         try {
             const response = await axios.get<Blob>(aiApiUrl(config, path), {
@@ -1707,6 +1713,70 @@ function summarizeGrokPayloadKeys(payload: unknown) {
     const nested = root.data && typeof root.data === "object" ? Object.keys(root.data as object).slice(0, 12).join(",") : "";
     const video = root.video && typeof root.video === "object" ? Object.keys(root.video as object).slice(0, 8).join(",") : "";
     return [top && `root{${top}}`, nested && `data{${nested}}`, video && `video{${video}}`].filter(Boolean).join(" ");
+}
+
+/** 完成但无 URL 时描述 video.url 实际值形态（不打印完整 URL，避免日志过长/敏感 query） */
+function describeGrokVideoUrlField(payload: unknown): string {
+    if (!payload || typeof payload !== "object") return "无响应体";
+    const root = payload as Record<string, unknown>;
+    const video = root.video;
+    if (video == null) return "无 video 字段";
+    if (typeof video === "string") {
+        const text = video.trim();
+        if (!text) return "video 为空字符串";
+        if (/^https?:\/\//i.test(text)) return `video 为 https 字符串(len=${text.length})`;
+        return `video 为非 http 字符串(len=${text.length})`;
+    }
+    if (typeof video !== "object" || Array.isArray(video)) return `video 类型=${Array.isArray(video) ? "array" : typeof video}`;
+    const record = video as Record<string, unknown>;
+    const raw = record.url ?? record.video_url ?? record.videoUrl;
+    if (raw == null) return "video.url 缺失(null/undefined)";
+    if (typeof raw !== "string") return `video.url 类型=${typeof raw}`;
+    const text = raw.trim();
+    if (!text) return "video.url 为空字符串";
+    if (/^https?:\/\//i.test(text)) {
+        try {
+            const host = new URL(text).host;
+            return `video.url 为 https(host=${host}, len=${text.length})`;
+        } catch {
+            return `video.url 为 https 字符串(len=${text.length})`;
+        }
+    }
+    if (text.startsWith("//")) return `video.url 为协议相对地址(len=${text.length})`;
+    if (text.startsWith("/")) return `video.url 为相对路径(len=${text.length})`;
+    return `video.url 非 http 字符串(len=${text.length}, head=${text.slice(0, 24)})`;
+}
+
+function readGrokRespectModeration(payload: unknown): boolean | null {
+    if (!payload || typeof payload !== "object") return null;
+    const root = payload as Record<string, unknown>;
+    const video = root.video && typeof root.video === "object" && !Array.isArray(root.video) ? (root.video as Record<string, unknown>) : null;
+    const raw = video?.respect_moderation ?? root.respect_moderation;
+    if (typeof raw === "boolean") return raw;
+    if (raw === 0 || raw === "0" || raw === "false") return false;
+    if (raw === 1 || raw === "1" || raw === "true") return true;
+    return null;
+}
+
+function formatGrokDoneWithoutUrlError(raw: unknown, state: GrokVideoResponse, taskId: string) {
+    const keys = summarizeGrokPayloadKeys(raw) || summarizeGrokPayloadKeys(state);
+    const urlShape = describeGrokVideoUrlField(state) || describeGrokVideoUrlField(raw);
+    const moderation = readGrokRespectModeration(state) ?? readGrokRespectModeration(raw);
+    const parts = [
+        "Grok 任务显示已完成，但响应里没有可播放的视频地址",
+        `任务 id：${taskId}`,
+        `字段：${keys || "（空）"}`,
+        `诊断：${urlShape}`,
+    ];
+    if (moderation === true) {
+        parts.push("响应含 respect_moderation=true，若 video.url 一直为空，可能被审核拦截或中转未回填成片地址");
+    } else if (urlShape.includes("空字符串") || urlShape.includes("缺失")) {
+        parts.push("常见于中转 status/progress 先到 100、video.url 晚写或永不写；已等待约 3 分钟仍无地址");
+        parts.push("可换渠道重试，或打开 Network 的 GET …/videos/{id} 看 video.url 是否始终为空");
+    } else if (urlShape.includes("相对") || urlShape.includes("非 http")) {
+        parts.push("video.url 存在但不是可直接播放的 http(s) 地址，已尝试 content 下载仍失败");
+    }
+    return parts.join("。");
 }
 
 function formatGrokPollUnsupportedError(config: AiConfig, taskId = "") {
@@ -3083,28 +3153,45 @@ function readAgnesError(payload: AgnesTaskResponse) {
     return payload.error?.message || payload.message || payload.msg || "";
 }
 
-function readGrokVideoUrl(payload: GrokVideoResponse) {
+/**
+ * 从 Grok 创建/轮询响应里抠可播放 URL。
+ * 官方完成态常见：`{ status:"done", progress:100, video:{ url, duration, respect_moderation } }`
+ * 注意：status=done 时 video.url 可能仍是空串，调用方需 grace 等待。
+ */
+export function readGrokVideoUrl(payload: GrokVideoResponse | Record<string, unknown> | null | undefined) {
+    if (!payload || typeof payload !== "object") return "";
     const record = payload as Record<string, unknown>;
+
+    // 官方嵌套优先：video.url / video.video_url（避免被其它同名 url 干扰）
+    const nestedVideo = record.video;
+    if (typeof nestedVideo === "string") {
+        const direct = coercePlayableMediaUrl(nestedVideo);
+        if (direct) return direct;
+    } else if (nestedVideo && typeof nestedVideo === "object" && !Array.isArray(nestedVideo)) {
+        const videoRecord = nestedVideo as Record<string, unknown>;
+        for (const key of ["url", "video_url", "videoUrl", "download_url", "output_url", "result_url", "signed_url", "file_url", "play_url", "playUrl", "mp4", "uri"]) {
+            const direct = coercePlayableMediaUrl(videoRecord[key]);
+            if (direct) return direct;
+        }
+    }
+
     return (
-        asHttpUrl(payload.video_url) ||
-        asHttpUrl(payload.url) ||
-        asHttpUrl(payload.output_url) ||
-        asHttpUrl(payload.download_url) ||
-        asHttpUrl(payload.result_url) ||
-        asHttpUrl(record.videoUrl) ||
-        asHttpUrl(record.video_uri) ||
-        asHttpUrl(record.uri) ||
-        asHttpUrl(record.signed_url) ||
-        asHttpUrl(record.file_url) ||
-        readGrokUnknownUrl(payload.video) ||
-        readGrokUnknownUrl(payload.data) ||
-        readGrokUnknownUrl(payload.content) ||
-        readGrokUnknownUrl(payload.response) ||
-        readGrokUnknownUrl(payload.result) ||
-        readGrokUnknownUrl(payload.videos?.[0]) ||
-        readGrokUnknownUrl(payload.response?.videos?.[0]) ||
-        readGrokUnknownUrl(payload.result?.videos?.[0]) ||
-        readGrokUnknownUrl(payload.output) ||
+        coercePlayableMediaUrl(record.video_url) ||
+        coercePlayableMediaUrl(record.url) ||
+        coercePlayableMediaUrl(record.output_url) ||
+        coercePlayableMediaUrl(record.download_url) ||
+        coercePlayableMediaUrl(record.result_url) ||
+        coercePlayableMediaUrl(record.videoUrl) ||
+        coercePlayableMediaUrl(record.video_uri) ||
+        coercePlayableMediaUrl(record.uri) ||
+        coercePlayableMediaUrl(record.signed_url) ||
+        coercePlayableMediaUrl(record.file_url) ||
+        readGrokUnknownUrl(record.data) ||
+        readGrokUnknownUrl(record.content) ||
+        readGrokUnknownUrl(record.response) ||
+        readGrokUnknownUrl(record.result) ||
+        readGrokUnknownUrl(Array.isArray(record.videos) ? record.videos[0] : undefined) ||
+        readGrokUnknownUrl(record.output) ||
         readGrokUnknownUrl(record.outputs) ||
         readGrokUnknownUrl(record.choices) ||
         findFirstVideoUrl(payload) ||
@@ -3122,9 +3209,20 @@ function asHttpUrl(value: unknown): string {
     return "";
 }
 
+/** 比 asHttpUrl 更宽松：接受常见 CDN 无扩展名链接；仍拒绝空串与明显非媒体路径 */
+function coercePlayableMediaUrl(value: unknown): string {
+    if (typeof value !== "string") return "";
+    const text = value.trim();
+    if (!text) return "";
+    const direct = asHttpUrl(text);
+    if (!direct) return "";
+    if (isLikelyVideoUrl(direct) || isLooseMediaUrl(direct)) return direct;
+    return "";
+}
+
 function readGrokUnknownUrl(value: unknown): string {
     if (!value) return "";
-    if (typeof value === "string") return isLikelyVideoUrl(value) ? value : asHttpUrl(value) && isLooseMediaUrl(value) ? value.trim() : "";
+    if (typeof value === "string") return coercePlayableMediaUrl(value);
     if (Array.isArray(value)) {
         for (const item of value) {
             const url = readGrokUnknownUrl(item);
@@ -3135,13 +3233,13 @@ function readGrokUnknownUrl(value: unknown): string {
     if (typeof value !== "object") return "";
     const record = value as Record<string, unknown>;
     for (const key of ["video_url", "videoUrl", "url", "output_url", "download_url", "result_url", "signed_url", "file_url", "media_url", "uri", "video_uri", "href", "src", "mp4", "play_url", "playUrl"]) {
-        const raw = record[key];
-        if (typeof raw === "string") {
-            const direct = asHttpUrl(raw);
-            if (direct && (isLikelyVideoUrl(direct) || isLooseMediaUrl(direct))) return direct;
+        const direct = coercePlayableMediaUrl(record[key]);
+        if (direct) return direct;
+        const nested = record[key];
+        if (nested && typeof nested === "object") {
+            const url = readGrokUnknownUrl(nested);
+            if (url) return url;
         }
-        const url = readGrokUnknownUrl(raw);
-        if (url) return url;
     }
     for (const key of ["video", "videos", "data", "result", "response", "output", "outputs", "content", "file", "asset", "media", "message", "choices"]) {
         const url = readGrokUnknownUrl(record[key]);

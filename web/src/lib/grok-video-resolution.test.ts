@@ -1,6 +1,37 @@
 import { describe, expect, it } from "vitest";
 
-import { grokResolutionPixelHeight, grokResolutionShortfallMessage, normalizeGrokResolution } from "@/lib/grok-video";
+import {
+    grokResolutionPixelHeight,
+    grokResolutionShortfallMessage,
+    inferVideoResolutionLabel,
+    normalizeGrokResolution,
+    videoResolutionDisplay,
+} from "@/lib/grok-video";
+
+describe("inferVideoResolutionLabel / videoResolutionDisplay", () => {
+    it("maps short side to p labels", () => {
+        expect(inferVideoResolutionLabel(1920, 1080)).toBe("1080p");
+        expect(inferVideoResolutionLabel(1080, 1920)).toBe("1080p");
+        expect(inferVideoResolutionLabel(1280, 720)).toBe("720p");
+        expect(inferVideoResolutionLabel(854, 480)).toBe("480p");
+        expect(inferVideoResolutionLabel(400, 300)).toBe("400×300");
+        expect(inferVideoResolutionLabel(0, 0)).toBe("");
+    });
+
+    it("marks mismatch when selected 1080p but file is 720p", () => {
+        const display = videoResolutionDisplay("1080p", 1280, 720);
+        expect(display.mismatched).toBe(true);
+        expect(display.requestedLabel).toBe("1080p");
+        expect(display.actualLabel).toBe("720p");
+        expect(display.pixelLabel).toBe("1280×720");
+    });
+
+    it("is matched for true 1080p", () => {
+        const display = videoResolutionDisplay("1080", 1920, 1080, "1080p");
+        expect(display.mismatched).toBe(false);
+        expect(display.actualLabel).toBe("1080p");
+    });
+});
 
 describe("grokResolutionShortfallMessage", () => {
     it("normalizes UI bare numbers and high/low aliases", () => {

@@ -43,6 +43,59 @@ export function grokResolutionPixelHeight(value: string) {
 }
 
 /**
+ * 用实测宽高推断清晰度档位（短边）。无法判断时返回空串，不编造。
+ * 阈值与 shortfall 一致：≥970→1080p，≥650→720p，≥430→480p。
+ */
+export function inferVideoResolutionLabel(width?: number, height?: number) {
+    const w = Number(width) || 0;
+    const h = Number(height) || 0;
+    if (w <= 0 || h <= 0) return "";
+    const shortSide = Math.min(w, h);
+    if (shortSide >= 970) return "1080p";
+    if (shortSide >= 650) return "720p";
+    if (shortSide >= 430) return "480p";
+    return `${w}×${h}`;
+}
+
+/**
+ * 结果展示用：所选 vs 实测。mismatched=true 时 UI 应标「实 xxx」，禁止只显示所选 1080。
+ * acceptedResolution 为创建成功 body 里的 resolution（可能已降档）。
+ */
+export function videoResolutionDisplay(requested: string, width?: number, height?: number, acceptedResolution?: string) {
+    const requestedLabel = requested?.trim() ? normalizeGrokResolution(requested) : "";
+    const acceptedLabel = acceptedResolution?.trim() ? normalizeGrokResolution(acceptedResolution) : "";
+    const measuredLabel = inferVideoResolutionLabel(width, height);
+    // 展示优先级：实测像素 > 创建时写入的 resolution > 用户所选
+    const actualLabel = measuredLabel || acceptedLabel || "";
+    const demotedOnCreate =
+        Boolean(requestedLabel && acceptedLabel && grokResolutionPixelHeight(acceptedLabel) < grokResolutionPixelHeight(requestedLabel));
+    let mismatched = false;
+    if (requestedLabel && measuredLabel) {
+        const w = Number(width) || 0;
+        const h = Number(height) || 0;
+        if (w > 0 && h > 0) {
+            const target = grokResolutionPixelHeight(requestedLabel);
+            const shortSide = Math.min(w, h);
+            mismatched = shortSide < Math.round(target * 0.9);
+        }
+    } else if (demotedOnCreate) {
+        mismatched = true;
+    }
+    return {
+        requestedLabel,
+        actualLabel,
+        acceptedLabel,
+        demotedOnCreate,
+        mismatched,
+        pixelLabel: (() => {
+            const w = Number(width) || 0;
+            const h = Number(height) || 0;
+            return w > 0 && h > 0 ? `${w}×${h}` : "";
+        })(),
+    };
+}
+
+/**
  * When the user asked for a higher Grok clarity than the delivered file,
  * return a Chinese warning. Empty string means dimensions look acceptable
  * (or cannot be judged). Does not invent pixels — uses measured width/height.
@@ -50,34 +103,17 @@ export function grokResolutionPixelHeight(value: string) {
  * @param acceptedResolution 创建成功时实际写入请求的 resolution；若低于 requested，说明创建阶段已降档
  */
 export function grokResolutionShortfallMessage(requested: string, width?: number, height?: number, acceptedResolution?: string) {
-    const requestedLabel = normalizeGrokResolution(requested || "720");
-    const acceptedLabel = acceptedResolution ? normalizeGrokResolution(acceptedResolution) : "";
-    const demotedOnCreate =
-        acceptedLabel &&
-        grokResolutionPixelHeight(acceptedLabel) < grokResolutionPixelHeight(requestedLabel)
-            ? acceptedLabel
-            : "";
-
-    const w = Number(width) || 0;
-    const h = Number(height) || 0;
-    if (w > 0 && h > 0) {
-        // 480p/720p/1080p 指横屏时的竖边（或竖屏时的横边）= 短边。
-        // 用短边判断：1920×1080 / 1080×1920 通过；1280×720、736×400 在选 1080p 时告警。
-        const target = grokResolutionPixelHeight(requestedLabel);
-        const shortSide = Math.min(w, h);
-        const minAcceptable = Math.round(target * 0.9);
-        if (shortSide < minAcceptable) {
-            const actualLabel = shortSide >= 970 ? "约 1080p" : shortSide >= 650 ? "约 720p" : shortSide >= 430 ? "约 480p" : `${w}×${h}`;
-            if (demotedOnCreate) {
-                return `已选 ${requestedLabel}，但 ${requestedLabel} 创建失败后降档为 ${demotedOnCreate} 才成功；源文件实际约 ${w}×${h}（${actualLabel}）。不是导出压画质。可换渠道重试完整 ${requestedLabel}，或以实际分辨率为准。`;
-            }
-            return `已选 ${requestedLabel}，请求也按 ${requestedLabel} 发出，但源文件实际约 ${w}×${h}（${actualLabel}）。多半是当前中转/上游未真正交付该清晰度，不是本地虚标或导出压画质。可换渠道重试，或先以实际分辨率为准。`;
-        }
+    const { requestedLabel, actualLabel, demotedOnCreate, mismatched, pixelLabel } = videoResolutionDisplay(requested, width, height, acceptedResolution);
+    if (!mismatched) return "";
+    const shownActual = actualLabel || pixelLabel || "低于所选";
+    if (demotedOnCreate && pixelLabel) {
+        return `已选 ${requestedLabel}，但 ${requestedLabel} 创建失败后降档为 ${normalizeGrokResolution(acceptedResolution || "")} 才成功；源文件实际约 ${pixelLabel}（${shownActual}）。不是导出压画质。可换渠道重试完整 ${requestedLabel}，或以实际分辨率为准。`;
     }
-
-    // 尺寸未知但创建阶段已明确降档：仍要提示，不能假装用了用户规格
     if (demotedOnCreate) {
-        return `已选 ${requestedLabel}，但 ${requestedLabel} 创建失败后降档为 ${demotedOnCreate} 才成功。结果可能低于所选清晰度，请以实际文件为准，可换渠道重试完整 ${requestedLabel}。`;
+        return `已选 ${requestedLabel}，但 ${requestedLabel} 创建失败后降档为 ${normalizeGrokResolution(acceptedResolution || "")} 才成功。结果可能低于所选清晰度，请以实际文件为准，可换渠道重试完整 ${requestedLabel}。`;
+    }
+    if (pixelLabel) {
+        return `已选 ${requestedLabel}，请求也按 ${requestedLabel} 发出，但源文件实际约 ${pixelLabel}（${shownActual}）。多半是当前中转/上游未真正交付该清晰度，不是本地虚标或导出压画质。可换渠道重试，或先以实际分辨率为准。`;
     }
     return "";
 }
