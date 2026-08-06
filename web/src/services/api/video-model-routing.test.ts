@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import axios from "axios";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
     buildGrokEditPayloadCandidates,
     buildGrokPayloadCandidates,
+    createVideoGenerationTask,
     grokCreatePathCandidates,
     grokEditPathCandidates,
     grokPollPathTemplates,
@@ -10,6 +12,7 @@ import {
     isGrokRateLimitError,
     isRetryableGrokPayloadError,
     payloadKeepsAllGrokVideoReferences,
+    payloadKeepsAllSeedanceRelayReferences,
     readGrokTaskId,
     resolveVideoModelForReferences,
     unwrapGrokVideoResponse,
@@ -21,6 +24,16 @@ import {
 } from "@/services/api/video";
 import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS } from "@/lib/grok-video";
 import { defaultConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import type { ReferenceImage } from "@/types/image";
+
+vi.mock("axios", () => ({
+    default: {
+        post: vi.fn(),
+        get: vi.fn(),
+        isAxiosError: vi.fn(() => false),
+        isCancel: vi.fn(() => false),
+    },
+}));
 
 function withChannels(channels: ModelChannel[], videoModel: string): AiConfig {
     return {
@@ -32,6 +45,32 @@ function withChannels(channels: ModelChannel[], videoModel: string): AiConfig {
         videoModels: channels.flatMap((channel) => channel.models.map((model) => `${channel.id}::${model}`)),
         model: videoModel,
         videoModel,
+    };
+}
+
+function seedanceRelayConfig(): AiConfig {
+    const channel: ModelChannel = {
+        id: "relay",
+        name: "OpenAI2API",
+        baseUrl: "http://openai2api.com:3000",
+        apiKey: "test-only",
+        apiFormat: "openai",
+        compatProfile: "auto",
+        models: ["seedance2"],
+    };
+    return {
+        ...defaultConfig,
+        channels: [channel],
+        baseUrl: channel.baseUrl,
+        apiKey: channel.apiKey,
+        models: ["relay::seedance2"],
+        videoModels: ["relay::seedance2"],
+        model: "relay::seedance2",
+        videoModel: "relay::seedance2",
+        videoSeconds: "4",
+        vquality: "1080",
+        size: "16:9",
+        videoGenerateAudio: "true",
     };
 }
 
@@ -47,6 +86,12 @@ describe("custom video-script params", () => {
 });
 
 describe("native Seedance relay payload", () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        vi.stubGlobal("window", globalThis);
+        vi.mocked(axios.post).mockResolvedValue({ data: { id: "task-seedance-relay" } });
+    });
+
     it("routes the OpenAI2API base URL to video/generations", () => {
         expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "http://openai2api.com:3000" })).toBe("/video/generations");
     });
@@ -70,12 +115,71 @@ describe("native Seedance relay payload", () => {
             generate_audio: true,
         });
         expect(typeof payload.duration).toBe("number");
+        expect(payload).not.toHaveProperty("images");
+        expect(payloadKeepsAllSeedanceRelayReferences(payload, 0)).toBe(true);
     });
 
     it("keeps duration numeric for the relay payload when the UI stores seconds as text", () => {
         const payload = seedanceRelayPayloadForTest({ ...defaultConfig, videoSeconds: "5" }, "seedance2", "test");
         expect(payload.duration).toBe(5);
         expect(typeof payload.duration).toBe("number");
+    });
+
+    it("attaches every selected image as a complete ordered images array", () => {
+        const images = ["data:image/png;base64,aaa", "data:image/png;base64,bbb"];
+        const payload = seedanceRelayPayloadForTest(
+            { ...defaultConfig, videoSeconds: "4", vquality: "1080", size: "16:9", videoGenerateAudio: "true" },
+            "seedance2",
+            "图生视频",
+            images,
+        );
+        expect(payload.images).toEqual(images);
+        expect(payloadKeepsAllSeedanceRelayReferences(payload, 2)).toBe(true);
+        expect(payload.duration).toBe(4);
+        expect(typeof payload.duration).toBe("number");
+    });
+
+    it("posts all reference images on /video/generations and never drops to text-only", async () => {
+        const references: ReferenceImage[] = [
+            { id: "a", name: "a.png", type: "image/png", dataUrl: "data:image/png;base64,aaa" },
+            { id: "b", name: "b.png", type: "image/png", dataUrl: "data:image/png;base64,bbb" },
+        ];
+
+        const task = await createVideoGenerationTask(seedanceRelayConfig(), "图生视频", references, [], []);
+
+        expect(task.provider).toBe("seedance");
+        expect(task.createPath).toBe("/video/generations");
+        expect(axios.post).toHaveBeenCalledTimes(1);
+        const [url, body] = vi.mocked(axios.post).mock.calls[0] ?? [];
+        expect(String(url)).toContain("/video/generations");
+        expect(body).toMatchObject({
+            model: "seedance2",
+            prompt: "图生视频",
+            duration: 4,
+            resolution: "1080p",
+            ratio: "16:9",
+            generate_audio: true,
+            images: ["data:image/png;base64,aaa", "data:image/png;base64,bbb"],
+        });
+        expect(payloadKeepsAllSeedanceRelayReferences(body as Record<string, unknown>, 2)).toBe(true);
+    });
+
+    it("rejects unreadable references before POST and does not fall back to text-only", async () => {
+        const references: ReferenceImage[] = [
+            { id: "ok", name: "ok.png", type: "image/png", dataUrl: "data:image/png;base64,aaa" },
+            // empty dataUrl/url and no storageKey → resolveSeedanceImageUrl throws before POST
+            { id: "bad", name: "bad.png", type: "image/png", dataUrl: "" },
+        ];
+
+        await expect(createVideoGenerationTask(seedanceRelayConfig(), "图生视频", references, [], [])).rejects.toThrow(/参考图读取失败/);
+        expect(axios.post).not.toHaveBeenCalled();
+    });
+
+    it("rejects relay video/audio references without posting", async () => {
+        await expect(
+            createVideoGenerationTask(seedanceRelayConfig(), "图生视频", [], [{ id: "v", name: "v.mp4", type: "video/mp4", url: "https://example.com/v.mp4" }], []),
+        ).rejects.toThrow(/暂不支持参考视频\/音频/);
+        expect(axios.post).not.toHaveBeenCalled();
     });
 });
 

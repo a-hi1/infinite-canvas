@@ -190,7 +190,7 @@ docker compose -p ic3011 -f docker-compose.local.yml ps
 
 - `compatProfile`：auto / openai / openai-slim / grok-image / relay-fragile
 - **视频自定义脚本参数**：`params.seconds` 是 number（例如 `4`），用于 Seedance `/v1/video/generations` 的 `duration`；不要退回字符串 `"4"`
-- **原生 API Key Seedance 中转**：`seedance2` 在 OpenAI2API/New API Base URL（例如 `http://openai2api.com:3000`）走 `/v1/video/generations`，使用 `duration:number`；火山 Agent Plan Base URL 仍走 `/contents/generations/tasks`，不要混用两种协议
+- **原生 API Key Seedance 中转**：`seedance2` 在 OpenAI2API/New API Base URL（例如 `http://openai2api.com:3000`）走 `/v1/video/generations`，使用 `duration:number`；有参考图时附完整 `images: string[]`（对齐脚本 `images(dataURL[])`，禁止静默丢图/退回文生）；参考视频/音频仍需火山 Agent Plan。火山 Agent Plan Base URL 仍走 `/contents/generations/tasks`，不要混用两种协议
 - **Grok 图生图**：JSON `POST /images/edits`；有参考图**不再**自动跳 `*-edit`；多参考必须完整 multi-image payload，**禁止静默只发第一张**
 - **Grok 视频**：用户当前选择永远优先；禁止硬塞不存在的模型插队；多参考勿退化首图
 - **Grok 完成态 URL**：官方形状 `video.url`；`status=done` 时 url 可能空串/晚写——优先读嵌套 `video.url`，完成无地址再等约 3 分钟并试 content 下载，禁止过早当失败

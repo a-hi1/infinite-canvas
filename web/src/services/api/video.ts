@@ -1894,11 +1894,15 @@ async function createSeedanceTask(config: AiConfig, model: string, prompt: strin
 }
 
 async function createSeedanceRelayTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions): Promise<VideoGenerationTask> {
-    if (references.length || videoReferences.length || audioReferences.length) {
-        throw new Error("当前 OpenAI 兼容 Seedance 中转暂只支持文生视频；使用参考图片/视频/音频请切换火山 Agent Plan 渠道");
+    // OpenAI-compatible Seedance relays (e.g. OpenAI2API / New API) share the
+    // script contract `images(dataURL[])`. Video/audio refs still require Agent Plan.
+    if (videoReferences.length || audioReferences.length) {
+        throw new Error("当前 OpenAI 兼容 Seedance 中转暂不支持参考视频/音频；请切换火山 Agent Plan 渠道");
     }
     const createPath = seedanceCreatePath(config);
-    const payload = buildSeedanceRelayPayload(config, model, prompt);
+    // Resolve every selected image first; never POST a partial/text-only fallback.
+    const images = references.length ? await resolveSeedanceRelayImages(config, references) : undefined;
+    const payload = buildSeedanceRelayPayload(config, model, prompt, images);
     try {
         const created = unwrapVideoResponse(
             (
@@ -1925,8 +1929,20 @@ export function seedanceCreatePathForTest(config: AiConfig) {
     return seedanceCreatePath(config);
 }
 
-function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: string) {
-    return {
+/**
+ * Resolve every selected relay reference image, preserving order.
+ * Throws if any image is unreadable — callers must not filter/drop refs.
+ */
+async function resolveSeedanceRelayImages(config: AiConfig, references: ReferenceImage[]) {
+    const images = await Promise.all(references.map((image) => resolveSeedanceImageUrl(config, image)));
+    if (images.length !== references.length || images.some((image) => !image)) {
+        throw new Error("参考图读取失败，请换一张图片或重新上传");
+    }
+    return images;
+}
+
+function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: string, images?: string[]) {
+    const payload: Record<string, unknown> = {
         model: modelOptionName(model),
         prompt,
         duration: normalizeSeedanceDuration(config.videoSeconds),
@@ -1934,11 +1950,20 @@ function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: stri
         ratio: normalizeSeedanceRatio(config.size),
         generate_audio: boolConfig(config.videoGenerateAudio, true),
     };
+    // Text-only body must stay byte-compatible (no empty images array).
+    if (images?.length) payload.images = images;
+    return payload;
 }
 
 /** Exposed for regression tests of the native API-key Seedance relay contract. */
-export function seedanceRelayPayloadForTest(config: AiConfig, model: string, prompt: string) {
-    return buildSeedanceRelayPayload(config, model, prompt);
+export function seedanceRelayPayloadForTest(config: AiConfig, model: string, prompt: string, images?: string[]) {
+    return buildSeedanceRelayPayload(config, model, prompt, images);
+}
+
+/** Exposed for regression tests: every selected image must remain on the relay body. */
+export function payloadKeepsAllSeedanceRelayReferences(payload: Record<string, unknown>, expectedCount: number) {
+    if (expectedCount <= 0) return !Array.isArray(payload.images) || (payload.images as unknown[]).length === 0;
+    return Array.isArray(payload.images) && (payload.images as unknown[]).length === expectedCount;
 }
 
 async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
