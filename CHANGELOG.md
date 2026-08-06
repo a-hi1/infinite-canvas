@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-+ [修复] 原生 OpenAI2API/New API Seedance 中转支持参考视频：`POST /v1/video/generations` 在有参考视频时附带完整 `videos: string[]`（公网 URL / data URL，保持顺序）；可与 `images` 并存；参考音频仍需火山 Agent Plan；禁止静默丢素材或退回无参考。
-+ [修复] 原生 OpenAI2API/New API Seedance 中转支持图生视频：`POST /v1/video/generations` 在有参考图时附带完整 `images: string[]`（data URL / 公网 URL，保持顺序），文生视频体不变；参考视频/音频仍需火山 Agent Plan；禁止静默丢图或退回无图。
++ [修复] 原生 Seedance 中转多参考：上游报 `role must be specified for image contents` 时，多图/参考视频改走 `content[]`（`first_frame`/`last_frame`/`reference_image`/`reference_video`）；单图仍用已验证的 `images[]`；文生不变；禁止静默丢素材。
++ [修复] 原生 OpenAI2API/New API Seedance 中转支持参考视频：多参考走 `content[].video_url`；参考音频仍需火山 Agent Plan。
++ [修复] 原生 OpenAI2API/New API Seedance 中转支持图生视频：单图 `images[]`；多图 `content[]`+role；禁止静默丢图或退回无图。
 + [修复] 原生 API Key 使用 OpenAI2API/New API 的 `seedance2` 时，改走 `/v1/video/generations` 并发送数字 `duration`；火山 Agent Plan 仍保留 `/contents/generations/tasks` 与参考素材能力。
 + [修复] 视频模型调用脚本的 `params.seconds` 改为 number，避免 Seedance `/v1/video/generations` 因 `duration: "4"` 返回 `invalid request body`。
 + [修复] 图/视频工作台多任务并发生成时，历史卡片「生成中」时长按 `createdAt` 实时计时，不再卡在 0 秒。
