@@ -13,6 +13,7 @@ import {
     isRetryableGrokPayloadError,
     payloadKeepsAllGrokVideoReferences,
     payloadKeepsAllSeedanceRelayReferences,
+    payloadKeepsAllSeedanceRelayVideoReferences,
     readGrokTaskId,
     resolveVideoModelForReferences,
     unwrapGrokVideoResponse,
@@ -25,6 +26,7 @@ import {
 import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS } from "@/lib/grok-video";
 import { defaultConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
+import type { ReferenceVideo } from "@/types/media";
 
 vi.mock("axios", () => ({
     default: {
@@ -139,6 +141,21 @@ describe("native Seedance relay payload", () => {
         expect(typeof payload.duration).toBe("number");
     });
 
+    it("attaches every selected video as a complete ordered videos array", () => {
+        const videos = ["https://example.com/a.mp4", "data:video/mp4;base64,bbb"];
+        const payload = seedanceRelayPayloadForTest(
+            { ...defaultConfig, videoSeconds: "4", vquality: "1080", size: "16:9", videoGenerateAudio: "true" },
+            "seedance2",
+            "视频参考",
+            undefined,
+            videos,
+        );
+        expect(payload.videos).toEqual(videos);
+        expect(payload).not.toHaveProperty("images");
+        expect(payloadKeepsAllSeedanceRelayVideoReferences(payload, 2)).toBe(true);
+        expect(payload.duration).toBe(4);
+    });
+
     it("posts all reference images on /video/generations and never drops to text-only", async () => {
         const references: ReferenceImage[] = [
             { id: "a", name: "a.png", type: "image/png", dataUrl: "data:image/png;base64,aaa" },
@@ -162,6 +179,44 @@ describe("native Seedance relay payload", () => {
             images: ["data:image/png;base64,aaa", "data:image/png;base64,bbb"],
         });
         expect(payloadKeepsAllSeedanceRelayReferences(body as Record<string, unknown>, 2)).toBe(true);
+        expect(body as Record<string, unknown>).not.toHaveProperty("videos");
+    });
+
+    it("posts all reference videos on /video/generations and never drops media", async () => {
+        const videoReferences: ReferenceVideo[] = [
+            { id: "v1", name: "a.mp4", type: "video/mp4", url: "https://example.com/a.mp4", durationMs: 4000 },
+            { id: "v2", name: "b.mp4", type: "video/mp4", url: "https://example.com/b.mp4", durationMs: 5000 },
+        ];
+
+        const task = await createVideoGenerationTask(seedanceRelayConfig(), "视频参考", [], videoReferences, []);
+
+        expect(task.provider).toBe("seedance");
+        expect(task.createPath).toBe("/video/generations");
+        expect(axios.post).toHaveBeenCalledTimes(1);
+        const [url, body] = vi.mocked(axios.post).mock.calls[0] ?? [];
+        expect(String(url)).toContain("/video/generations");
+        expect(body).toMatchObject({
+            model: "seedance2",
+            prompt: "视频参考",
+            duration: 4,
+            videos: ["https://example.com/a.mp4", "https://example.com/b.mp4"],
+        });
+        expect(payloadKeepsAllSeedanceRelayVideoReferences(body as Record<string, unknown>, 2)).toBe(true);
+        expect(body as Record<string, unknown>).not.toHaveProperty("images");
+    });
+
+    it("posts both images and videos when mixed references are provided", async () => {
+        const references: ReferenceImage[] = [{ id: "a", name: "a.png", type: "image/png", dataUrl: "data:image/png;base64,aaa" }];
+        const videoReferences: ReferenceVideo[] = [{ id: "v1", name: "a.mp4", type: "video/mp4", url: "https://example.com/a.mp4", durationMs: 4000 }];
+
+        await createVideoGenerationTask(seedanceRelayConfig(), "混合参考", references, videoReferences, []);
+
+        expect(axios.post).toHaveBeenCalledTimes(1);
+        const body = vi.mocked(axios.post).mock.calls[0]?.[1] as Record<string, unknown>;
+        expect(body.images).toEqual(["data:image/png;base64,aaa"]);
+        expect(body.videos).toEqual(["https://example.com/a.mp4"]);
+        expect(payloadKeepsAllSeedanceRelayReferences(body, 1)).toBe(true);
+        expect(payloadKeepsAllSeedanceRelayVideoReferences(body, 1)).toBe(true);
     });
 
     it("rejects unreadable references before POST and does not fall back to text-only", async () => {
@@ -175,10 +230,26 @@ describe("native Seedance relay payload", () => {
         expect(axios.post).not.toHaveBeenCalled();
     });
 
-    it("rejects relay video/audio references without posting", async () => {
+    it("rejects unreadable video references before POST and does not drop media", async () => {
+        const videoReferences: ReferenceVideo[] = [
+            { id: "ok", name: "ok.mp4", type: "video/mp4", url: "https://example.com/ok.mp4", durationMs: 4000 },
+            { id: "bad", name: "bad.mp4", type: "video/mp4", url: "", durationMs: 4000 },
+        ];
+
+        await expect(createVideoGenerationTask(seedanceRelayConfig(), "视频参考", [], videoReferences, [])).rejects.toThrow(/参考视频/);
+        expect(axios.post).not.toHaveBeenCalled();
+    });
+
+    it("rejects relay audio references without posting", async () => {
         await expect(
-            createVideoGenerationTask(seedanceRelayConfig(), "图生视频", [], [{ id: "v", name: "v.mp4", type: "video/mp4", url: "https://example.com/v.mp4" }], []),
-        ).rejects.toThrow(/暂不支持参考视频\/音频/);
+            createVideoGenerationTask(
+                seedanceRelayConfig(),
+                "音频参考",
+                [],
+                [],
+                [{ id: "a", name: "a.mp3", type: "audio/mpeg", url: "https://example.com/a.mp3" }],
+            ),
+        ).rejects.toThrow(/暂不支持参考音频/);
         expect(axios.post).not.toHaveBeenCalled();
     });
 });

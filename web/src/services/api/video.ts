@@ -1894,15 +1894,18 @@ async function createSeedanceTask(config: AiConfig, model: string, prompt: strin
 }
 
 async function createSeedanceRelayTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions): Promise<VideoGenerationTask> {
-    // OpenAI-compatible Seedance relays (e.g. OpenAI2API / New API) share the
-    // script contract `images(dataURL[])`. Video/audio refs still require Agent Plan.
-    if (videoReferences.length || audioReferences.length) {
-        throw new Error("当前 OpenAI 兼容 Seedance 中转暂不支持参考视频/音频；请切换火山 Agent Plan 渠道");
+    // OpenAI-compatible Seedance relays (e.g. OpenAI2API / New API):
+    // image refs → images[]; video refs → videos[] (same string[] shape as images).
+    // Audio still requires Agent Plan — no verified relay field yet.
+    if (audioReferences.length) {
+        throw new Error("当前 OpenAI 兼容 Seedance 中转暂不支持参考音频；请切换火山 Agent Plan 渠道");
     }
+    if (videoReferences.length) assertSeedanceVideoReferences(videoReferences);
     const createPath = seedanceCreatePath(config);
-    // Resolve every selected image first; never POST a partial/text-only fallback.
+    // Resolve every selected media first; never POST a partial/text-only fallback.
     const images = references.length ? await resolveSeedanceRelayImages(config, references) : undefined;
-    const payload = buildSeedanceRelayPayload(config, model, prompt, images);
+    const videos = videoReferences.length ? await resolveSeedanceRelayVideos(videoReferences) : undefined;
+    const payload = buildSeedanceRelayPayload(config, model, prompt, images, videos);
     try {
         const created = unwrapVideoResponse(
             (
@@ -1941,7 +1944,19 @@ async function resolveSeedanceRelayImages(config: AiConfig, references: Referenc
     return images;
 }
 
-function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: string, images?: string[]) {
+/**
+ * Resolve every selected relay reference video, preserving order.
+ * Throws if any video is unreadable — callers must not filter/drop refs.
+ */
+async function resolveSeedanceRelayVideos(videoReferences: ReferenceVideo[]) {
+    const videos = await Promise.all(videoReferences.map((video) => resolveSeedanceVideoUrl(video)));
+    if (videos.length !== videoReferences.length || videos.some((video) => !video)) {
+        throw new Error("参考视频读取失败，请换一个视频或重新上传");
+    }
+    return videos;
+}
+
+function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: string, images?: string[], videos?: string[]) {
     const payload: Record<string, unknown> = {
         model: modelOptionName(model),
         prompt,
@@ -1950,20 +1965,27 @@ function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: stri
         ratio: normalizeSeedanceRatio(config.size),
         generate_audio: boolConfig(config.videoGenerateAudio, true),
     };
-    // Text-only body must stay byte-compatible (no empty images array).
+    // Text-only body must stay byte-compatible (no empty media arrays).
     if (images?.length) payload.images = images;
+    if (videos?.length) payload.videos = videos;
     return payload;
 }
 
 /** Exposed for regression tests of the native API-key Seedance relay contract. */
-export function seedanceRelayPayloadForTest(config: AiConfig, model: string, prompt: string, images?: string[]) {
-    return buildSeedanceRelayPayload(config, model, prompt, images);
+export function seedanceRelayPayloadForTest(config: AiConfig, model: string, prompt: string, images?: string[], videos?: string[]) {
+    return buildSeedanceRelayPayload(config, model, prompt, images, videos);
 }
 
 /** Exposed for regression tests: every selected image must remain on the relay body. */
 export function payloadKeepsAllSeedanceRelayReferences(payload: Record<string, unknown>, expectedCount: number) {
     if (expectedCount <= 0) return !Array.isArray(payload.images) || (payload.images as unknown[]).length === 0;
     return Array.isArray(payload.images) && (payload.images as unknown[]).length === expectedCount;
+}
+
+/** Exposed for regression tests: every selected video must remain on the relay body. */
+export function payloadKeepsAllSeedanceRelayVideoReferences(payload: Record<string, unknown>, expectedCount: number) {
+    if (expectedCount <= 0) return !Array.isArray(payload.videos) || (payload.videos as unknown[]).length === 0;
+    return Array.isArray(payload.videos) && (payload.videos as unknown[]).length === expectedCount;
 }
 
 async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
