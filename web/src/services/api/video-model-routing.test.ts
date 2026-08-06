@@ -16,6 +16,8 @@ import {
     unwrapOpenAiVideoResponseForTest,
     videoPollBudget,
     videoPluginParamsForTest,
+    seedanceRelayPayloadForTest,
+    seedanceCreatePathForTest,
 } from "@/services/api/video";
 import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS } from "@/lib/grok-video";
 import { defaultConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
@@ -41,6 +43,39 @@ describe("custom video-script params", () => {
         expect(params.resolution).toBe("1080p");
         expect(params.ratio).toBe("16:9");
         expect(params.generateAudio).toBe(true);
+    });
+});
+
+describe("native Seedance relay payload", () => {
+    it("routes the OpenAI2API base URL to video/generations", () => {
+        expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "http://openai2api.com:3000" })).toBe("/video/generations");
+    });
+
+    it("keeps Agent Plan on contents/generations/tasks", () => {
+        expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "https://ark.cn-beijing.volces.com/api/plan/v3" })).toBe("/contents/generations/tasks");
+    });
+
+    it("uses the OpenAI-compatible body contract with numeric duration", () => {
+        const payload = seedanceRelayPayloadForTest(
+            { ...defaultConfig, videoSeconds: "4", vquality: "1080", size: "16:9", videoGenerateAudio: "true" },
+            "sora::seedance2",
+            "释放虚式茈",
+        );
+        expect(payload).toEqual({
+            model: "seedance2",
+            prompt: "释放虚式茈",
+            duration: 4,
+            resolution: "1080p",
+            ratio: "16:9",
+            generate_audio: true,
+        });
+        expect(typeof payload.duration).toBe("number");
+    });
+
+    it("keeps duration numeric for the relay payload when the UI stores seconds as text", () => {
+        const payload = seedanceRelayPayloadForTest({ ...defaultConfig, videoSeconds: "5" }, "seedance2", "test");
+        expect(payload.duration).toBe(5);
+        expect(typeof payload.duration).toBe("number");
     });
 });
 

@@ -15,7 +15,7 @@ import {
     normalizeGrokDuration,
     normalizeGrokResolution,
 } from "@/lib/grok-video";
-import { boolConfig, buildSeedancePromptText, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
+import { boolConfig, buildSeedancePromptText, isArkPlanBaseUrl, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import {
     buildSoraVeoFormFieldCandidates,
     isInvalidVideoRequestBodyError,
@@ -1864,6 +1864,9 @@ async function pollAgnesTask(config: AiConfig, task: VideoGenerationTask, option
 }
 
 async function createSeedanceTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    if (!isArkPlanBaseUrl(config.baseUrl)) {
+        return createSeedanceRelayTask(config, model, prompt, references, videoReferences, audioReferences, options);
+    }
     if (audioReferences.length && !references.length && !videoReferences.length) {
         throw new Error("Seedance 参考音频不能单独使用，请同时添加参考图或参考视频");
     }
@@ -1890,7 +1893,58 @@ async function createSeedanceTask(config: AiConfig, model: string, prompt: strin
     }
 }
 
+async function createSeedanceRelayTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    if (references.length || videoReferences.length || audioReferences.length) {
+        throw new Error("当前 OpenAI 兼容 Seedance 中转暂只支持文生视频；使用参考图片/视频/音频请切换火山 Agent Plan 渠道");
+    }
+    const createPath = seedanceCreatePath(config);
+    const payload = buildSeedanceRelayPayload(config, model, prompt);
+    try {
+        const created = unwrapVideoResponse(
+            (
+                await axios.post<ApiVideoResponse>(aiApiUrl(config, createPath), payload, {
+                    headers: aiHeaders(config, "application/json"),
+                    signal: options?.signal,
+                    timeout: 180000,
+                })
+            ).data,
+        );
+        if (!created.id) throw new Error("Seedance 中转接口没有返回任务 ID");
+        return { id: created.id, provider: "seedance", model, requestModel: modelOptionName(model), createPath };
+    } catch (error) {
+        throw new Error(readAxiosError(error, "Seedance 中转任务创建失败"));
+    }
+}
+
+function seedanceCreatePath(config: AiConfig) {
+    return isArkPlanBaseUrl(config.baseUrl) ? "/contents/generations/tasks" : "/video/generations";
+}
+
+/** Exposed for regression tests of native Seedance protocol routing. */
+export function seedanceCreatePathForTest(config: AiConfig) {
+    return seedanceCreatePath(config);
+}
+
+function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: string) {
+    return {
+        model: modelOptionName(model),
+        prompt,
+        duration: normalizeSeedanceDuration(config.videoSeconds),
+        resolution: normalizeSeedanceResolution(config.vquality, modelOptionName(model)),
+        ratio: normalizeSeedanceRatio(config.size),
+        generate_audio: boolConfig(config.videoGenerateAudio, true),
+    };
+}
+
+/** Exposed for regression tests of the native API-key Seedance relay contract. */
+export function seedanceRelayPayloadForTest(config: AiConfig, model: string, prompt: string) {
+    return buildSeedanceRelayPayload(config, model, prompt);
+}
+
 async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    if (task.createPath === "/video/generations") {
+        return pollOpenAIVideoTask(config, task, options);
+    }
     try {
         const state = unwrapSeedanceTask((await axios.get<ApiEnvelope<SeedanceTask>>(seedanceApiUrl(config, task.id), { headers: aiHeaders(config), signal: options?.signal })).data);
         const url = openAiCompatibleVideoUrl(state);
