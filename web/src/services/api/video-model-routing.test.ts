@@ -15,6 +15,7 @@ import {
     unwrapGrokVideoResponse,
     unwrapOpenAiVideoResponseForTest,
     videoPollBudget,
+    videoPluginParamsForTest,
 } from "@/services/api/video";
 import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS } from "@/lib/grok-video";
 import { defaultConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
@@ -31,6 +32,17 @@ function withChannels(channels: ModelChannel[], videoModel: string): AiConfig {
         videoModel,
     };
 }
+
+describe("custom video-script params", () => {
+    it("passes seconds as a number for Seedance-compatible JSON bodies", () => {
+        const params = videoPluginParamsForTest({ ...defaultConfig, videoSeconds: "4", vquality: "1080", size: "16:9" });
+        expect(params.seconds).toBe(4);
+        expect(typeof params.seconds).toBe("number");
+        expect(params.resolution).toBe("1080p");
+        expect(params.ratio).toBe("16:9");
+        expect(params.generateAudio).toBe(true);
+    });
+});
 
 describe("Grok video model routing", () => {
     it("keeps channel qualification when auto-switching from image model to base video (not 1.5 first)", () => {

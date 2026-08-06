@@ -261,6 +261,23 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
     return pollOpenAIVideoTask(requestConfig, task, options);
 }
 
+function buildVideoPluginParams(config: AiConfig) {
+    return {
+        // Script payloads commonly map this to JSON `duration`; keep it numeric.
+        seconds: Number(normalizeVideoSeconds(config.videoSeconds)),
+        size: normalizeVideoSize(config.size),
+        resolution: normalizeVideoResolution(config.vquality),
+        ratio: config.size,
+        generateAudio: boolConfig(config.videoGenerateAudio, true),
+        watermark: boolConfig(config.videoWatermark, false),
+    };
+}
+
+/** Exposed for regression tests of the custom video-script contract. */
+export function videoPluginParamsForTest(config: AiConfig) {
+    return buildVideoPluginParams(config);
+}
+
 async function createScriptVideoTask(config: AiConfig, model: string, script: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     if (!config.baseUrl.trim()) throw new Error("请先配置 Base URL");
     if (!config.apiKey.trim() && !isSameOriginRelayBaseUrl(config.baseUrl)) throw new Error("请先配置 API Key");
@@ -280,14 +297,7 @@ async function createScriptVideoTask(config: AiConfig, model: string, script: st
             config,
             prompt,
             images: refs.filter(Boolean),
-            params: {
-                seconds: normalizeVideoSeconds(config.videoSeconds),
-                size: normalizeVideoSize(config.size),
-                resolution: normalizeVideoResolution(config.vquality),
-                ratio: config.size,
-                generateAudio: boolConfig(config.videoGenerateAudio, true),
-                watermark: boolConfig(config.videoWatermark, false),
-            },
+            params: buildVideoPluginParams(config),
             signal: options?.signal,
         }),
     );

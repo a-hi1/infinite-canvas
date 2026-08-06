@@ -2,6 +2,7 @@
 
 ## Unreleased
 
++ [修复] 视频模型调用脚本的 `params.seconds` 改为 number，避免 Seedance `/v1/video/generations` 因 `duration: "4"` 返回 `invalid request body`。
 + [修复] 图/视频工作台多任务并发生成时，历史卡片「生成中」时长按 `createdAt` 实时计时，不再卡在 0 秒。
 + [新增] 工作空间素材墙/生成分享：按批次文件夹（含未归入）独立拖拽排序；`folder_sort_order` + `PUT .../items/reorder`；「全部」视图只读不拖。
 + [修复] Grok 完成态 `video.url` 晚写/空串：优先读官方 `video.url`，完成无地址等待约 3 分钟并补 content 回退；错误文案标明 url 形态。

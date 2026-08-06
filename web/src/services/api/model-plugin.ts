@@ -216,7 +216,7 @@ export const PLUGIN_VARIABLES: PluginVariable[] = [
     { name: "prompt", type: "string", desc: "用户输入的提示词（已拼接系统提示词）", capabilities: ["image", "video", "audio"] },
     { name: "images", type: "string[]", desc: "参考图，dataURL 数组（改图 / 图生视频时有值）", capabilities: ["image", "video"] },
     { name: "messages", type: "{ role, content }[]", desc: "对话消息数组，含系统消息", capabilities: ["text"] },
-    { name: "params", type: "object", desc: "生成参数：生图 {size,quality,count}、视频 {seconds,size,resolution,ratio,generateAudio,watermark}、音频 {voice,format,speed,instructions}" },
+    { name: "params", type: "object", desc: "生成参数：生图 {size,quality,count}、视频 {seconds:number,size,resolution,ratio,generateAudio,watermark}、音频 {voice,format,speed,instructions}" },
     { name: "model", type: "string", desc: "模型名称（不含渠道前缀）" },
     { name: "baseUrl", type: "string", desc: "渠道接口地址（原样，未拼 /v1）" },
     { name: "apiKey", type: "string", desc: "渠道 API Key，请求头里自己带上" },
@@ -298,7 +298,7 @@ return (data.candidates || [])
     video: [
         {
             label: "OpenAI 规范",
-            script: `// 视频（脚本内部自行轮询）。可用：prompt、images(dataURL[])、params{seconds,size,resolution,ratio}
+            script: `// 视频（脚本内部自行轮询）。可用：prompt、images(dataURL[])、params{seconds:number,size,resolution,ratio}
 const headers = { "Content-Type": "application/json", Authorization: \`Bearer \${apiKey}\` };
 const task = await request({
   method: "post",
