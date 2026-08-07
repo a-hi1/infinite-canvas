@@ -23,6 +23,7 @@ function cryptoRandomId() {
 }
 
 const endpointRules = [
+    /^\/v1\/video\/generations$/,
     /^\/v1\/images\/generations$/,
     /^\/v1\/images\/edits$/,
     /^\/v1\/responses$/,

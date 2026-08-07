@@ -264,8 +264,7 @@ export default function VideoPage() {
         if (unsupported.length) message.warning("已忽略不支持的参考素材，请使用图片、mp4/mov 视频或 mp3/wav 音频");
         const imageMax = soraVeoMode ? soraVeoImageMax : SEEDANCE_REFERENCE_LIMITS.images;
         const imageMaxBytes = soraVeoMode ? soraVeoImageMaxBytes : SEEDANCE_REFERENCE_LIMITS.imageMaxBytes;
-        // openai2api Comfy path only accepts 1 reference video on the built-in relay body.
-        const videoMax = grokMode ? GROK_EDIT_REFERENCE_LIMITS.videos : seedanceRelayMode ? 1 : SEEDANCE_REFERENCE_LIMITS.videos;
+        const videoMax = grokMode ? GROK_EDIT_REFERENCE_LIMITS.videos : SEEDANCE_REFERENCE_LIMITS.videos;
         const videoMaxBytes = grokMode ? GROK_EDIT_REFERENCE_LIMITS.videoMaxBytes : SEEDANCE_REFERENCE_LIMITS.videoMaxBytes;
         const audioMax = SEEDANCE_REFERENCE_LIMITS.audios;
         const imageFiles = selectedFiles.filter((file) => file.type.startsWith("image/") && file.size <= imageMaxBytes).slice(0, Math.max(0, imageMax - references.length));
@@ -619,18 +618,19 @@ export default function VideoPage() {
             message.error("当前模型/渠道不是 Seedance 2.0、火山 Agent Plan 或支持 edits 的 Grok 中转，不能使用参考视频或参考音频，请切换视频模型或移除这些参考素材");
             return null;
         }
-        // OpenAI-compatible Seedance relay (openai2api / New API) has no verified audio field.
-        if (seedanceRelayMode && audioReferences.length) {
-            message.error("当前 OpenAI 兼容 Seedance 中转暂不支持参考音频；请切换火山 Agent Plan 渠道，或移除参考音频");
-            return null;
-        }
+        // Relay Seedance accepts complete image/video/audio reference payloads.
+        // The API layer resolves and validates every selected media item before POST.
         if (seedanceRelayMode && videoReferences.length > 1) {
-            message.error("当前 OpenAI 兼容 Seedance 中转参考视频仅支持 1 条（与 Comfy 成功路径一致）；请只保留一条或切换火山 Agent Plan");
-            return null;
+            message.info("参考视频将按主视频 + 补充参考视频发送");
         }
         if (videoUsesCustomScript && (videoReferences.length || audioReferences.length)) {
-            message.error("当前视频模型配置了本地调用脚本，脚本暂不支持参考视频/音频；请清空脚本后走内置 Seedance 多参考，或移除这些素材");
-            return null;
+            // Seedance multi-ref auto-uses built-in Comfy fields even with a pure-text script.
+            // Only block non-Seedance scripts (or Seedance scripts when no multi-ref path exists).
+            if (!seedanceMode) {
+                message.error("当前视频模型配置了本地调用脚本，脚本暂不支持参考视频/音频；请清空脚本后走系统默认，或移除这些素材");
+                return null;
+            }
+            // Seedance: allow — createVideoGenerationTask will bypass script for multi-ref.
         }
         const videoReferenceError = seedanceMode ? seedanceVideoReferenceError(videoReferences) : "";
         if (videoReferenceError) {
@@ -1121,7 +1121,7 @@ export default function VideoPage() {
                                         <div className="flex min-w-full items-center justify-center text-sm text-stone-500">
                                             {referenceDragTarget === "video"
                                                 ? "松开即可上传参考资产"
-                                                : `暂无参考视频，可拖入文件，最多 ${grokMode || seedanceRelayMode ? 1 : 3} 个${grokMode ? "（Grok edits）" : seedanceRelayMode ? "（OpenAI 中转）" : ""}`}
+                                                : `暂无参考视频，可拖入文件，最多 ${grokMode ? 1 : SEEDANCE_REFERENCE_LIMITS.videos} 个${grokMode ? "（Grok edits）" : seedanceRelayMode ? "（OpenAI 中转）" : ""}`}
                                         </div>
                                     ) : null}
                                 </div>

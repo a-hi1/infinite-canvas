@@ -12,6 +12,7 @@ import {
     isGrokRateLimitError,
     isRetryableGrokPayloadError,
     payloadKeepsAllGrokVideoReferences,
+    payloadKeepsAllSeedanceRelayAudioReferences,
     payloadKeepsAllSeedanceRelayReferences,
     payloadKeepsAllSeedanceRelayVideoReferences,
     seedanceRelayImageRole,
@@ -136,7 +137,7 @@ describe("native Seedance relay payload", () => {
         expect(payload.durationSeconds).toBe(5);
     });
 
-    it("keeps single-image Comfy I2V path (images[] + image)", () => {
+    it("keeps single-image relay content role", () => {
         const images = ["data:image/png;base64,aaa"];
         const payload = seedanceRelayPayloadForTest(
             { ...defaultConfig, videoSeconds: "4", vquality: "1080", size: "16:9", videoGenerateAudio: "true" },
@@ -144,63 +145,46 @@ describe("native Seedance relay payload", () => {
             "图生视频",
             images,
         );
-        expect(payload.images).toEqual(images);
-        expect(payload.image).toBe(images[0]);
-        expect(payload).not.toHaveProperty("content");
-        expect(payload).not.toHaveProperty("reference_images");
+        const content = payload.content as Array<Record<string, unknown>>;
+        expect(content.find((item) => item.type === "text")?.text).toContain("图生视频");
+        expect(content.find((item) => item.type === "image_url")).toEqual({
+            type: "image_url",
+            image_url: { url: images[0] },
+            role: "reference_image",
+        });
+        expect(payload).not.toHaveProperty("images");
+        expect(payload).not.toHaveProperty("image");
         expect(payloadKeepsAllSeedanceRelayReferences(payload, 1)).toBe(true);
     });
 
-    it("uses first_frame + last_frame for exactly 2 images (Comfy first/last path)", () => {
+    it("uses role-labeled content for exactly 2 images", () => {
         const images = ["data:image/png;base64,aaa", "data:image/png;base64,bbb"];
         expect(seedanceRelayImageRole(0, 2)).toBe("first_frame");
         expect(seedanceRelayImageRole(1, 2)).toBe("last_frame");
-        expect(seedanceRelayImageRole(0, 1)).toBe("first_frame");
-
-        const payload = seedanceRelayPayloadForTest(
-            { ...defaultConfig, videoSeconds: "4", vquality: "1080", size: "16:9", videoGenerateAudio: "true" },
-            "seedance2",
-            "首尾帧",
-            images,
-        );
-        expect(payload).not.toHaveProperty("images");
-        expect(payload).not.toHaveProperty("content");
+        const payload = seedanceRelayPayloadForTest({ ...defaultConfig }, "seedance2", "首尾帧", images);
+        const content = payload.content as Array<Record<string, unknown>>;
+        expect(content.filter((item) => item.type === "image_url")).toEqual([
+            { type: "image_url", image_url: { url: images[0] }, role: "first_frame" },
+            { type: "image_url", image_url: { url: images[1] }, role: "last_frame" },
+        ]);
+        expect(payload).not.toHaveProperty("image");
         expect(payload).not.toHaveProperty("reference_images");
-        expect(payload.first_frame).toBe(images[0]);
-        expect(payload.last_frame).toBe(images[1]);
-        expect(String(payload.prompt)).toContain("图片1");
-        expect(String(payload.prompt)).toContain("图片2");
-        expect(String(payload.prompt)).toContain("首尾帧");
         expect(payloadKeepsAllSeedanceRelayReferences(payload, 2)).toBe(true);
-        expect(payload.duration).toBe(4);
-        expect(payload.seconds).toBe("4");
     });
 
-    it("uses image + reference_images for 3+ multi-image (Comfy multi-ref, not bare images[])", () => {
+    it("uses role-labeled content for 3+ images", () => {
         const images = ["data:image/png;base64,aaa", "data:image/png;base64,bbb", "data:image/png;base64,ccc"];
-        // Comfy roles for labels/tests: first is main image; rest are reference_images.
-        expect(seedanceRelayImageRole(0, 3)).toBe("image");
+        expect(seedanceRelayImageRole(0, 3)).toBe("first_frame");
         expect(seedanceRelayImageRole(1, 3)).toBe("reference_image");
-        expect(seedanceRelayImageRole(2, 3)).toBe("reference_image");
-
-        const payload = seedanceRelayPayloadForTest(
-            { ...defaultConfig, videoSeconds: "4", vquality: "1080", size: "16:9", videoGenerateAudio: "true" },
-            "seedance2",
-            "图生视频",
-            images,
-        );
-        // Multi must NOT send bare multi images[] — openai2api → 400 role must be specified.
+        expect(seedanceRelayImageRole(2, 3)).toBe("last_frame");
+        const payload = seedanceRelayPayloadForTest({ ...defaultConfig }, "seedance2", "图生视频", images);
+        const imageItems = (payload.content as Array<Record<string, unknown>>).filter((item) => item.type === "image_url");
+        expect(imageItems).toHaveLength(3);
+        expect(imageItems.map((item) => item.role)).toEqual(["first_frame", "reference_image", "last_frame"]);
+        expect(imageItems.map((item) => (item.image_url as { url: string }).url)).toEqual(images);
         expect(payload).not.toHaveProperty("images");
-        expect(payload).not.toHaveProperty("content");
-        expect(payload.image).toBe(images[0]);
-        expect(payload.reference_images).toEqual([images[1], images[2]]);
-        expect(String(payload.prompt)).toContain("图片1");
-        expect(String(payload.prompt)).toContain("图片2");
-        expect(String(payload.prompt)).toContain("图片3");
-        expect(String(payload.prompt)).toContain("图生视频");
+        expect(payload).not.toHaveProperty("reference_images");
         expect(payloadKeepsAllSeedanceRelayReferences(payload, 3)).toBe(true);
-        expect(payload.duration).toBe(4);
-        expect(payload.seconds).toBe("4");
     });
 
     it("uses top-level video for video references (Comfy ProviderReferenceVideo)", () => {
@@ -212,10 +196,10 @@ describe("native Seedance relay payload", () => {
             undefined,
             videos,
         );
-        expect(payload).not.toHaveProperty("videos");
-        expect(payload).not.toHaveProperty("images");
-        expect(payload).not.toHaveProperty("content");
-        expect(payload.video).toBe(videos[0]);
+        const content = payload.content as Array<Record<string, unknown>>;
+        expect(content.filter((item) => item.type === "video_url")).toHaveLength(1);
+        expect(content.find((item) => item.type === "video_url")?.role).toBe("reference_video");
+        expect(payload).not.toHaveProperty("video");
         expect(String(payload.prompt)).toContain("视频1");
         expect(String(payload.prompt)).toContain("视频参考");
         expect(payloadKeepsAllSeedanceRelayVideoReferences(payload, 1)).toBe(true);
@@ -248,11 +232,13 @@ describe("native Seedance relay payload", () => {
         });
         expect(String(payload.prompt)).toContain("图片1");
         expect(String(payload.prompt)).toContain("图生视频");
-        // Multi: Comfy image + reference_images — no bare multi images[] / content[].
+        const imageItems = (payload.content as Array<Record<string, unknown>>).filter((item) => item.type === "image_url");
+        expect(imageItems).toHaveLength(3);
+        expect(imageItems.map((item) => (item.image_url as { url: string }).url)).toEqual(["data:image/png;base64,aaa", "data:image/png;base64,bbb", "data:image/png;base64,ccc"]);
+        expect(imageItems.map((item) => item.role)).toEqual(["first_frame", "reference_image", "last_frame"]);
         expect(payload).not.toHaveProperty("images");
-        expect(payload).not.toHaveProperty("content");
-        expect(payload.image).toBe("data:image/png;base64,aaa");
-        expect(payload.reference_images).toEqual(["data:image/png;base64,bbb", "data:image/png;base64,ccc"]);
+        expect(payload).not.toHaveProperty("image");
+        expect(payload).not.toHaveProperty("reference_images");
         expect(payloadKeepsAllSeedanceRelayReferences(payload, 3)).toBe(true);
     });
 
@@ -266,10 +252,9 @@ describe("native Seedance relay payload", () => {
 
         expect(axios.post).toHaveBeenCalledTimes(1);
         const body = vi.mocked(axios.post).mock.calls[0]?.[1] as Record<string, unknown>;
-        expect(body).not.toHaveProperty("images");
-        expect(body).not.toHaveProperty("content");
-        expect(body.first_frame).toBe("data:image/png;base64,aaa");
-        expect(body.last_frame).toBe("data:image/png;base64,bbb");
+        const content = body.content as Array<Record<string, unknown>>;
+        expect(content.filter((item) => item.type === "image_url")).toHaveLength(2);
+        expect(content.map((item) => item.role).filter(Boolean)).toEqual(["first_frame", "last_frame"]);
         expect(payloadKeepsAllSeedanceRelayReferences(body, 2)).toBe(true);
     });
 
@@ -286,23 +271,29 @@ describe("native Seedance relay payload", () => {
         const [url, body] = vi.mocked(axios.post).mock.calls[0] ?? [];
         expect(String(url)).toContain("/video/generations");
         const payload = body as Record<string, unknown>;
-        expect(payload).not.toHaveProperty("videos");
-        expect(payload).not.toHaveProperty("images");
-        expect(payload).not.toHaveProperty("content");
-        expect(payload.video).toBe("https://example.com/a.mp4");
-        expect(String(payload.prompt)).toContain("视频1");
-        expect(String(payload.prompt)).toContain("视频参考");
+        const content = payload.content as Array<Record<string, unknown>>;
+        expect(content.filter((item) => item.type === "video_url")).toHaveLength(1);
+        expect(content.find((item) => item.type === "video_url")?.role).toBe("reference_video");
+        expect(content.find((item) => item.type === "video_url")?.video_url).toEqual({ url: "https://example.com/a.mp4" });
+        expect(payload).not.toHaveProperty("video");
         expect(payloadKeepsAllSeedanceRelayVideoReferences(payload, 1)).toBe(true);
     });
 
-    it("rejects more than one relay reference video before POST", async () => {
+    it("posts multiple relay reference videos and preserves every video item", async () => {
         const videoReferences: ReferenceVideo[] = [
             { id: "v1", name: "a.mp4", type: "video/mp4", url: "https://example.com/a.mp4", durationMs: 4000 },
             { id: "v2", name: "b.mp4", type: "video/mp4", url: "https://example.com/b.mp4", durationMs: 5000 },
         ];
-
-        await expect(createVideoGenerationTask(seedanceRelayConfig(), "视频参考", [], videoReferences, [])).rejects.toThrow(/仅支持 1 条/);
-        expect(axios.post).not.toHaveBeenCalled();
+        const task = await createVideoGenerationTask(seedanceRelayConfig(), "视频参考", [], videoReferences, []);
+        expect(task.provider).toBe("seedance");
+        const body = vi.mocked(axios.post).mock.calls[0]?.[1] as Record<string, unknown>;
+        const content = body.content as Array<Record<string, unknown>>;
+        expect(content.filter((item) => item.type === "video_url")).toHaveLength(2);
+        expect(content.filter((item) => item.type === "video_url").map((item) => (item.video_url as { url: string }).url)).toEqual([
+            "https://example.com/a.mp4",
+            "https://example.com/b.mp4",
+        ]);
+        expect(payloadKeepsAllSeedanceRelayVideoReferences(body, 2)).toBe(true);
     });
 
     it("posts video + optional image when mixed references are provided", async () => {
@@ -313,12 +304,11 @@ describe("native Seedance relay payload", () => {
 
         expect(axios.post).toHaveBeenCalledTimes(1);
         const body = vi.mocked(axios.post).mock.calls[0]?.[1] as Record<string, unknown>;
-        // Comfy video+image: top-level video + image (no content[]).
-        expect(body).not.toHaveProperty("images");
-        expect(body).not.toHaveProperty("videos");
-        expect(body).not.toHaveProperty("content");
-        expect(body.video).toBe("https://example.com/a.mp4");
-        expect(body.image).toBe("data:image/png;base64,aaa");
+        const content = body.content as Array<Record<string, unknown>>;
+        expect(content.filter((item) => item.type === "image_url")).toHaveLength(1);
+        expect(content.filter((item) => item.type === "video_url")).toHaveLength(1);
+        expect(body).not.toHaveProperty("video");
+        expect(body).not.toHaveProperty("image");
         expect(String(body.prompt)).toContain("图片1");
         expect(String(body.prompt)).toContain("视频1");
         expect(String(body.prompt)).toContain("混合参考");
@@ -346,17 +336,79 @@ describe("native Seedance relay payload", () => {
         expect(axios.post).not.toHaveBeenCalled();
     });
 
-    it("rejects relay audio references without posting", async () => {
-        await expect(
-            createVideoGenerationTask(
-                seedanceRelayConfig(),
-                "音频参考",
-                [],
-                [],
-                [{ id: "a", name: "a.mp3", type: "audio/mpeg", url: "https://example.com/a.mp3" }],
-            ),
-        ).rejects.toThrow(/暂不支持参考音频/);
+    it("posts relay audio references and preserves every audio item", async () => {
+        const audioReferences = [
+            { id: "a1", name: "a.mp3", type: "audio/mpeg", url: "https://example.com/a.mp3", durationMs: 4000 },
+            { id: "a2", name: "b.mp3", type: "audio/mpeg", url: "https://example.com/b.mp3", durationMs: 5000 },
+        ];
+        const task = await createVideoGenerationTask(seedanceRelayConfig(), "音频参考", [], [], audioReferences);
+        expect(task.provider).toBe("seedance");
+        const body = vi.mocked(axios.post).mock.calls[0]?.[1] as Record<string, unknown>;
+        const content = body.content as Array<Record<string, unknown>>;
+        expect(content.filter((item) => item.type === "audio_url")).toHaveLength(2);
+        expect(content.filter((item) => item.type === "audio_url").map((item) => (item.audio_url as { url: string }).url)).toEqual([
+            "https://example.com/a.mp3",
+            "https://example.com/b.mp3",
+        ]);
+        expect(payloadKeepsAllSeedanceRelayAudioReferences(body, 2)).toBe(true);
+    });
+
+    it("bypasses pure-text modelScripts when Seedance has multi-image refs (uses built-in Comfy body)", async () => {
+        const config: AiConfig = {
+            ...seedanceRelayConfig(),
+            modelScripts: {
+                "relay::seedance2": `// text-only script — would ignore multi-image if used
+return "https://example.com/script-only.mp4";`,
+            },
+        };
+        const references: ReferenceImage[] = [
+            { id: "a", name: "a.png", type: "image/png", dataUrl: "data:image/png;base64,aaa" },
+            { id: "b", name: "b.png", type: "image/png", dataUrl: "data:image/png;base64,bbb" },
+            { id: "c", name: "c.png", type: "image/png", dataUrl: "data:image/png;base64,ccc" },
+        ];
+
+        const task = await createVideoGenerationTask(config, "多图", references, [], []);
+        expect(task.provider).toBe("seedance");
+        expect(task.createPath).toBe("/video/generations");
+        expect(axios.post).toHaveBeenCalledTimes(1);
+        const body = vi.mocked(axios.post).mock.calls[0]?.[1] as Record<string, unknown>;
+        const content = body.content as Array<Record<string, unknown>>;
+        expect(content.filter((item) => item.type === "image_url")).toHaveLength(3);
+        expect(content.map((item) => item.role).filter(Boolean)).toEqual(["first_frame", "reference_image", "last_frame"]);
+        expect(payloadKeepsAllSeedanceRelayReferences(body, 3)).toBe(true);
+    });
+
+    it("bypasses pure-text modelScripts when Seedance has a reference video", async () => {
+        const config: AiConfig = {
+            ...seedanceRelayConfig(),
+            modelScripts: {
+                "relay::seedance2": `return "https://example.com/script-only.mp4";`,
+            },
+        };
+        const videoReferences: ReferenceVideo[] = [
+            { id: "v1", name: "a.mp4", type: "video/mp4", url: "https://example.com/a.mp4", durationMs: 4000 },
+        ];
+
+        const task = await createVideoGenerationTask(config, "视频参考", [], videoReferences, []);
+        expect(task.provider).toBe("seedance");
+        expect(axios.post).toHaveBeenCalledTimes(1);
+        const body = vi.mocked(axios.post).mock.calls[0]?.[1] as Record<string, unknown>;
+        const content = body.content as Array<Record<string, unknown>>;
+        expect(content.filter((item) => item.type === "video_url")).toHaveLength(1);
+        expect(payloadKeepsAllSeedanceRelayVideoReferences(body, 1)).toBe(true);
+    });
+
+    it("still uses modelScripts for pure Seedance T2V (no media)", async () => {
+        const config: AiConfig = {
+            ...seedanceRelayConfig(),
+            modelScripts: {
+                "relay::seedance2": `return "https://example.com/script-t2v.mp4";`,
+            },
+        };
+        const task = await createVideoGenerationTask(config, "纯文生", [], [], []);
+        expect(task.provider).toBe("script");
         expect(axios.post).not.toHaveBeenCalled();
+        expect(task.readyResult?.url).toBe("https://example.com/script-t2v.mp4");
     });
 });
 

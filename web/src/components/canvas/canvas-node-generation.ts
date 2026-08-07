@@ -89,16 +89,17 @@ function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: s
 
     nextPrompt += prompt.slice(lastIndex);
     if (textBlocks.length) nextPrompt = `${nextPrompt.trim()}\n\n${textBlocks.join("\n\n")}`;
-    const referenceImages = selectedInputs.map((input) => input.image).filter((image): image is ReferenceImage => Boolean(image));
-    const referenceVideos = selectedInputs.map((input) => input.video).filter((video): video is ReferenceVideo => Boolean(video));
-    const referenceAudios = selectedInputs.map((input) => input.audio).filter((audio): audio is ReferenceAudio => Boolean(audio));
+
+    // Always attach every currently connected media for generation (matches workbench:
+    // prompt @ labels only guide wording; payload must not drop unmentioned refs).
+    // Without this, "@图片1" + a connected video would silently generate without the video.
+    const allImages = inputs.map((input) => input.image).filter((image): image is ReferenceImage => Boolean(image));
+    const allVideos = inputs.map((input) => input.video).filter((video): video is ReferenceVideo => Boolean(video));
+    const allAudios = inputs.map((input) => input.audio).filter((audio): audio is ReferenceAudio => Boolean(audio));
 
     // No @ tokens: keep the typed prompt, but still attach all currently connected media
     // so reconnecting/changing references on a config node takes effect on the next generate.
     if (!hasToken) {
-        const allImages = inputs.map((input) => input.image).filter((image): image is ReferenceImage => Boolean(image));
-        const allVideos = inputs.map((input) => input.video).filter((video): video is ReferenceVideo => Boolean(video));
-        const allAudios = inputs.map((input) => input.audio).filter((audio): audio is ReferenceAudio => Boolean(audio));
         return {
             prompt,
             referenceImages: allImages,
@@ -111,6 +112,14 @@ function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: s
         };
     }
 
+    // Prefer @ mention order for labeled media, then append remaining connected media.
+    const mentionedImages = selectedInputs.map((input) => input.image).filter((image): image is ReferenceImage => Boolean(image));
+    const mentionedVideos = selectedInputs.map((input) => input.video).filter((video): video is ReferenceVideo => Boolean(video));
+    const mentionedAudios = selectedInputs.map((input) => input.audio).filter((audio): audio is ReferenceAudio => Boolean(audio));
+    const referenceImages = mergeUniqueById(mentionedImages, allImages);
+    const referenceVideos = mergeUniqueById(mentionedVideos, allVideos);
+    const referenceAudios = mergeUniqueById(mentionedAudios, allAudios);
+
     return {
         prompt: nextPrompt,
         referenceImages,
@@ -121,6 +130,17 @@ function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: s
         videoCount: referenceVideos.length,
         audioCount: referenceAudios.length,
     };
+}
+
+function mergeUniqueById<T extends { id: string }>(preferred: T[], rest: T[]) {
+    const seen = new Set<string>();
+    const out: T[] = [];
+    for (const item of [...preferred, ...rest]) {
+        if (!item?.id || seen.has(item.id)) continue;
+        seen.add(item.id);
+        out.push(item);
+    }
+    return out;
 }
 
 export function buildNodeGenerationInputs(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]): NodeGenerationInput[] {

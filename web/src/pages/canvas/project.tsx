@@ -8,13 +8,14 @@ import { requestEdit, requestGeneration, requestImageQuestion } from "@/services
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { DOCS_URL } from "@/constant/env";
-import { defaultConfig, type AiConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { defaultConfig, resolveModelRequestConfig, resolveModelScript, type AiConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { resolveImageUrl, uploadImage, type UploadedImage } from "@/services/image-storage";
 import { resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { agnesVideoRequestError, isAgnesVideoConfig } from "@/lib/agnes-video";
 import { grokResolutionShortfallMessage, isGrokVideoConfig } from "@/lib/grok-video";
+import { isSeedanceVideoConfig, seedanceVideoReferenceError, seedanceVideoReferenceHint } from "@/lib/seedance-video";
 import { suggestAssetCategory } from "@/lib/asset-category";
 import { assetTitleFromPrompt } from "@/lib/asset-display";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
@@ -2563,6 +2564,8 @@ function InfiniteCanvasPage() {
                 if (mode === "video") {
                     const agnesReferenceError = isAgnesVideoConfig(generationConfig) ? agnesVideoRequestError(generationConfig, generationContext.referenceImages, generationContext.referenceVideos, generationContext.referenceAudios) : "";
                     if (agnesReferenceError) throw new Error(agnesReferenceError);
+                    const canvasVideoRefError = canvasVideoReferencePreflight(generationConfig, generationContext);
+                    if (canvasVideoRefError) throw new Error(canvasVideoRefError);
                     const spec = nodeSizeFromRatio(generationConfig.size, NODE_DEFAULT_SIZE[CanvasNodeType.Video].width, NODE_DEFAULT_SIZE[CanvasNodeType.Video].height) || NODE_DEFAULT_SIZE[CanvasNodeType.Video];
                     const isEmptyVideoNode = sourceNode?.type === CanvasNodeType.Video && !nodeHasGeneratedMedia(sourceNode);
                     const videoId = isEmptyVideoNode ? nodeId : nanoid();
@@ -2864,6 +2867,12 @@ function InfiniteCanvasPage() {
                 if (node.type === CanvasNodeType.Video) {
                     const agnesReferenceError = isAgnesVideoConfig(generationConfig) ? agnesVideoRequestError(generationConfig, retryImages, context?.referenceVideos || [], context?.referenceAudios || []) : "";
                     if (agnesReferenceError) throw new Error(agnesReferenceError);
+                    const canvasVideoRefError = canvasVideoReferencePreflight(generationConfig, {
+                        referenceImages: retryImages,
+                        referenceVideos: context?.referenceVideos || [],
+                        referenceAudios: context?.referenceAudios || [],
+                    });
+                    if (canvasVideoRefError) throw new Error(canvasVideoRefError);
                     const video = await storeGeneratedVideo(await requestVideoGeneration(generationConfig, prompt, retryImages, context?.referenceVideos || [], context?.referenceAudios || [], { signal: controller.signal }));
                     const videoSize = fitNodeSize(video.width || node.width, video.height || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
                     setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, width: videoSize.width, height: videoSize.height, position: { x: item.position.x + item.width / 2 - videoSize.width / 2, y: item.position.y + item.height / 2 - videoSize.height / 2 }, metadata: { ...item.metadata, ...videoMetadata(video), prompt, model: generationConfig.model, size: generationConfig.size, seconds: generationConfig.videoSeconds, vquality: generationConfig.vquality, generateAudio: generationConfig.videoGenerateAudio, watermark: generationConfig.videoWatermark } } : item)));
@@ -3764,6 +3773,48 @@ function generationReferenceUrls(context: { referenceImages: ReferenceImage[]; r
         ...context.referenceVideos.map((video) => video.storageKey || video.url).filter((url): url is string => Boolean(url)),
         ...(context.referenceAudios || []).map((audio) => audio.storageKey || audio.url).filter((url): url is string => Boolean(url)),
     ];
+}
+
+/**
+ * Canvas video preflight — same constraints as workbench, before spawning loading nodes.
+ * Seedance multi-reference requests auto-bypass pure-text modelScripts and use
+ * the built-in relay or Agent Plan media payload.
+ */
+function canvasVideoReferencePreflight(
+    config: AiConfig,
+    context: {
+        referenceImages: ReferenceImage[];
+        referenceVideos: Array<{ storageKey?: string; url?: string; durationMs?: number; bytes?: number; width?: number; height?: number }>;
+        referenceAudios?: Array<{ storageKey?: string; url?: string; durationMs?: number }>;
+    },
+) {
+    const images = context.referenceImages || [];
+    const videos = context.referenceVideos || [];
+    const audios = context.referenceAudios || [];
+    if (!videos.length && !audios.length) return "";
+
+    const requestConfig = resolveModelRequestConfig(config, config.model || config.videoModel || "");
+    const seedanceMode = isSeedanceVideoConfig(requestConfig);
+    const script = resolveModelScript(config, config.model || config.videoModel || "");
+
+    if (isGrokVideoConfig(requestConfig)) {
+        if (audios.length) return "Grok 视频编辑暂不支持参考音频，请移除音频节点后重试";
+        if (images.length) return "Grok 不能同时使用参考图与参考视频：请只保留参考视频（edits）或只保留参考图（generation）";
+        if (videos.length > 1) return "Grok 视频编辑只支持 1 条参考视频";
+        return "";
+    }
+
+    if (!seedanceMode) {
+        return "当前视频接口不支持参考视频或参考音频，请切换到 Seedance 2.0 / 火山 Agent Plan / 支持 edits 的 Grok 中转，或移除参考素材";
+    }
+
+    // Non-Seedance scripts still hard-block video/audio; Seedance multi-ref auto-uses built-in.
+    if (script && !seedanceMode && (videos.length || audios.length)) {
+        return "自定义模型调用脚本暂不支持参考视频/音频，请清空脚本或移除参考素材";
+    }
+    const videoReferenceError = seedanceVideoReferenceError(videos as Parameters<typeof seedanceVideoReferenceError>[0]);
+    if (videoReferenceError) return `${videoReferenceError}。${seedanceVideoReferenceHint}`;
+    return "";
 }
 
 async function resolveMetadataReferences(metadata: CanvasNodeMetadata) {

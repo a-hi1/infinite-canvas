@@ -190,7 +190,7 @@ docker compose -p ic3011 -f docker-compose.local.yml ps
 
 - `compatProfile`：auto / openai / openai-slim / grok-image / relay-fragile
 - **视频自定义脚本参数**：`params.seconds` 是 number（例如 `4`），用于 Seedance `/v1/video/generations` 的 `duration`；不要退回字符串 `"4"`
-- **原生 API Key Seedance 中转（openai2api，对齐 Comfy + 可用脚本字段）**：`/v1/video/generations`；**必带** `duration:number` + `seconds:string` + `durationSeconds:number` + ratio/resolution/generate_audio；**单图** `images[]`/`image`；**2 张** `first_frame`+`last_frame`；**3+** `image`+`reference_images`；**参考视频**顶层 `video`（可选 `image`），中转仅 1 条；参考音频中转拦截。**非空 modelScripts 绕过内置多参考**——多图/视频请空脚本；用户文生脚本可保留。模型名示例：`doubao-seedance-2-0-260128` / `doubao-seedance-2-0-fast-260128`。火山 Agent Plan 仍 `/contents/generations/tasks`
+- **原生 API Key Seedance 中转（openai2api）**：`/v1/video/generations`；必带 `duration:number` + `seconds:string` + `durationSeconds:number` + ratio/resolution/generate_audio；带参考媒体时只发带 role 的 `content[]`：图片 `image_url`（单图 `reference_image`；双图 `first_frame`/`last_frame`；3+ 图首尾帧 + 中间 `reference_image`）、视频 `video_url` + `reference_video`、音频 `audio_url` + `reference_audio`。**不要**同时混发顶层 `image`/`video`/`audio`，否则中转可能只消费首图分支。纯文生 modelScripts 仍可用；带任意参考媒体自动走内置完整 payload，任一素材读取失败不发请求、不退回文生。画布配置节点 `@` 只点名部分素材时仍附带全部已连接图/视/音。模型名示例：`doubao-seedance-2-0-260128` / `doubao-seedance-2-0-fast-260128`。火山 Agent Plan 仍 `/contents/generations/tasks`
 - **Seedance 参考视频本地校验**：只查边长 300–6000、宽高比 0.4–2.5、时长 2–15s/总 15s、50MB；**不要**用输出档像素总量（640×640～2206×946）拦参考视频
 - **Grok 图生图**：JSON `POST /images/edits`；有参考图**不再**自动跳 `*-edit`；多参考必须完整 multi-image payload，**禁止静默只发第一张**
 - **视频主机级自动适配**：`web/src/lib/video-host-profile.ts` 按 Base URL 收口 Grok 创建路径 / 是否允许 `/videos` 兜底 / Seedance 中转路径 / 多图压图；扩展新中转优先改 profile，避免散改 `video.ts`

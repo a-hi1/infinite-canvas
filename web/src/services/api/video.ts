@@ -220,11 +220,17 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     const requestConfig = resolveModelRequestConfig(config, selectedModel);
     const script = selectedScript || resolveModelScript(config, selectedModel);
     // Custom scripts win only when set; empty keeps Agnes/Seedance/Grok/OpenAI defaults.
+    // Exception: Seedance with any reference media must use built-in Comfy/Agent Plan fields.
+    // Pure-text modelScripts ignore media and look like "ref not used" / multi-image failed.
     if (script) {
-        if (videoReferences.length || audioReferences.length) {
-            throw new Error("自定义模型调用脚本暂不支持参考视频/音频，请清空脚本或移除参考素材");
+        const seedanceNeedsBuiltin = isSeedanceVideoConfig(requestConfig) && (references.length > 0 || videoReferences.length > 0 || audioReferences.length > 0);
+        if (!seedanceNeedsBuiltin) {
+            if (videoReferences.length || audioReferences.length) {
+                throw new Error("自定义模型调用脚本暂不支持参考视频/音频，请清空脚本或移除参考素材");
+            }
+            return createScriptVideoTask(requestConfig, selectedModel, script, prompt, references, options);
         }
-        return createScriptVideoTask(requestConfig, selectedModel, script, prompt, references, options);
+        // fall through to built-in Seedance (script still used for pure T2V)
     }
     assertVideoConfig(requestConfig, requestConfig.model);
     if (isAgnesVideoConfig(requestConfig)) {
@@ -1909,25 +1915,25 @@ async function createSeedanceTask(config: AiConfig, model: string, prompt: strin
 }
 
 async function createSeedanceRelayTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions): Promise<VideoGenerationTask> {
-    // OpenAI2API / New API Seedance — align with ComfyUI (comfyui_llm_providers) success contract:
-    // - text-only: prompt + duration(number) + seconds(string)
-    // - single image: images[] (or image)
-    // - multi image: image + reference_images (NOT bare multi images[] → 400 role required)
-    // - first/last (2 images): first_frame + last_frame
-    // - reference video: top-level video (+ optional image)
-    // Audio still requires Agent Plan — no verified relay field yet.
-    if (audioReferences.length) {
-        throw new Error("当前 OpenAI 兼容 Seedance 中转暂不支持参考音频；请切换火山 Agent Plan 渠道");
-    }
-    if (videoReferences.length > 1) {
-        throw new Error("当前 OpenAI 兼容 Seedance 中转参考视频仅支持 1 条（与 Comfy 成功路径一致）；多条请切换火山 Agent Plan");
-    }
+    // OpenAI2API / New API Seedance relay contract: keep every selected reference in
+    // explicit top-level fields. The relay accepts image/image(s), video(s), and
+    // audio(s); never fall back to a text-only request when media is selected.
     if (videoReferences.length) assertSeedanceVideoReferences(videoReferences);
+    if (audioReferences.length) assertSeedanceAudioReferences(audioReferences);
     const createPath = seedanceCreatePath(config);
-    // Resolve every selected media first; never POST a partial/text-only fallback.
     const images = references.length ? await resolveSeedanceRelayImages(config, references) : undefined;
     const videos = videoReferences.length ? await resolveSeedanceRelayVideos(videoReferences) : undefined;
-    const payload = buildSeedanceRelayPayload(config, model, prompt, images, videos);
+    const audios = audioReferences.length ? await resolveSeedanceRelayAudios(audioReferences) : undefined;
+    const payload = buildSeedanceRelayPayload(config, model, prompt, images, videos, audios);
+    if (!payloadKeepsAllSeedanceRelayReferences(payload, references.length)) {
+        throw new Error("Seedance 中转请求未完整包含全部参考图，已取消发送");
+    }
+    if (!payloadKeepsAllSeedanceRelayVideoReferences(payload, videoReferences.length)) {
+        throw new Error("Seedance 中转请求未完整包含全部参考视频，已取消发送");
+    }
+    if (!payloadKeepsAllSeedanceRelayAudioReferences(payload, audioReferences.length)) {
+        throw new Error("Seedance 中转请求未完整包含全部参考音频，已取消发送");
+    }
     try {
         const created = unwrapVideoResponse(
             (
@@ -2008,25 +2014,35 @@ async function resolveSeedanceRelayVideos(videoReferences: ReferenceVideo[]) {
 }
 
 /**
- * Seedance multi-image role labels for OpenAI-compatible relays (openai2api / New API).
- *
- * ComfyUI success contract on openai2api.com (`/v1/video/generations`):
- * - single: top-level `images[]` or `image`
- * - exactly 2: top-level `first_frame` + `last_frame`
- * - 3+: top-level `image` (first) + `reference_images` (rest) — bare multi `images[]` → 400 role required
- * - video: top-level `video` (+ optional `image`)
- *
- * Agent Plan (`/contents/generations/tasks`) still uses content[] all-reference_image.
- * This helper is relay-only (UI / tests).
+ * Seedance media roles for OpenAI-compatible relays (openai2api / New API).
+ * Every media item is sent once through content[] so the relay cannot select a
+ * top-level single-image branch and silently ignore the remaining references.
  */
 export function seedanceRelayImageRole(index: number, total: number) {
-    if (total <= 1) return "first_frame";
+    if (total <= 1) return "reference_image";
     if (total === 2) return index === 0 ? "first_frame" : "last_frame";
-    if (index === 0) return "image";
+    if (index === 0) return "first_frame";
+    if (index === total - 1) return "last_frame";
     return "reference_image";
 }
 
-function buildSeedanceRelayLabeledPrompt(prompt: string, imageCount: number, videoCount: number) {
+function buildSeedanceRelayContent(prompt: string, images: string[] = [], videos: string[] = [], audios: string[] = []) {
+    const content: Array<Record<string, unknown>> = [];
+    const text = prompt.trim();
+    if (text) content.push({ type: "text", text });
+    for (let index = 0; index < images.length; index += 1) {
+        content.push({
+            type: "image_url",
+            image_url: { url: images[index] },
+            role: seedanceRelayImageRole(index, images.length),
+        });
+    }
+    for (const url of videos) content.push({ type: "video_url", video_url: { url }, role: "reference_video" });
+    for (const url of audios) content.push({ type: "audio_url", audio_url: { url }, role: "reference_audio" });
+    return content;
+}
+
+function buildSeedanceRelayLabeledPrompt(prompt: string, imageCount: number, videoCount: number, audioCount = 0) {
     // Reuse Agent Plan labeling so 图片1/视频1 bind to media order.
     // Placeholders only supply length for labels; media bytes go in top-level Comfy fields.
     const imagePlaceholders: ReferenceImage[] = Array.from({ length: imageCount }, (_, index) => ({
@@ -2041,8 +2057,14 @@ function buildSeedanceRelayLabeledPrompt(prompt: string, imageCount: number, vid
         type: "video/*",
         url: "",
     }));
-    const labeled = buildSeedancePromptText(prompt, imagePlaceholders, videoPlaceholders, []);
-    if (imageCount <= 0 && videoCount <= 0) return labeled;
+    const audioPlaceholders: ReferenceAudio[] = Array.from({ length: audioCount }, (_, index) => ({
+        id: `seedance-relay-aud-${index}`,
+        name: `音频${index + 1}`,
+        type: "audio/*",
+        url: "",
+    }));
+    const labeled = buildSeedancePromptText(prompt, imagePlaceholders, videoPlaceholders, audioPlaceholders);
+    if (imageCount <= 0 && videoCount <= 0 && audioCount <= 0) return labeled;
 
     const roleHints: string[] = [];
     if (imageCount === 1 && videoCount <= 0) {
@@ -2061,16 +2083,26 @@ function buildSeedanceRelayLabeledPrompt(prompt: string, imageCount: number, vid
     if (videoCount > 0) {
         roleHints.push(videoCount === 1 ? "视频1 为动作/镜头参考" : `视频1–视频${videoCount} 为动作/镜头参考`);
     }
-    roleHints.push("请保持与参考素材的主体、构图与运动一致，不要替换成无关角色或场景。");
+    if (audioCount > 0) {
+        roleHints.push(audioCount === 1 ? "音频1 为声音/节奏参考" : `音频1–音频${audioCount} 为声音/节奏参考`);
+    }
+    roleHints.push("请保持与参考素材的主体、构图、运动和声音一致，不要替换成无关角色或场景。");
     return `${labeled}\n\n${roleHints.join("。")}。`;
 }
 
+async function resolveSeedanceRelayAudios(audioReferences: ReferenceAudio[]) {
+    const audios = await Promise.all(audioReferences.map((audio) => resolveSeedanceAudioUrl(audio)));
+    if (audios.length !== audioReferences.length || audios.some((audio) => !audio)) {
+        throw new Error("参考音频读取失败，请换一个音频或重新上传");
+    }
+    return audios;
+}
+
 /**
- * Build OpenAI2API / New API Seedance body matching ComfyUI success shapes.
- * Always includes numeric `duration` + string `seconds` (Comfy: wrong seconds type → 400 unmarshal).
- * Never silent-drops selected media; never bare multi `images[]`.
+ * Seedance relay media payload. Keep the legacy single-media fields for
+ * compatibility, while also sending complete arrays for multi-reference relays.
  */
-function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: string, images?: string[], videos?: string[]): Record<string, unknown> {
+function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: string, images?: string[], videos?: string[], audios?: string[]): Record<string, unknown> {
     const duration = normalizeSeedanceDuration(config.videoSeconds);
     // 对齐 openai2api 可用脚本 + Comfy：duration 数字（部分网关拒字符串）、seconds 字符串、durationSeconds 数字。
     const base: Record<string, unknown> = {
@@ -2084,60 +2116,30 @@ function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: stri
     };
     const imageList = images?.length ? images : [];
     const videoList = videos?.length ? videos : [];
+    const audioList = audios?.length ? audios : [];
 
-    // Text-only: proven prompt body (no empty media arrays).
-    if (!imageList.length && !videoList.length) {
+    // Text-only: no empty media arrays.
+    if (!imageList.length && !videoList.length && !audioList.length) {
         return { ...base, prompt };
     }
 
-    // Reference video path (Comfy ProviderReferenceVideo): top-level `video` + optional `image`.
-    if (videoList.length) {
-        const labeledPrompt = buildSeedanceRelayLabeledPrompt(prompt, imageList.length, videoList.length);
-        const body: Record<string, unknown> = {
-            ...base,
-            prompt: labeledPrompt,
-            video: videoList[0],
-        };
-        if (imageList.length === 1) {
-            body.image = imageList[0];
-        } else if (imageList.length > 1) {
-            // Keep every selected image: first as character image, rest as reference_images.
-            body.image = imageList[0];
-            body.reference_images = imageList.slice(1);
-        }
-        return body;
-    }
-
-    // Single image, no video: Comfy I2V — images[] (also accepted as image).
-    if (imageList.length === 1) {
-        return { ...base, prompt, images: imageList, image: imageList[0] };
-    }
-
-    // Exactly 2 images: Comfy first/last frame path.
-    if (imageList.length === 2) {
-        const labeledPrompt = buildSeedanceRelayLabeledPrompt(prompt, 2, 0);
-        return {
-            ...base,
-            prompt: labeledPrompt,
-            first_frame: imageList[0],
-            last_frame: imageList[1],
-        };
-    }
-
-    // 3+ images: Comfy multi-ref — image (first) + reference_images (rest).
-    // Do NOT send bare multi images[] (400: role must be specified).
-    const labeledPrompt = buildSeedanceRelayLabeledPrompt(prompt, imageList.length, 0);
+    const labeledPrompt = buildSeedanceRelayLabeledPrompt(prompt, imageList.length, videoList.length, audioList.length);
     return {
         ...base,
+        // Some relays require top-level prompt even when content[] contains text.
         prompt: labeledPrompt,
-        image: imageList[0],
-        reference_images: imageList.slice(1),
+        content: buildSeedanceRelayContent(labeledPrompt, imageList, videoList, audioList),
     };
 }
 
 /** Exposed for regression tests of the native API-key Seedance relay contract. */
-export function seedanceRelayPayloadForTest(config: AiConfig, model: string, prompt: string, images?: string[], videos?: string[]) {
-    return buildSeedanceRelayPayload(config, model, prompt, images, videos);
+export function seedanceRelayPayloadForTest(config: AiConfig, model: string, prompt: string, images?: string[], videos?: string[], audios?: string[]) {
+    return buildSeedanceRelayPayload(config, model, prompt, images, videos, audios);
+}
+
+function seedanceRelayContentItems(payload: Record<string, unknown>, type: "image_url" | "video_url" | "audio_url") {
+    if (!Array.isArray(payload.content)) return [];
+    return payload.content.filter((item) => item && typeof item === "object" && (item as { type?: string }).type === type);
 }
 
 function seedanceRelayImageCount(payload: Record<string, unknown>) {
@@ -2165,14 +2167,30 @@ function seedanceRelayImageCount(payload: Record<string, unknown>) {
         }
     }
     if (urls.size > 0) return urls.size;
+    if (seedanceRelayContentItems(payload, "image_url").length) return seedanceRelayContentItems(payload, "image_url").length;
     return count;
 }
 
 function seedanceRelayVideoCount(payload: Record<string, unknown>) {
-    let count = 0;
-    if (typeof payload.video === "string" && payload.video) count += 1;
-    if (Array.isArray(payload.videos)) count += (payload.videos as unknown[]).filter((item) => typeof item === "string" && item).length;
-    return count;
+    const urls = new Set<string>();
+    if (typeof payload.video === "string" && payload.video) urls.add(payload.video);
+    for (const field of ["videos", "reference_videos"] as const) {
+        if (!Array.isArray(payload[field])) continue;
+        for (const item of payload[field] as unknown[]) if (typeof item === "string" && item) urls.add(item);
+    }
+    if (urls.size > 0) return urls.size;
+    return seedanceRelayContentItems(payload, "video_url").length;
+}
+
+function seedanceRelayAudioCount(payload: Record<string, unknown>) {
+    const urls = new Set<string>();
+    if (typeof payload.audio === "string" && payload.audio) urls.add(payload.audio);
+    for (const field of ["audios", "reference_audios"] as const) {
+        if (!Array.isArray(payload[field])) continue;
+        for (const item of payload[field] as unknown[]) if (typeof item === "string" && item) urls.add(item);
+    }
+    if (urls.size > 0) return urls.size;
+    return seedanceRelayContentItems(payload, "audio_url").length;
 }
 
 /** Exposed for regression tests: every selected image must remain on the relay body. */
@@ -2189,6 +2207,11 @@ export function payloadKeepsAllSeedanceRelayVideoReferences(payload: Record<stri
         return seedanceRelayVideoCount(payload) === 0;
     }
     return seedanceRelayVideoCount(payload) === expectedCount;
+}
+
+/** Exposed for regression tests: every selected audio reference must remain on the relay body. */
+export function payloadKeepsAllSeedanceRelayAudioReferences(payload: Record<string, unknown>, expectedCount: number) {
+    return seedanceRelayAudioCount(payload) === Math.max(0, expectedCount);
 }
 
 async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
@@ -2438,7 +2461,7 @@ export async function buildGrokEditPayloadCandidates(config: AiConfig, model: st
 }
 
 async function resolveGrokEditVideoUrl(video: ReferenceVideo, options?: { allowLargeDataUrl?: boolean }) {
-    if (isPublicMediaUrl(video.url) || video.url.startsWith("asset://")) return video.url;
+    if (isUpstreamReachableMediaUrl(video.url) || video.url.startsWith("asset://")) return video.url;
     if (video.url?.startsWith("data:")) {
         assertGrokEditDataUrlSize(video.url, video.name || "参考视频", Boolean(options?.allowLargeDataUrl));
         return video.url;
@@ -3006,23 +3029,30 @@ async function buildSeedanceContent(config: AiConfig, prompt: string, references
 
 async function resolveSeedanceImageUrl(config: AiConfig, image: ReferenceImage) {
     const directUrl = image.url || image.dataUrl;
-    if (isPublicMediaUrl(directUrl) || directUrl.startsWith("asset://")) return directUrl;
+    if (isUpstreamReachableMediaUrl(directUrl) || directUrl.startsWith("asset://")) return directUrl;
     const dataUrl = await imageToDataUrl(image);
     if (!dataUrl) throw new Error("参考图读取失败，请换一张图片或重新上传");
     return dataUrl;
 }
 
 async function resolveSeedanceVideoUrl(video: ReferenceVideo) {
-    if (isPublicMediaUrl(video.url) || video.url.startsWith("asset://")) return video.url;
+    if (isUpstreamReachableMediaUrl(video.url) || video.url.startsWith("asset://")) return video.url;
+    if (video.url?.startsWith("data:")) return video.url;
     let blob: Blob | null = null;
     if (video.storageKey) blob = await getMediaBlob(video.storageKey);
-    if (!blob && video.url?.startsWith("blob:")) blob = await (await fetch(video.url)).blob();
-    if (!blob) throw new Error("参考视频必须是公网 URL、素材 ID，或本地已保存的视频");
+    if (!blob && video.url?.startsWith("blob:")) {
+        try {
+            blob = await (await fetch(video.url)).blob();
+        } catch {
+            blob = null;
+        }
+    }
+    if (!blob) throw new Error("参考视频读取失败：请使用本机已落盘的视频节点（或公网 URL / asset://），并重新连接后再生成");
     return blobToDataUrl(blob);
 }
 
 async function resolveSeedanceAudioUrl(audio: ReferenceAudio) {
-    if (isPublicMediaUrl(audio.url) || audio.url.startsWith("asset://")) return audio.url;
+    if (isUpstreamReachableMediaUrl(audio.url) || audio.url.startsWith("asset://")) return audio.url;
     let blob: Blob | null = null;
     if (audio.storageKey) blob = await getMediaBlob(audio.storageKey);
     if (!blob && audio.url?.startsWith("blob:")) blob = await (await fetch(audio.url)).blob();
@@ -3780,6 +3810,15 @@ async function assertVideoBlob(blob: Blob) {
 
 function isPublicMediaUrl(value: string) {
     return /^https?:\/\//i.test(value || "");
+}
+
+function isUpstreamReachableMediaUrl(value: string) {
+    if (!isPublicMediaUrl(value)) return false;
+    try {
+        return !isPrivateOrLoopbackHost(new URL(value).hostname);
+    } catch {
+        return false;
+    }
 }
 
 function delay(ms: number, signal?: AbortSignal) {

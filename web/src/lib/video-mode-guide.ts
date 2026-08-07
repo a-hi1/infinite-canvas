@@ -68,13 +68,13 @@ export const AGNES_VIDEO_MODE_GUIDE: VideoModeGuide = {
 
 export const SEEDANCE_VIDEO_MODE_GUIDE: VideoModeGuide = {
     title: "Seedance",
-    summary: "支持参考图与参考视频；OpenAI 中转与火山 Agent Plan 路径不同。",
-    tags: ["单图 I2V", "双图首尾帧", "多图参考", "参考视频×1"],
+    summary: "支持参考图、参考视频和参考音频；OpenAI 中转与火山 Agent Plan 均按带角色的 content[] 发送。",
+    tags: ["多图参考", "参考视频", "参考音频"],
     bullets: [
-        "OpenAI2API/New API（对齐 Comfy 成功形态）：单图 images[]；2 张=首帧+尾帧；3+ 张=主图+补充参考图",
-        "参考视频中转仅 1 条（顶层 video，可再加 1 张角色图）；参考音频仍需火山 Agent Plan",
-        "参考视频建议 mp4/mov · H.264/H.265 · 2–15s · ≤50MB",
-        "该模型若配置了本地调用脚本会绕过内置多参考，需清空脚本",
+        "OpenAI2API/New API：所有图片进入 content[].image_url；双图标记首帧/尾帧，3+ 图保留首帧、尾帧和中间参考图",
+        "参考视频与音频分别进入 content[].video_url / audio_url，每项都带 reference_video / reference_audio role",
+        "参考视频建议 mp4/mov · H.264/H.265 · 2–15s · ≤50MB；参考音频遵守 2–15s / 总时长限制",
+        "带参考媒体时会绕过纯文生本地调用脚本，确保媒体字段进入内置请求",
     ],
 };
 
