@@ -31,6 +31,23 @@ export const GROK_VIDEO_MODE_GUIDE: VideoModeGuide = {
     ],
 };
 
+/**
+ * openai2api.com 上跑 Grok 时的额外说明。
+ * 本机已按主机 profile 自动适配：Grok → /video/generations；多图发完整 reference_images。
+ * platform 48 仍表示后台「模型所属渠道类型」未绑 xAI/Grok。
+ */
+export const GROK_ON_OPENAI2API_MODE_GUIDE: VideoModeGuide = {
+    title: "Grok · openai2api",
+    summary: "本机只打 /video/generations；/videos/generations=404，/videos=平台 48。",
+    tags: ["仅 /video/generations", "多图完整参考", "渠道类型"],
+    bullets: [
+        "Grok 路径仅 /v1/video/generations（不再试会 404 的 /videos/generations）",
+        "多图最多 7 张，完整 reference_images，不静默只发第一张",
+        "该路径仍 platform 48 → 后台把 grok-imagine-video* 绑 xAI/Grok 视频渠道类型",
+        "多图也可改 Seedance（清空 modelScripts 用内置 Comfy 字段）；Grok 可另建 codex2api",
+    ],
+};
+
 export const SORA_VEO_MODE_GUIDE: VideoModeGuide = {
     title: "Sora / Veo",
     summary: "支持文生与图生，不支持参考视频/音频。",
@@ -51,9 +68,26 @@ export const AGNES_VIDEO_MODE_GUIDE: VideoModeGuide = {
 
 export const SEEDANCE_VIDEO_MODE_GUIDE: VideoModeGuide = {
     title: "Seedance",
-    summary: "支持参考图、参考视频与参考音频。",
-    tags: ["多模态参考"],
-    bullets: ["参考视频建议 mp4/mov · H.264/H.265 · 24–60 FPS"],
+    summary: "支持参考图与参考视频；OpenAI 中转与火山 Agent Plan 路径不同。",
+    tags: ["单图 I2V", "双图首尾帧", "多图参考", "参考视频×1"],
+    bullets: [
+        "OpenAI2API/New API（对齐 Comfy 成功形态）：单图 images[]；2 张=首帧+尾帧；3+ 张=主图+补充参考图",
+        "参考视频中转仅 1 条（顶层 video，可再加 1 张角色图）；参考音频仍需火山 Agent Plan",
+        "参考视频建议 mp4/mov · H.264/H.265 · 2–15s · ≤50MB",
+        "该模型若配置了本地调用脚本会绕过内置多参考，需清空脚本",
+    ],
+};
+
+/** Agent Plan (火山) — multi reference_image identity path. */
+export const SEEDANCE_AGENT_PLAN_MODE_GUIDE: VideoModeGuide = {
+    title: "Seedance · Agent Plan",
+    summary: "火山 Agent Plan 支持多参考图/视频/音频（content 全 reference_*）。",
+    tags: ["多图参考", "参考视频", "参考音频"],
+    bullets: [
+        "参考图按 图片1/2… 编号写入提示词，可多角色/多素材同时参考",
+        "参考视频 mp4/mov · 2–15s · ≤50MB；真人人脸素材请用授权 asset://",
+        "参考音频可与图/视频同用，不能单独只传音频",
+    ],
 };
 
 export const GENERIC_OPENAI_VIDEO_MODE_GUIDE: VideoModeGuide = {

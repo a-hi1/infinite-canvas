@@ -24,7 +24,7 @@ import {
     readClipboardImageBlobs,
     shouldIgnoreClipboardPasteTarget,
 } from "@/lib/clipboard-images";
-import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS, grokResolutionShortfallMessage, grokVideoModeGuide, isGrokVideoConfig, normalizeGrokResolution, videoResolutionDisplay } from "@/lib/grok-video";
+import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS, grokResolutionShortfallMessage, isGrokVideoConfig, normalizeGrokResolution, resolveGrokVideoModeGuide, videoResolutionDisplay } from "@/lib/grok-video";
 import { useLiveElapsedMs } from "@/hooks/use-live-elapsed-ms";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import {
@@ -38,9 +38,19 @@ import {
 import { optimizeGenerationPrompt } from "@/lib/prompt-optimize";
 import { workbenchVideoPromptReferences } from "@/lib/workbench-prompt-references";
 import { clampVideoConfigToCapability } from "@/lib/model-capability";
-import { boolConfig, isSeedanceVideoConfig, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
+import {
+    boolConfig,
+    isArkPlanBaseUrl,
+    isSeedanceVideoConfig,
+    seedanceReferenceLabel,
+    seedanceRelayWorkbenchImageLabel,
+    seedanceVideoReferenceError,
+    seedanceVideoReferenceHint,
+    SEEDANCE_REFERENCE_LIMITS,
+} from "@/lib/seedance-video";
 import {
     GENERIC_OPENAI_VIDEO_MODE_GUIDE,
+    SEEDANCE_AGENT_PLAN_MODE_GUIDE,
     SEEDANCE_VIDEO_MODE_GUIDE,
     type VideoModeGuide,
 } from "@/lib/video-mode-guide";
@@ -202,6 +212,8 @@ export default function VideoPage() {
     const videoRequestChannel = resolveModelChannel(videoRequestConfig, model);
     const agnesMode = isAgnesVideoConfig(videoRequestConfig);
     const seedanceMode = isSeedanceVideoConfig(videoRequestConfig);
+    const seedanceAgentPlanMode = seedanceMode && isArkPlanBaseUrl(videoRequestConfig.baseUrl);
+    const seedanceRelayMode = seedanceMode && !seedanceAgentPlanMode;
     const grokMode = isGrokVideoConfig(videoRequestConfig);
     const soraMode = isSoraVideoConfig(videoRequestConfig);
     const veoMode = isVeoVideoConfig(videoRequestConfig);
@@ -210,26 +222,30 @@ export default function VideoPage() {
     const soraVeoImageMaxBytes = soraVeoMode ? soraVeoReferenceImageMaxBytes(model) : SEEDANCE_REFERENCE_LIMITS.imageMaxBytes;
     const videoProviderLabel = agnesMode
         ? "Agnes Video"
-        : seedanceMode
-          ? "Seedance / Agent Plan"
-          : grokMode
-            ? "Grok Imagine"
-            : soraMode
-              ? "Sora /videos"
-              : veoMode
-                ? "Veo /videos"
-                : "OpenAI /videos";
+        : seedanceAgentPlanMode
+          ? "Seedance · Agent Plan"
+          : seedanceMode
+            ? "Seedance · OpenAI 中转"
+            : grokMode
+              ? "Grok Imagine"
+              : soraMode
+                ? "Sora /videos"
+                : veoMode
+                  ? "Veo /videos"
+                  : "OpenAI /videos";
     const videoUsesCustomScript = Boolean(resolveModelScript(effectiveConfig, model));
     const videoReadinessWarning = getVideoReadinessWarning(videoRequestConfig, model);
     const referenceModeGuide: VideoModeGuide = agnesMode
         ? agnesVideoModeGuide
-        : seedanceMode
-          ? SEEDANCE_VIDEO_MODE_GUIDE
-          : grokMode
-            ? grokVideoModeGuide
-            : soraVeoMode
-              ? soraVeoModeGuide
-              : GENERIC_OPENAI_VIDEO_MODE_GUIDE;
+        : seedanceAgentPlanMode
+          ? SEEDANCE_AGENT_PLAN_MODE_GUIDE
+          : seedanceMode
+            ? SEEDANCE_VIDEO_MODE_GUIDE
+            : grokMode
+              ? resolveGrokVideoModeGuide(videoRequestConfig.baseUrl)
+              : soraVeoMode
+                ? soraVeoModeGuide
+                : GENERIC_OPENAI_VIDEO_MODE_GUIDE;
     const canGenerate = Boolean(prompt.trim());
 
     useEffect(() => {
@@ -248,7 +264,8 @@ export default function VideoPage() {
         if (unsupported.length) message.warning("已忽略不支持的参考素材，请使用图片、mp4/mov 视频或 mp3/wav 音频");
         const imageMax = soraVeoMode ? soraVeoImageMax : SEEDANCE_REFERENCE_LIMITS.images;
         const imageMaxBytes = soraVeoMode ? soraVeoImageMaxBytes : SEEDANCE_REFERENCE_LIMITS.imageMaxBytes;
-        const videoMax = grokMode ? GROK_EDIT_REFERENCE_LIMITS.videos : SEEDANCE_REFERENCE_LIMITS.videos;
+        // openai2api Comfy path only accepts 1 reference video on the built-in relay body.
+        const videoMax = grokMode ? GROK_EDIT_REFERENCE_LIMITS.videos : seedanceRelayMode ? 1 : SEEDANCE_REFERENCE_LIMITS.videos;
         const videoMaxBytes = grokMode ? GROK_EDIT_REFERENCE_LIMITS.videoMaxBytes : SEEDANCE_REFERENCE_LIMITS.videoMaxBytes;
         const audioMax = SEEDANCE_REFERENCE_LIMITS.audios;
         const imageFiles = selectedFiles.filter((file) => file.type.startsWith("image/") && file.size <= imageMaxBytes).slice(0, Math.max(0, imageMax - references.length));
@@ -600,6 +617,19 @@ export default function VideoPage() {
             }
         } else if (!seedanceMode && !agnesMode && (videoReferences.length || audioReferences.length)) {
             message.error("当前模型/渠道不是 Seedance 2.0、火山 Agent Plan 或支持 edits 的 Grok 中转，不能使用参考视频或参考音频，请切换视频模型或移除这些参考素材");
+            return null;
+        }
+        // OpenAI-compatible Seedance relay (openai2api / New API) has no verified audio field.
+        if (seedanceRelayMode && audioReferences.length) {
+            message.error("当前 OpenAI 兼容 Seedance 中转暂不支持参考音频；请切换火山 Agent Plan 渠道，或移除参考音频");
+            return null;
+        }
+        if (seedanceRelayMode && videoReferences.length > 1) {
+            message.error("当前 OpenAI 兼容 Seedance 中转参考视频仅支持 1 条（与 Comfy 成功路径一致）；请只保留一条或切换火山 Agent Plan");
+            return null;
+        }
+        if (videoUsesCustomScript && (videoReferences.length || audioReferences.length)) {
+            message.error("当前视频模型配置了本地调用脚本，脚本暂不支持参考视频/音频；请清空脚本后走内置 Seedance 多参考，或移除这些素材");
             return null;
         }
         const videoReferenceError = seedanceMode ? seedanceVideoReferenceError(videoReferences) : "";
@@ -1029,7 +1059,9 @@ export default function VideoPage() {
                                                     <ImageIcon className="size-5" />
                                                 </div>
                                             )}
-                                            <span className="pointer-events-none absolute left-1 top-1 z-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{seedanceReferenceLabel("image", index)}</span>
+                                            <span className="pointer-events-none absolute left-1 top-1 z-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">
+                                                {seedanceRelayMode ? seedanceRelayWorkbenchImageLabel(index, references.length) : seedanceReferenceLabel("image", index)}
+                                            </span>
                                             <ReferenceOrderButtons index={index} total={references.length} onMove={(offset) => setReferences((value) => moveListItem(value, index, offset))} />
                                             <button type="button" className="absolute right-1 top-1 z-2 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label="移除参考图">
                                                 <Trash2 className="size-3.5" />
@@ -1044,7 +1076,9 @@ export default function VideoPage() {
                                                   ? veoMode
                                                       ? `暂无参考图，可拖入 / Ctrl+V；Veo 图生最多 ${soraVeoImageMax} 张`
                                                       : "暂无参考图，可拖入 / Ctrl+V；Sora 图生仅 1 张首帧"
-                                                  : "暂无参考图，可拖入 / 上传 / Ctrl+V 粘贴，最多 9 张"}
+                                                  : seedanceRelayMode
+                                                    ? "暂无参考图；2 张=首/尾帧，3+ 张=主参考+补充，最多 9 张"
+                                                    : "暂无参考图，可拖入 / 上传 / Ctrl+V 粘贴，最多 9 张"}
                                         </div>
                                     ) : null}
                                 </div>
@@ -1085,7 +1119,9 @@ export default function VideoPage() {
                                     ))}
                                     {!videoReferences.length ? (
                                         <div className="flex min-w-full items-center justify-center text-sm text-stone-500">
-                                            {referenceDragTarget === "video" ? "松开即可上传参考资产" : `暂无参考视频，可拖入文件，最多 ${grokMode ? 1 : 3} 个${grokMode ? "（Grok edits）" : ""}`}
+                                            {referenceDragTarget === "video"
+                                                ? "松开即可上传参考资产"
+                                                : `暂无参考视频，可拖入文件，最多 ${grokMode || seedanceRelayMode ? 1 : 3} 个${grokMode ? "（Grok edits）" : seedanceRelayMode ? "（OpenAI 中转）" : ""}`}
                                         </div>
                                     ) : null}
                                 </div>

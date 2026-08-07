@@ -1,4 +1,4 @@
-import { formatVideoModeGuide, GROK_VIDEO_MODE_GUIDE } from "@/lib/video-mode-guide";
+import { formatVideoModeGuide, GROK_ON_OPENAI2API_MODE_GUIDE, GROK_VIDEO_MODE_GUIDE, type VideoModeGuide } from "@/lib/video-mode-guide";
 import { modelOptionName, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceVideo } from "@/types/media";
 
@@ -124,6 +124,16 @@ export function isCodex2apiBaseUrl(baseUrl: string) {
     return value.includes("codex2api.com") || value.includes("codex2api");
 }
 
+/**
+ * openai2api.com / openai2api 类公网 New API 中转。
+ * Grok 视频应走 /video/generations；/videos 是 OpenAI Sora 适配器，Grok 会 invalid api platform: 48。
+ */
+export function isOpenAI2ApiBaseUrl(baseUrl: string) {
+    const value = baseUrl.toLowerCase();
+    // 不要用裸 "openai2api" 以外的过宽匹配，避免误伤其它域名。
+    return value.includes("openai2api.com") || /(^|[/.])openai2api([/.:]|$)/i.test(value);
+}
+
 export function normalizeGrokAspectRatio(value: string) {
     if (!value || value === "auto" || value === "adaptive") return "16:9";
     if (["16:9", "9:16", "1:1", "4:3", "3:4"].includes(value)) return value;
@@ -192,6 +202,14 @@ export function grokEditVideoReferenceError(videos: ReferenceVideo[]) {
 
 /** Compact guide for the video workbench banner. */
 export const grokVideoModeGuide = GROK_VIDEO_MODE_GUIDE;
+
+/** openai2api 上跑 Grok：路径已固定；platform 48 是后台渠道类型问题。 */
+export const grokOnOpenAI2ApiModeGuide: VideoModeGuide = GROK_ON_OPENAI2API_MODE_GUIDE;
+
+/** Pick Grok banner by host: openai2api needs the channel-type warning. */
+export function resolveGrokVideoModeGuide(baseUrl: string): VideoModeGuide {
+    return isOpenAI2ApiBaseUrl(baseUrl) ? GROK_ON_OPENAI2API_MODE_GUIDE : GROK_VIDEO_MODE_GUIDE;
+}
 
 /** Single-line fallback for callers that still expect a string. */
 export const grokVideoModeHint = formatVideoModeGuide(GROK_VIDEO_MODE_GUIDE);

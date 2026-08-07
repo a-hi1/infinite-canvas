@@ -133,6 +133,19 @@ export function seedanceReferenceLabel(kind: "image" | "video" | "audio", index:
     return `音频${index + 1}`;
 }
 
+/**
+ * Workbench badge for Seedance OpenAI-compatible relays (openai2api / New API).
+ * Comfy success contract: 2 images → first/last frame; 3+ → image + reference_images (not Agent Plan identity lock).
+ */
+export function seedanceRelayWorkbenchImageLabel(index: number, total: number) {
+    if (total <= 1) return seedanceReferenceLabel("image", index);
+    if (total === 2) {
+        return index === 0 ? "图片1·首帧" : "图片2·尾帧";
+    }
+    if (index === 0) return "图片1·主参考";
+    return `图片${index + 1}·补充`;
+}
+
 export function buildSeedancePromptText(prompt: string, images: ReferenceImage[], videos: ReferenceVideo[], audios: ReferenceAudio[]) {
     const labels = [
         ...images.map((_, index) => seedanceReferenceLabel("image", index)),
@@ -149,20 +162,34 @@ export function seedanceVideoReferenceError(videos: ReferenceVideo[]) {
     for (let index = 0; index < videos.length; index += 1) {
         const video = videos[index];
         const label = seedanceReferenceLabel("video", index);
-        if (video.bytes && video.bytes > SEEDANCE_REFERENCE_LIMITS.videoMaxBytes) return `${label} 超过 50MB，请压缩后再上传`;
+        if (video.bytes && video.bytes > SEEDANCE_REFERENCE_LIMITS.videoMaxBytes) {
+            const sizeMb = (video.bytes / (1024 * 1024)).toFixed(1);
+            return `${label} 超过 50MB（当前约 ${sizeMb}MB），请压缩后再上传`;
+        }
         if (video.durationMs) {
-            if (video.durationMs < 2000 || video.durationMs > 15000) return `${label} 时长需要在 2-15 秒之间`;
+            if (video.durationMs < 2000 || video.durationMs > 15000) {
+                const seconds = (video.durationMs / 1000).toFixed(1);
+                return `${label} 时长需要在 2-15 秒之间（当前约 ${seconds}s）`;
+            }
             totalDurationMs += video.durationMs;
         }
+        // Seedance 参考视频约束是单边宽高 + 宽高比，不是输出档位像素总量。
+        // 旧逻辑用 640x640～2206x946 输出表做像素总量拦截，会误杀常见 720x480 / 2K / 4K 素材。
         if (video.width && video.height) {
-            if (video.width < 300 || video.width > 6000 || video.height < 300 || video.height > 6000) return `${label} 宽高需要在 300-6000px 之间`;
+            const sizeLabel = `${video.width}x${video.height}`;
+            if (video.width < 300 || video.width > 6000 || video.height < 300 || video.height > 6000) {
+                return `${label} 宽高需要在 300-6000px 之间（当前 ${sizeLabel}）`;
+            }
             const ratio = video.width / video.height;
-            if (ratio < 0.4 || ratio > 2.5) return `${label} 宽高比需要在 0.4-2.5 之间`;
-            const pixels = video.width * video.height;
-            if (pixels < 640 * 640 || pixels > 2206 * 946) return `${label} 像素总量不符合 Seedance 要求，请转成 480p/720p/1080p 后再上传`;
+            if (ratio < 0.4 || ratio > 2.5) {
+                return `${label} 宽高比需要在 0.4-2.5 之间（当前 ${sizeLabel}，约 ${ratio.toFixed(2)}）`;
+            }
         }
     }
-    if (totalDurationMs > 15000) return "Seedance 参考视频总时长不能超过 15 秒";
+    if (totalDurationMs > 15000) {
+        const seconds = (totalDurationMs / 1000).toFixed(1);
+        return `Seedance 参考视频总时长不能超过 15 秒（当前约 ${seconds}s）`;
+    }
     return "";
 }
 

@@ -190,9 +190,11 @@ docker compose -p ic3011 -f docker-compose.local.yml ps
 
 - `compatProfile`：auto / openai / openai-slim / grok-image / relay-fragile
 - **视频自定义脚本参数**：`params.seconds` 是 number（例如 `4`），用于 Seedance `/v1/video/generations` 的 `duration`；不要退回字符串 `"4"`
-- **原生 API Key Seedance 中转**：OpenAI2API/New API 走 `/v1/video/generations`，`duration:number`；**单图**用 `images[]`；**多图/参考视频**用 `content[]`+`role`（`first_frame`/`last_frame`/`reference_image`/`reference_video`，禁止无 role 的 images 多图）；参考音频仍需火山 Agent Plan。火山 Agent Plan 仍 `/contents/generations/tasks`
+- **原生 API Key Seedance 中转（openai2api，对齐 Comfy + 可用脚本字段）**：`/v1/video/generations`；**必带** `duration:number` + `seconds:string` + `durationSeconds:number` + ratio/resolution/generate_audio；**单图** `images[]`/`image`；**2 张** `first_frame`+`last_frame`；**3+** `image`+`reference_images`；**参考视频**顶层 `video`（可选 `image`），中转仅 1 条；参考音频中转拦截。**非空 modelScripts 绕过内置多参考**——多图/视频请空脚本；用户文生脚本可保留。模型名示例：`doubao-seedance-2-0-260128` / `doubao-seedance-2-0-fast-260128`。火山 Agent Plan 仍 `/contents/generations/tasks`
+- **Seedance 参考视频本地校验**：只查边长 300–6000、宽高比 0.4–2.5、时长 2–15s/总 15s、50MB；**不要**用输出档像素总量（640×640～2206×946）拦参考视频
 - **Grok 图生图**：JSON `POST /images/edits`；有参考图**不再**自动跳 `*-edit`；多参考必须完整 multi-image payload，**禁止静默只发第一张**
-- **Grok 视频**：用户当前选择永远优先；禁止硬塞不存在的模型插队；多参考勿退化首图
+- **视频主机级自动适配**：`web/src/lib/video-host-profile.ts` 按 Base URL 收口 Grok 创建路径 / 是否允许 `/videos` 兜底 / Seedance 中转路径 / 多图压图；扩展新中转优先改 profile，避免散改 `video.ts`
+- **Grok 视频路径（按主机 profile）**：用户当前选择永远优先；禁止硬塞不存在的模型插队；多参考勿退化首图。**codex2api/xAI** → `/videos/generations`；**内网 New API / 公网 openai2api** → **仅** `/video/generations`（openai2api **不再**试 `/videos/generations`，实测 Invalid URL 404），**禁止** Grok 打 `/videos`（platform 48）。旧会话若缓存了 `/videos` 成功路径，New API 风格下会忽略。**公网 Grok 多图：** 本机发完整多图字段；出片依赖渠道类型 + 上游 multi-ref；失败可改 Seedance
 - **Grok 完成态 URL**：官方形状 `video.url`；`status=done` 时 url 可能空串/晚写——优先读嵌套 `video.url`，完成无地址再等约 3 分钟并试 content 下载，禁止过早当失败
 - Sora/Veo：多路径 create/poll；图生禁止无参考文生回退
 - Seedance/Agnes 保留；平台视频仍无参考素材服务端路径

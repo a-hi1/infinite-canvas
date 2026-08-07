@@ -2,6 +2,18 @@
 
 ## Unreleased
 
++ [修复] openai2api Grok 不再试 `POST /v1/videos/generations`（用户实测 `Invalid URL` 404）；主机 profile 仅保留 `/video/generations`。Seedance 中转 body 补 `durationSeconds` 对齐可用脚本字段；`duration` 仍为数字、`seconds` 仍为字符串。
++ [优化] 视频中转**主机级自动适配**（`web/src/lib/video-host-profile.ts`）：`openai2api` / `codex2api` / xAI / 内网 New API / lan-ai 的 Grok 创建路径、是否允许 `/videos` 兜底、Seedance 中转路径、多图压图规则收口到一处；扩展新主机优先改 profile，避免每次散改 `video.ts`。openai2api 上 Grok 多图按中转压 data URI 并发完整 `reference_images`。
++ [优化] openai2api 上 Grok 若 Network 已是 `/video/generations` 仍 `invalid api platform: 48`：错误文案明确为 New API「模型所属渠道类型」未绑 xAI/Grok（不是 body 字段问题）；工作台引导条在该主机显示主机自动适配 + 渠道类型说明；Seedance 仍可用本站。
++ [修复] openai2api Grok `invalid api platform: 48`：公网 `openai2api.com` 按 New API 处理，Grok 只打 `/v1/video/generations`（可再试 `/videos/generations`），**禁止**落到 OpenAI Sora 适配器 `/v1/videos`；内网 New API 同步去掉 Grok 的 `/videos` 兜底；错误文案标明已尝试路径。
++ [修复] openai2api Seedance 对齐同事 Comfy 成功形态：`duration` 数字 + `seconds` 字符串；单图 `images[]`/`image`；双图顶层 `first_frame`+`last_frame`；3+ 图 `image`+`reference_images`（禁止无 role 多图 `images[]`）；参考视频顶层 `video`（可选 `image`）；中转参考视频限 1 条。
++ [优化] openai2api Seedance 正常使用：工作台区分「OpenAI 中转 / Agent Plan」引导；2 张首/尾帧、3+ 主参考/补充角标；中转参考音频与自定义脚本拦截前置。
++ [修复] 原生 Seedance 中转多图/参考视频（历史探测）：曾用 content role；现以 Comfy 顶层字段为准，见上条。
++ [修复] 原生 Seedance 中转多图贴合度：content 形态对齐 Agent Plan（`role` 只写在 content item，不再塞进 `image_url`）；多图取消 1024/280KB 强压，默认保留原图 data URI（仅 >2.5MB 才软压）。
++ [修复] 原生 Seedance 中转多图：撤回与 `content[]` 双发顶层 `images[]`（中转会把无 role 的 images 再展开成 content，触发 `role must be specified`）；多图仅 `prompt` + 带 role 的 `content[]`；单图 `images[]`/文生不变。
++ [优化] Grok 多图参考生视频失败文案：识别 `xAI upstream returned status 404`，明确是中转/上游 multi-reference 能力问题，不是前端未发多图或路径写错；引导先验证单图/文生，多图可改 Seedance。
++ [修复] 原生 Seedance 中转多图/参考视频：`content[]`+role 同时保留顶层 `prompt`，避免中转 `prompt is required`；单图 `images[]` / 文生不变。
++ [修复] Seedance 参考视频本地校验：去掉误用输出档像素总量（640×640～2206×946）拦截；保留 300–6000px 边长、0.4–2.5 宽高比、2–15s/总 15s、50MB；常见 720×480 / 1080p / 4K 可上传。
 + [修复] 原生 Seedance 中转多参考：上游报 `role must be specified for image contents` 时，多图/参考视频改走 `content[]`（`first_frame`/`last_frame`/`reference_image`/`reference_video`）；单图仍用已验证的 `images[]`；文生不变；禁止静默丢素材。
 + [修复] 原生 OpenAI2API/New API Seedance 中转支持参考视频：多参考走 `content[].video_url`；参考音频仍需火山 Agent Plan。
 + [修复] 原生 OpenAI2API/New API Seedance 中转支持图生视频：单图 `images[]`；多图 `content[]`+role；禁止静默丢图或退回无图。

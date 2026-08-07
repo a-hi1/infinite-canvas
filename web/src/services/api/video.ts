@@ -10,11 +10,19 @@ import {
     grokEditVideoReferenceError,
     isCodex2apiBaseUrl,
     isGrokVideoConfig,
+    isOpenAI2ApiBaseUrl,
     isXaiBaseUrl,
     normalizeGrokAspectRatio,
     normalizeGrokDuration,
     normalizeGrokResolution,
 } from "@/lib/grok-video";
+import {
+    describeGrokMultiImagePublicCapability,
+    hostGrokCreatePaths,
+    hostSeedanceRelayCreatePath,
+    isNewApiStyleVideoHost,
+    resolveVideoHostProfile,
+} from "@/lib/video-host-profile";
 import { boolConfig, buildSeedancePromptText, isArkPlanBaseUrl, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import {
     buildSoraVeoFormFieldCandidates,
@@ -1202,10 +1210,13 @@ async function createGrokTask(config: AiConfig, model: string, prompt: string, r
     let lastError: unknown;
     let attemptCount = 0;
     let lastCreateUrl = "";
+    const triedPaths: string[] = [];
+    let platformMismatchPaths = 0;
 
     for (const path of paths) {
         const createUrl = aiApiUrl(config, path);
         lastCreateUrl = createUrl;
+        triedPaths.push(path);
         let pathMissingHits = 0;
         let platformMismatchHits = 0;
 
@@ -1251,6 +1262,9 @@ async function createGrokTask(config: AiConfig, model: string, prompt: string, r
                 // New API：渠道类型/平台不匹配（invalid api platform: 48）——换 body 无意义，立刻换路径
                 if (isNewApiPlatformMismatchError(error)) {
                     platformMismatchHits += 1;
+                    platformMismatchPaths += 1;
+                    // /videos 对 Grok 是 OpenAI Sora 适配器：platform 48 时记为缺失，避免下次又把 /videos 提到首位
+                    if (path === "/videos") rememberGrokCreatePathMissing(config, path);
                     break;
                 }
                 // 多图大 body 在 codex2api 上偶发 “404 page not found”，不能把第一次 404 当成路径不存在而清空后续候选
@@ -1266,12 +1280,12 @@ async function createGrokTask(config: AiConfig, model: string, prompt: string, r
                 }
                 // 只在字段/模型兼容候选之间切换；鉴权/限流等直接结束。
                 if (!isRetryableGrokPayloadError(error)) {
-                    throw new Error(formatGrokCreateError(lastError, references, attemptCount, createUrl));
+                    throw new Error(formatGrokCreateError(lastError, references, attemptCount, createUrl, triedPaths));
                 }
             }
         }
 
-        // 平台不匹配：继续下一条路径（如 /videos → /video/generations），不要刷 30 次 body
+        // 平台不匹配：继续下一条路径（如 /video/generations → /videos/generations），不要刷 30 次 body
         if (platformMismatchHits > 0) continue;
 
         if (pathMissingHits === 0 && lastError && !isRetryableGrokPayloadError(lastError) && !isGrokCreatePathMissingError(lastError, { hasImages: references.length > 0 })) {
@@ -1279,12 +1293,13 @@ async function createGrokTask(config: AiConfig, model: string, prompt: string, r
         }
     }
 
-    // 仅 New API / 非 codex2api 才回退 multipart OpenAI /videos（codex2api 上 /videos 不存在）
-    // 若已明确是 platform mismatch，multipart 同一路径通常仍 48，仍可试一次 /video/generations 失败后的 OpenAI 路径
-    if (shouldTryOpenAiCompatibleGrokFallback(config, lastError, references) && !isNewApiPlatformMismatchError(lastError)) {
+    // 仅非 New API 风格 / 非 codex2api 才回退 OpenAI /videos。
+    // openai2api / 内网 New API 上 /videos 对 Grok 就是 platform 48，禁止再打一次。
+    if (shouldTryOpenAiCompatibleGrokFallback(config, lastError, references) && !isNewApiPlatformMismatchError(lastError) && platformMismatchPaths === 0) {
         try {
             attemptCount += 1;
             lastCreateUrl = aiApiUrl(config, "/videos");
+            triedPaths.push("/videos");
             const openaiTask = await createOpenAIVideoTask(config, model, prompt, references, options);
             rememberGrokCreatePath(config, "/videos", references.length);
             return {
@@ -1300,7 +1315,7 @@ async function createGrokTask(config: AiConfig, model: string, prompt: string, r
         }
     }
 
-    throw new Error(formatGrokCreateError(lastError, references, attemptCount, lastCreateUrl));
+    throw new Error(formatGrokCreateError(lastError, references, attemptCount, lastCreateUrl, triedPaths));
 }
 
 /**
@@ -1894,13 +1909,18 @@ async function createSeedanceTask(config: AiConfig, model: string, prompt: strin
 }
 
 async function createSeedanceRelayTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions): Promise<VideoGenerationTask> {
-    // OpenAI2API / New API Seedance:
-    // - text-only: prompt body (proven)
-    // - single image only: images[] (proven)
-    // - multi image / any video: content[] with role (upstream: "role must be specified for image contents")
+    // OpenAI2API / New API Seedance — align with ComfyUI (comfyui_llm_providers) success contract:
+    // - text-only: prompt + duration(number) + seconds(string)
+    // - single image: images[] (or image)
+    // - multi image: image + reference_images (NOT bare multi images[] → 400 role required)
+    // - first/last (2 images): first_frame + last_frame
+    // - reference video: top-level video (+ optional image)
     // Audio still requires Agent Plan — no verified relay field yet.
     if (audioReferences.length) {
         throw new Error("当前 OpenAI 兼容 Seedance 中转暂不支持参考音频；请切换火山 Agent Plan 渠道");
+    }
+    if (videoReferences.length > 1) {
+        throw new Error("当前 OpenAI 兼容 Seedance 中转参考视频仅支持 1 条（与 Comfy 成功路径一致）；多条请切换火山 Agent Plan");
     }
     if (videoReferences.length) assertSeedanceVideoReferences(videoReferences);
     const createPath = seedanceCreatePath(config);
@@ -1926,7 +1946,8 @@ async function createSeedanceRelayTask(config: AiConfig, model: string, prompt: 
 }
 
 function seedanceCreatePath(config: AiConfig) {
-    return isArkPlanBaseUrl(config.baseUrl) ? "/contents/generations/tasks" : "/video/generations";
+    // Agent Plan 走火山 tasks；中转路径由主机 profile 决定（openai2api/New API → /video/generations）
+    return isArkPlanBaseUrl(config.baseUrl) ? "/contents/generations/tasks" : hostSeedanceRelayCreatePath(config.baseUrl);
 }
 
 /** Exposed for regression tests of native Seedance protocol routing. */
@@ -1937,13 +1958,41 @@ export function seedanceCreatePathForTest(config: AiConfig) {
 /**
  * Resolve every selected relay reference image, preserving order.
  * Throws if any image is unreadable — callers must not filter/drop refs.
+ *
+ * Identity first: do NOT hard-compress multi-ref the way dual-send size limits once forced
+ * (1024 / 0.78 / 280KB made faces/outfits unrecognizable while create still succeeded).
+ * Match Agent Plan: keep full data URI. Only soft-shrink extremely large data URIs to reduce
+ * rare relay body rejections; never drop a ref on compress failure.
  */
 async function resolveSeedanceRelayImages(config: AiConfig, references: ReferenceImage[]) {
-    const images = await Promise.all(references.map((image) => resolveSeedanceImageUrl(config, image)));
+    const multi = references.length > 1;
+    const images = await Promise.all(
+        references.map(async (image) => {
+            const url = await resolveSeedanceImageUrl(config, image);
+            if (!url) return url;
+            // Single-image path untouched (proven). Multi: only touch huge data URIs.
+            if (!multi || !url.startsWith("data:image/")) return url;
+            try {
+                const bytes = approximateDataUrlBytes(url);
+                // ~2.5MB binary ≈ common relay comfort; below that keep original fidelity.
+                if (bytes > 0 && bytes <= 2.5 * 1024 * 1024) return url;
+                return await compressImageDataUrl(url, 2048, 0.9, 2 * 1024 * 1024);
+            } catch {
+                return url;
+            }
+        }),
+    );
     if (images.length !== references.length || images.some((image) => !image)) {
         throw new Error("参考图读取失败，请换一张图片或重新上传");
     }
     return images;
+}
+
+function approximateDataUrlBytes(dataUrl: string) {
+    const base64 = dataUrl.split(",", 2)[1];
+    if (!base64) return 0;
+    const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+    return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
 }
 
 /**
@@ -1959,38 +2008,76 @@ async function resolveSeedanceRelayVideos(videoReferences: ReferenceVideo[]) {
 }
 
 /**
- * Seedance multi-image roles for OpenAI-compatible relays that forward to Volcano content[].
- * 1 image → reference_image; 2 → first/last frame; 3+ → first + reference* + last.
+ * Seedance multi-image role labels for OpenAI-compatible relays (openai2api / New API).
+ *
+ * ComfyUI success contract on openai2api.com (`/v1/video/generations`):
+ * - single: top-level `images[]` or `image`
+ * - exactly 2: top-level `first_frame` + `last_frame`
+ * - 3+: top-level `image` (first) + `reference_images` (rest) — bare multi `images[]` → 400 role required
+ * - video: top-level `video` (+ optional `image`)
+ *
+ * Agent Plan (`/contents/generations/tasks`) still uses content[] all-reference_image.
+ * This helper is relay-only (UI / tests).
  */
 export function seedanceRelayImageRole(index: number, total: number) {
-    if (total <= 1) return "reference_image";
+    if (total <= 1) return "first_frame";
     if (total === 2) return index === 0 ? "first_frame" : "last_frame";
-    if (index === 0) return "first_frame";
-    if (index === total - 1) return "last_frame";
+    if (index === 0) return "image";
     return "reference_image";
 }
 
-function buildSeedanceRelayContent(prompt: string, images: string[] = [], videos: string[] = []) {
-    const content: Array<Record<string, unknown>> = [];
-    const text = prompt.trim();
-    if (text) content.push({ type: "text", text });
-    for (let index = 0; index < images.length; index += 1) {
-        content.push({
-            type: "image_url",
-            image_url: { url: images[index] },
-            role: seedanceRelayImageRole(index, images.length),
-        });
+function buildSeedanceRelayLabeledPrompt(prompt: string, imageCount: number, videoCount: number) {
+    // Reuse Agent Plan labeling so 图片1/视频1 bind to media order.
+    // Placeholders only supply length for labels; media bytes go in top-level Comfy fields.
+    const imagePlaceholders: ReferenceImage[] = Array.from({ length: imageCount }, (_, index) => ({
+        id: `seedance-relay-img-${index}`,
+        name: `图片${index + 1}`,
+        type: "image/*",
+        dataUrl: "",
+    }));
+    const videoPlaceholders: ReferenceVideo[] = Array.from({ length: videoCount }, (_, index) => ({
+        id: `seedance-relay-vid-${index}`,
+        name: `视频${index + 1}`,
+        type: "video/*",
+        url: "",
+    }));
+    const labeled = buildSeedancePromptText(prompt, imagePlaceholders, videoPlaceholders, []);
+    if (imageCount <= 0 && videoCount <= 0) return labeled;
+
+    const roleHints: string[] = [];
+    if (imageCount === 1 && videoCount <= 0) {
+        // single image path uses images[]; keep label only
+        return labeled;
     }
-    for (const url of videos) {
-        content.push({ type: "video_url", video_url: { url }, role: "reference_video" });
+    if (imageCount === 1) {
+        roleHints.push("图片1 作为画面主体/角色参考");
+    } else if (imageCount === 2 && videoCount <= 0) {
+        roleHints.push("图片1 作为视频首帧，图片2 作为视频尾帧；请在两帧之间自然过渡，保持人物与场景一致");
+    } else if (imageCount > 2) {
+        roleHints.push(`图片1 为主参考图，图片2–图片${imageCount} 为补充参考；请保持主体、构图与外观一致`);
+    } else if (imageCount === 2 && videoCount > 0) {
+        roleHints.push("图片1 为主参考，图片2 为补充参考");
     }
-    return content;
+    if (videoCount > 0) {
+        roleHints.push(videoCount === 1 ? "视频1 为动作/镜头参考" : `视频1–视频${videoCount} 为动作/镜头参考`);
+    }
+    roleHints.push("请保持与参考素材的主体、构图与运动一致，不要替换成无关角色或场景。");
+    return `${labeled}\n\n${roleHints.join("。")}。`;
 }
 
+/**
+ * Build OpenAI2API / New API Seedance body matching ComfyUI success shapes.
+ * Always includes numeric `duration` + string `seconds` (Comfy: wrong seconds type → 400 unmarshal).
+ * Never silent-drops selected media; never bare multi `images[]`.
+ */
 function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: string, images?: string[], videos?: string[]): Record<string, unknown> {
+    const duration = normalizeSeedanceDuration(config.videoSeconds);
+    // 对齐 openai2api 可用脚本 + Comfy：duration 数字（部分网关拒字符串）、seconds 字符串、durationSeconds 数字。
     const base: Record<string, unknown> = {
         model: modelOptionName(model),
-        duration: normalizeSeedanceDuration(config.videoSeconds),
+        duration,
+        seconds: String(duration),
+        durationSeconds: duration,
         resolution: normalizeSeedanceResolution(config.vquality, modelOptionName(model)),
         ratio: normalizeSeedanceRatio(config.size),
         generate_audio: boolConfig(config.videoGenerateAudio, true),
@@ -1998,21 +2085,53 @@ function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: stri
     const imageList = images?.length ? images : [];
     const videoList = videos?.length ? videos : [];
 
-    // Text-only: keep proven prompt body (no empty media arrays).
+    // Text-only: proven prompt body (no empty media arrays).
     if (!imageList.length && !videoList.length) {
         return { ...base, prompt };
     }
 
-    // Single image, no video: keep proven images[] path that already works on openai2api.
-    if (imageList.length === 1 && !videoList.length) {
-        return { ...base, prompt, images: imageList };
+    // Reference video path (Comfy ProviderReferenceVideo): top-level `video` + optional `image`.
+    if (videoList.length) {
+        const labeledPrompt = buildSeedanceRelayLabeledPrompt(prompt, imageList.length, videoList.length);
+        const body: Record<string, unknown> = {
+            ...base,
+            prompt: labeledPrompt,
+            video: videoList[0],
+        };
+        if (imageList.length === 1) {
+            body.image = imageList[0];
+        } else if (imageList.length > 1) {
+            // Keep every selected image: first as character image, rest as reference_images.
+            body.image = imageList[0];
+            body.reference_images = imageList.slice(1);
+        }
+        return body;
     }
 
-    // Multi-image and/or video: upstream requires content[] with role on each media item.
-    // Never fall back to images[] without role (that yields InvalidParameter on multi-ref).
+    // Single image, no video: Comfy I2V — images[] (also accepted as image).
+    if (imageList.length === 1) {
+        return { ...base, prompt, images: imageList, image: imageList[0] };
+    }
+
+    // Exactly 2 images: Comfy first/last frame path.
+    if (imageList.length === 2) {
+        const labeledPrompt = buildSeedanceRelayLabeledPrompt(prompt, 2, 0);
+        return {
+            ...base,
+            prompt: labeledPrompt,
+            first_frame: imageList[0],
+            last_frame: imageList[1],
+        };
+    }
+
+    // 3+ images: Comfy multi-ref — image (first) + reference_images (rest).
+    // Do NOT send bare multi images[] (400: role must be specified).
+    const labeledPrompt = buildSeedanceRelayLabeledPrompt(prompt, imageList.length, 0);
     return {
         ...base,
-        content: buildSeedanceRelayContent(prompt, imageList, videoList),
+        prompt: labeledPrompt,
+        image: imageList[0],
+        reference_images: imageList.slice(1),
     };
 }
 
@@ -2021,29 +2140,55 @@ export function seedanceRelayPayloadForTest(config: AiConfig, model: string, pro
     return buildSeedanceRelayPayload(config, model, prompt, images, videos);
 }
 
-function seedanceRelayContentItems(payload: Record<string, unknown>, type: "image_url" | "video_url") {
-    if (!Array.isArray(payload.content)) return [];
-    return payload.content.filter((item) => item && typeof item === "object" && (item as { type?: string }).type === type);
+function seedanceRelayImageCount(payload: Record<string, unknown>) {
+    let count = 0;
+    if (typeof payload.image === "string" && payload.image) count += 1;
+    if (typeof payload.first_frame === "string" && payload.first_frame) count += 1;
+    if (typeof payload.last_frame === "string" && payload.last_frame) count += 1;
+    if (Array.isArray(payload.images)) count += (payload.images as unknown[]).filter((item) => typeof item === "string" && item).length;
+    if (Array.isArray(payload.reference_images)) {
+        count += (payload.reference_images as unknown[]).filter((item) => typeof item === "string" && item).length;
+    }
+    // Single-image path may set both `images[]` and `image` for compatibility — count unique urls.
+    const urls = new Set<string>();
+    if (typeof payload.image === "string" && payload.image) urls.add(payload.image);
+    if (typeof payload.first_frame === "string" && payload.first_frame) urls.add(payload.first_frame);
+    if (typeof payload.last_frame === "string" && payload.last_frame) urls.add(payload.last_frame);
+    if (Array.isArray(payload.images)) {
+        for (const item of payload.images as unknown[]) {
+            if (typeof item === "string" && item) urls.add(item);
+        }
+    }
+    if (Array.isArray(payload.reference_images)) {
+        for (const item of payload.reference_images as unknown[]) {
+            if (typeof item === "string" && item) urls.add(item);
+        }
+    }
+    if (urls.size > 0) return urls.size;
+    return count;
+}
+
+function seedanceRelayVideoCount(payload: Record<string, unknown>) {
+    let count = 0;
+    if (typeof payload.video === "string" && payload.video) count += 1;
+    if (Array.isArray(payload.videos)) count += (payload.videos as unknown[]).filter((item) => typeof item === "string" && item).length;
+    return count;
 }
 
 /** Exposed for regression tests: every selected image must remain on the relay body. */
 export function payloadKeepsAllSeedanceRelayReferences(payload: Record<string, unknown>, expectedCount: number) {
     if (expectedCount <= 0) {
-        const noImagesArray = !Array.isArray(payload.images) || (payload.images as unknown[]).length === 0;
-        return noImagesArray && seedanceRelayContentItems(payload, "image_url").length === 0;
+        return seedanceRelayImageCount(payload) === 0;
     }
-    if (Array.isArray(payload.images) && (payload.images as unknown[]).length === expectedCount) return true;
-    return seedanceRelayContentItems(payload, "image_url").length === expectedCount;
+    return seedanceRelayImageCount(payload) === expectedCount;
 }
 
 /** Exposed for regression tests: every selected video must remain on the relay body. */
 export function payloadKeepsAllSeedanceRelayVideoReferences(payload: Record<string, unknown>, expectedCount: number) {
     if (expectedCount <= 0) {
-        const noVideosArray = !Array.isArray(payload.videos) || (payload.videos as unknown[]).length === 0;
-        return noVideosArray && seedanceRelayContentItems(payload, "video_url").length === 0;
+        return seedanceRelayVideoCount(payload) === 0;
     }
-    if (Array.isArray(payload.videos) && (payload.videos as unknown[]).length === expectedCount) return true;
-    return seedanceRelayContentItems(payload, "video_url").length === expectedCount;
+    return seedanceRelayVideoCount(payload) === expectedCount;
 }
 
 async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
@@ -2110,27 +2255,8 @@ function grokCreatePathCacheKey(config: AiConfig, imageCount = 0) {
 }
 
 /**
- * 直连内网/回环的 OpenAI 兼容站（常见 New API），且不是同源 /lan-ai（家里 Grok2API 隧道）。
- * 这类站 Grok 视频路径是 /video/generations，/videos/generations 实测不存在。
- */
-function isLikelyPrivateNewApiBaseUrl(baseUrl: string) {
-    if (isCodex2apiBaseUrl(baseUrl) || isXaiBaseUrl(baseUrl) || isLanAiBaseUrl(baseUrl) || isAiProxyBaseUrl(baseUrl)) return false;
-    const raw = baseUrl.trim();
-    if (!raw) return false;
-    try {
-        const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`);
-        return isPrivateOrLoopbackHost(url.hostname);
-    } catch {
-        return false;
-    }
-}
-
-/**
- * Grok 创建路径候选（仅 generation，不含 video edits）：
- * - 多参考图/图生/文生都是 generation，不是 POST /videos/edits
- * - 公网 codex2api / xAI：/videos/generations（该站 /videos 不存在）
- * - 内网 New API：Grok 只走 /video/generations，再可试 /videos；跳过不存在的 /videos/generations
- * - 其它中转：/videos 与 generations 都试
+ * Grok 创建路径候选（仅 generation，不含 video edits）。
+ * 路径表由 video-host-profile 按主机决定，避免每个中转散改；缓存/负缓存逻辑保留。
  */
 export function grokCreatePathCandidates(config: AiConfig, imageCount = 0, model = "") {
     const cacheKey = grokCreatePathCacheKey(config, imageCount);
@@ -2138,35 +2264,32 @@ export function grokCreatePathCandidates(config: AiConfig, imageCount = 0, model
     const missing = grokCreatePathMissingState.get(hostKey);
     const cachedRaw = grokCreatePathState.get(cacheKey);
     const cached = cachedRaw && missing?.has(cachedRaw) ? undefined : cachedRaw;
-    const codex = isCodex2apiBaseUrl(config.baseUrl);
-    const xai = isXaiBaseUrl(config.baseUrl);
-    const privateNewApi = isLikelyPrivateNewApiBaseUrl(config.baseUrl);
-    const modelName = modelOptionName(model || config.videoModel || config.model || "").toLowerCase();
-    const grokLike = modelName.includes("grok") || modelName.includes("imagine-video") || modelName.includes("imagine_video");
+    const profile = resolveVideoHostProfile(config.baseUrl);
+    const modelName = modelOptionName(model || config.videoModel || config.model || "");
+    const grokLike =
+        modelName.toLowerCase().includes("grok") ||
+        modelName.toLowerCase().includes("imagine-video") ||
+        modelName.toLowerCase().includes("imagine_video");
     // 多图参考仍走 generation；edits 是「已有视频 + 提示词」能力，禁止混用
-    let ordered: string[];
-    if (codex || xai) {
-        ordered = ["/videos/generations"];
-    } else if (grokLike && privateNewApi) {
-        // 192.168 New API：/video/generations 存在；/videos/generations 404；/videos 易 platform 48
-        ordered = ["/video/generations", "/videos"];
-    } else if (grokLike) {
-        // 公网/未知 Grok 中转：仍保留三代路径兜底，但 singular 优先
-        ordered = ["/video/generations", "/videos/generations", "/videos"];
-    } else if (privateNewApi) {
-        ordered = ["/videos", "/video/generations"];
-    } else {
-        ordered = ["/videos", "/video/generations", "/videos/generations"];
+    let ordered = hostGrokCreatePaths(config.baseUrl, modelName);
+    // 非 Grok 误入时 hostGrokCreatePaths 已给 Sora 向路径；Grok 且 profile 禁止 /videos 时再滤一次
+    if (grokLike && !profile.allowGrokOpenAiVideosFallback) {
+        ordered = ordered.filter((path) => path !== "/videos");
+        if (!ordered.length) ordered = ["/video/generations"];
     }
     if (missing?.size) {
         ordered = ordered.filter((path) => !missing.has(path));
         if (!ordered.length) {
             // 全部被负缓存时回退到原始首选，避免空列表卡死（例如后台刚开通路由）
-            ordered = codex || xai ? ["/videos/generations"] : grokLike ? ["/video/generations"] : ["/videos"];
+            ordered = hostGrokCreatePaths(config.baseUrl, modelName).filter((path) => (grokLike && !profile.allowGrokOpenAiVideosFallback ? path !== "/videos" : true));
+            if (!ordered.length) ordered = grokLike ? ["/video/generations"] : ["/videos"];
         }
     }
-    if (!cached || !ordered.includes(cached)) return ordered;
-    return [cached, ...ordered.filter((path) => path !== cached)];
+    // 成功缓存若是 /videos 且当前是 New API 风格 Grok，忽略（旧会话可能误缓存）
+    const newApiStyle = isNewApiStyleVideoHost(config.baseUrl);
+    const safeCached = cached === "/videos" && grokLike && newApiStyle ? undefined : cached;
+    if (!safeCached || !ordered.includes(safeCached)) return ordered;
+    return [safeCached, ...ordered.filter((path) => path !== safeCached)];
 }
 
 /** New API：模型绑定的渠道类型与当前 API 路径不匹配（如 Grok 打到 OpenAI Videos）。 */
@@ -2434,8 +2557,8 @@ function isGrokCreatePathMissingError(error: unknown, context?: { hasImages?: bo
 }
 
 function shouldTryOpenAiCompatibleGrokFallback(config: AiConfig, error: unknown, references: ReferenceImage[]) {
-    // codex2api 的 /v1/videos 不存在，回退只会浪费请求
-    if (isCodex2apiBaseUrl(config.baseUrl) || isXaiBaseUrl(config.baseUrl)) return false;
+    // 主机 profile：codex/xAI/openai2api/内网 New API 等禁止把 Grok 落到 OpenAI /videos
+    if (!resolveVideoHostProfile(config.baseUrl).allowGrokOpenAiVideosFallback) return false;
     if (!error) return true;
     return isGrokCreatePathMissingError(error, { hasImages: references.length > 0 }) || isInvalidUrlGrokError(error) || (axios.isAxiosError(error) && [400, 404, 405, 415, 422].includes(error.response?.status || 0));
 }
@@ -2453,7 +2576,9 @@ export async function buildGrokPayloadCandidates(config: AiConfig, model: string
     // 用当前渠道已拉取的模型列表约束候选，避免硬塞上游不存在的 grok-imagine-video-1.5
     const channel = resolveModelChannel(config, model);
     const models = grokModelCandidates(modelName, imageInputs.length, config.baseUrl, channel.models || []);
-    const relay = isCodex2apiBaseUrl(config.baseUrl) || isLanAiBaseUrl(config.baseUrl);
+    // openai2api / codex / lan-ai 等多图大 body 按中转压字段与体积
+    const hostProfile = resolveVideoHostProfile(config.baseUrl);
+    const relay = hostProfile.compressLikeRelay || isCodex2apiBaseUrl(config.baseUrl) || isLanAiBaseUrl(config.baseUrl);
     // 清晰度候选：用户所选优先（选 1080p 就先发 1080p）。失败再降 720/480；不再静默把图生 1080 改成先 720。
     const resolutions = grokResolutionCandidates(resolution, imageInputs.length, config.baseUrl);
 
@@ -2657,8 +2782,13 @@ async function resolveGrokImageInput(image: ReferenceImage, config?: AiConfig, i
 }
 
 async function resolveGrokReferenceImageUrl(image: ReferenceImage, config?: AiConfig, imageCount = 1, prompt = "") {
-    // codex2api / 多图 / 长提示词：过大 data URI 会 400，甚至网关直接 404 page not found
-    const relay = Boolean(config && (isCodex2apiBaseUrl(config.baseUrl) || isLanAiBaseUrl(config.baseUrl)));
+    // 中转主机（含 openai2api）/ 多图 / 长提示词：过大 data URI 会 400，甚至网关直接 404 page not found
+    const relay = Boolean(
+        config &&
+            (resolveVideoHostProfile(config.baseUrl).compressLikeRelay ||
+                isCodex2apiBaseUrl(config.baseUrl) ||
+                isLanAiBaseUrl(config.baseUrl)),
+    );
     const multi = imageCount > 1;
     const longPrompt = prompt.trim().length >= 900;
     // 中转单图默认就压紧一些；长提示词再收一档（不截断 prompt）
@@ -2742,7 +2872,7 @@ function openAiVideoSizeFromGrok(aspectRatio: string, resolution: string) {
     return height >= 1080 ? "1920x1080" : height <= 480 ? "854x480" : "1280x720";
 }
 
-function formatGrokCreateError(error: unknown, references: ReferenceImage[], attemptCount: number, createUrl = "") {
+function formatGrokCreateError(error: unknown, references: ReferenceImage[], attemptCount: number, createUrl = "", triedPaths: string[] = []) {
     const detail = readAxiosError(error, "Grok 视频任务创建失败");
     const status = axios.isAxiosError(error) ? error.response?.status : undefined;
     const requestUrl = createUrl || (axios.isAxiosError(error) ? String(error.config?.url || "") : "");
@@ -2754,39 +2884,62 @@ function formatGrokCreateError(error: unknown, references: ReferenceImage[], att
     const multiReference = references.length > 1;
     const rateLimited = isGrokRateLimitError(error) || /rate.?limit|too many requests|限流|额度不足|quota/i.test(detail);
     const vagueUpstream = /upstream returned status 400|status 400|invalid_request_error/i.test(detail);
+    const xaiUpstream404 = /xai upstream returned status 404|upstream returned status 404/i.test(detail);
     const modelMissing = /model_not_found|模型不存在|unknown model/i.test(detail);
     const plain404 = /404 page not found|page not found/i.test(detail);
     const platformMismatch = isNewApiPlatformMismatchError(error) || /invalid api platform/i.test(detail);
-    const pathMissing = ((status === 404 && !modelMissing) || isGrokCreatePathMissingError(error, { hasImages: references.length > 0 })) && !plain404 && !platformMismatch;
+    const pathMissing = ((status === 404 && !modelMissing) || isGrokCreatePathMissingError(error, { hasImages: references.length > 0 })) && !plain404 && !platformMismatch && !xaiUpstream404;
     const invalidUrl = isInvalidUrlGrokError(error);
-    const newApiHint = /new_api|oneapi|x-new-api|invalid api platform/i.test(`${requestUrl} ${detail}`) || /192\.168\.\d+\.\d+:\d+/.test(requestUrl);
+    const openAi2Hint = /openai2api/i.test(requestUrl);
+    const newApiHint = openAi2Hint || /new_api|oneapi|x-new-api|invalid api platform/i.test(`${requestUrl} ${detail}`) || /192\.168\.\d+\.\d+:\d+/.test(requestUrl);
     const codexHint = /codex2api/i.test(requestUrl);
+    const tried = triedPaths.length ? `已尝试路径：${triedPaths.join(" → ")}` : "";
     const tips = [
         detail,
-        requestUrl ? `请求地址：${requestUrl}` : "",
+        requestUrl ? `最后请求地址：${requestUrl}` : "",
+        tried,
         attemptCount > 1 ? `已按多种创建路径/字段/模型组合重试 ${attemptCount} 次` : "",
         rateLimited
             ? "上游限流（rate_limit）：换字段/模型重试无效，请等待 1–3 分钟后再点一次生成，不要连续连点。此前多次失败重试会占用额度"
             : "",
-        platformMismatch
-            ? "New API「invalid api platform」= 模型绑定的渠道类型与请求路径不匹配（不是参考图字段问题）。本应用对内网 New API 的 Grok 只走 POST /v1/video/generations（跳过不存在的 /videos/generations），并避免在 /v1/videos 上反复刷 body。请在 New API 后台把 grok-imagine-video 配到支持 xAI/Grok 视频的渠道类型，且上游能处理 multi-reference generation；公网 codex2api 渠道请用 https://www.codex2api.com/v1 + /videos/generations"
+        multiReference && xaiUpstream404 && !rateLimited
+            ? `这是中转转发到 xAI 后上游返回 404，不是本应用路径写错。前端已对 2+ 张参考图走 multi-reference generation（完整 reference_images/images/image_urls，不静默只发首图）。${describeGrokMultiImagePublicCapability(requestUrl.includes("openai2api") ? "http://openai2api.com:3000" : requestUrl.includes("codex2api") ? "https://www.codex2api.com" : requestUrl).summary}`
             : "",
-        multiReference && (plain404 || status === 400 || status === 404) && !platformMismatch && !rateLimited
-            ? "多参考图生视频是 generation：公网 codex2api 用 /v1/videos/generations；内网 New API 只走 /v1/video/generations。常见失败：① data URI 过大 ② 模型未开通 multi-reference。本应用会压小本地参考图并只发完整多图字段"
+        multiReference && xaiUpstream404 && !rateLimited
+            ? "可立刻验证：① 同一渠道减到 1 张参考图（单图 I2V）是否成功 ② 纯文生是否成功。若单图/文生可通、多图必 404，则是渠道 multi-reference 能力问题，不是前端未发多图"
+            : "",
+        multiReference && xaiUpstream404 && !rateLimited
+            ? "替代方案：多图参考改用 Seedance（本应用已支持 image+reference_images）；或换支持 Grok multi-reference 的渠道/家里 Grok2API；不要把多图误当 /videos/edits"
+            : "",
+        platformMismatch && openAi2Hint
+            ? [
+                  "【本机适配】Grok 在 openai2api 只打 POST /v1/video/generations（已确认 /videos/generations 为 Invalid URL 404，/videos 为 platform 48）。body：model/prompt/duration/aspect_ratio/resolution；多图完整 reference_images。",
+                  "若 Network 已是 /video/generations 仍 invalid api platform: 48：后台「模型所属渠道类型」未绑 xAI/Grok 视频，不是本机字段写错。",
+                  "处理：把 grok-imagine-video* 绑到 xAI/Grok 视频渠道类型；或 Grok 改用 https://www.codex2api.com/v1。多图也可先改 Seedance（同站 /video/generations + Comfy 字段）。",
+              ].join("")
+            : "",
+        platformMismatch && !openAi2Hint
+            ? "New API「invalid api platform」= 模型绑定的渠道类型与请求路径不匹配（不是参考图/body 字段问题）。本应用对内网 New API / openai2api 的 Grok 只走 POST /v1/video/generations，禁止落到 /v1/videos 与不存在的 /videos/generations。请在后台把 grok-imagine-video* 配到支持 xAI/Grok 视频的渠道类型；公网 codex2api 用 /videos/generations"
+            : "",
+        multiReference && openAi2Hint && (invalidUrl || pathMissing || plain404) && !platformMismatch && !rateLimited
+            ? "openai2api 上 Grok 多图只认 /v1/video/generations。若该路径 Invalid URL/404：多半是该模型未开通 multi-reference generation，不是前端只发首图。可先测同渠道纯文生/单图；多图建议改 Seedance（清空 modelScripts 走内置，或使用已验证的 Seedance 脚本仅文生）"
+            : "",
+        multiReference && (plain404 || status === 400 || status === 404) && !xaiUpstream404 && !platformMismatch && !rateLimited && !openAi2Hint
+            ? "多参考图生视频是 generation：路径按主机自动选（codex2api→/videos/generations；openai2api/New API→仅 /video/generations）。常见失败：① data URI 过大 ② 模型未开通 multi-reference。本应用会压小本地参考图并只发完整多图字段，不静默只发第一张"
             : "",
         invalidUrl || pathMissing
-            ? "创建路径不被当前中转识别。双渠道约定：codex2api → /v1/videos/generations；内网 New API Grok → /v1/video/generations（不是 /videos/edits，也不试不存在的 /videos/generations）。Base URL 只写到主机或 /v1"
+            ? "创建路径不被当前中转识别。本机按主机自动适配：codex2api → /v1/videos/generations；openai2api/内网 New API Grok → 仅 /v1/video/generations（不打 /videos/generations、不打 /videos）。Base URL 写到主机或 /v1 均可"
             : "",
-        codexHint && multiReference
+        codexHint && multiReference && !xaiUpstream404
             ? "当前渠道为 codex2api：多图参考只打 /v1/videos/generations，不会回退到不存在的 /v1/videos，也不会误走 /videos/edits"
             : "",
         newApiHint && !platformMismatch
-            ? "当前像 New API / 内网中转：Grok 只走 POST /v1/video/generations，OpenAI 视频模型才优先 /v1/videos"
+            ? "当前像 New API / openai2api / 内网中转：Grok 只走 POST /v1/video/generations，OpenAI/Sora 视频才优先 /v1/videos"
             : "",
-        multiReference
+        multiReference && !xaiUpstream404
             ? `当前为 ${references.length} 张参考图：已只尝试真正的多图 generation 字段（reference_images / images / image_urls），不会静默改成只发第一张，也不会改走视频编辑接口`
             : "",
-        multiReference && vagueUpstream && !rateLimited
+        multiReference && vagueUpstream && !rateLimited && !xaiUpstream404
             ? "若上游不支持多参考图，请减到 1 张本地小图，或换支持 multi-reference 的 Grok 视频模型/渠道"
             : "",
         modelMissing ? "模型名在上游不存在：请在渠道里「拉取模型」，选用列表中真实的视频模型；请求以你当前选择为先，1.5/i2v 仅作渠道内可选兜底，不会硬塞不存在的名字" : "",
@@ -2797,8 +2950,8 @@ function formatGrokCreateError(error: unknown, references: ReferenceImage[], att
         vagueUpstream && !hasLocalReference && !hasRemoteOnlyReference && !invalidUrl && !platformMismatch && !rateLimited
             ? "纯文生 400：请确认模型在渠道列表中、时长 5–10 秒、分辨率 720p；套餐需开通该视频模型"
             : "",
-        vagueUpstream && !invalidUrl && !platformMismatch && !rateLimited
-            ? "中转只返回笼统 400 时：公网测 POST /v1/videos/generations；内网 New API 测 POST /v1/video/generations；多图在同一路径加 reference_images"
+        vagueUpstream && !invalidUrl && !platformMismatch && !rateLimited && !xaiUpstream404
+            ? "中转只返回笼统 400 时：公网 codex2api 测 POST /v1/videos/generations；内网 New API / openai2api 测 POST /v1/video/generations；多图在同一路径加 reference_images"
             : "",
     ].filter(Boolean);
     return tips.join("。");
