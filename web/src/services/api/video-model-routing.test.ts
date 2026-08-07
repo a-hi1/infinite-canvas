@@ -110,16 +110,9 @@ describe("native Seedance relay payload", () => {
             "sora::seedance2",
             "释放虚式茈",
         );
-        expect(payload).toEqual({
-            model: "seedance2",
-            prompt: "释放虚式茈",
-            duration: 4,
-            seconds: "4",
-            durationSeconds: 4,
-            resolution: "1080p",
-            ratio: "16:9",
-            generate_audio: true,
-        });
+        expect(payload).not.toHaveProperty("images");
+        expect(payload).not.toHaveProperty("content");
+        expect(payload).not.toHaveProperty("metadata");
         expect(typeof payload.duration).toBe("number");
         expect(typeof payload.seconds).toBe("string");
         expect(typeof payload.durationSeconds).toBe("number");
@@ -152,8 +145,7 @@ describe("native Seedance relay payload", () => {
             image_url: { url: images[0] },
             role: "reference_image",
         });
-        expect(payload).not.toHaveProperty("images");
-        expect(payload).not.toHaveProperty("image");
+        expect(payload.metadata).toMatchObject({ content });
         expect(payloadKeepsAllSeedanceRelayReferences(payload, 1)).toBe(true);
     });
 
@@ -167,8 +159,7 @@ describe("native Seedance relay payload", () => {
             { type: "image_url", image_url: { url: images[0] }, role: "first_frame" },
             { type: "image_url", image_url: { url: images[1] }, role: "last_frame" },
         ]);
-        expect(payload).not.toHaveProperty("image");
-        expect(payload).not.toHaveProperty("reference_images");
+        expect(payload.metadata).toMatchObject({ content });
         expect(payloadKeepsAllSeedanceRelayReferences(payload, 2)).toBe(true);
     });
 
@@ -182,8 +173,7 @@ describe("native Seedance relay payload", () => {
         expect(imageItems).toHaveLength(3);
         expect(imageItems.map((item) => item.role)).toEqual(["first_frame", "reference_image", "last_frame"]);
         expect(imageItems.map((item) => (item.image_url as { url: string }).url)).toEqual(images);
-        expect(payload).not.toHaveProperty("images");
-        expect(payload).not.toHaveProperty("reference_images");
+        expect(payload.metadata).toMatchObject({ content: payload.content });
         expect(payloadKeepsAllSeedanceRelayReferences(payload, 3)).toBe(true);
     });
 
@@ -199,7 +189,7 @@ describe("native Seedance relay payload", () => {
         const content = payload.content as Array<Record<string, unknown>>;
         expect(content.filter((item) => item.type === "video_url")).toHaveLength(1);
         expect(content.find((item) => item.type === "video_url")?.role).toBe("reference_video");
-        expect(payload).not.toHaveProperty("video");
+        expect(payload.metadata).toMatchObject({ content });
         expect(String(payload.prompt)).toContain("视频1");
         expect(String(payload.prompt)).toContain("视频参考");
         expect(payloadKeepsAllSeedanceRelayVideoReferences(payload, 1)).toBe(true);
@@ -237,8 +227,7 @@ describe("native Seedance relay payload", () => {
         expect(imageItems.map((item) => (item.image_url as { url: string }).url)).toEqual(["data:image/png;base64,aaa", "data:image/png;base64,bbb", "data:image/png;base64,ccc"]);
         expect(imageItems.map((item) => item.role)).toEqual(["first_frame", "reference_image", "last_frame"]);
         expect(payload).not.toHaveProperty("images");
-        expect(payload).not.toHaveProperty("image");
-        expect(payload).not.toHaveProperty("reference_images");
+        expect(payload.metadata).toMatchObject({ content: payload.content });
         expect(payloadKeepsAllSeedanceRelayReferences(payload, 3)).toBe(true);
     });
 
@@ -258,7 +247,7 @@ describe("native Seedance relay payload", () => {
         expect(payloadKeepsAllSeedanceRelayReferences(body, 2)).toBe(true);
     });
 
-    it("posts one reference video as top-level video and never drops media", async () => {
+    it("posts one reference video in role-labeled content and metadata", async () => {
         const videoReferences: ReferenceVideo[] = [
             { id: "v1", name: "a.mp4", type: "video/mp4", url: "https://example.com/a.mp4", durationMs: 4000 },
         ];
@@ -275,11 +264,11 @@ describe("native Seedance relay payload", () => {
         expect(content.filter((item) => item.type === "video_url")).toHaveLength(1);
         expect(content.find((item) => item.type === "video_url")?.role).toBe("reference_video");
         expect(content.find((item) => item.type === "video_url")?.video_url).toEqual({ url: "https://example.com/a.mp4" });
-        expect(payload).not.toHaveProperty("video");
+        expect(payload.metadata).toMatchObject({ content: payload.content });
         expect(payloadKeepsAllSeedanceRelayVideoReferences(payload, 1)).toBe(true);
     });
 
-    it("posts multiple relay reference videos and preserves every video item", async () => {
+    it("posts multiple relay reference videos in role-labeled content and metadata", async () => {
         const videoReferences: ReferenceVideo[] = [
             { id: "v1", name: "a.mp4", type: "video/mp4", url: "https://example.com/a.mp4", durationMs: 4000 },
             { id: "v2", name: "b.mp4", type: "video/mp4", url: "https://example.com/b.mp4", durationMs: 5000 },
@@ -293,6 +282,7 @@ describe("native Seedance relay payload", () => {
             "https://example.com/a.mp4",
             "https://example.com/b.mp4",
         ]);
+        expect(body.metadata).toMatchObject({ content: body.content });
         expect(payloadKeepsAllSeedanceRelayVideoReferences(body, 2)).toBe(true);
     });
 
@@ -307,8 +297,7 @@ describe("native Seedance relay payload", () => {
         const content = body.content as Array<Record<string, unknown>>;
         expect(content.filter((item) => item.type === "image_url")).toHaveLength(1);
         expect(content.filter((item) => item.type === "video_url")).toHaveLength(1);
-        expect(body).not.toHaveProperty("video");
-        expect(body).not.toHaveProperty("image");
+        expect(body.metadata).toMatchObject({ content: body.content });
         expect(String(body.prompt)).toContain("图片1");
         expect(String(body.prompt)).toContain("视频1");
         expect(String(body.prompt)).toContain("混合参考");
@@ -350,6 +339,7 @@ describe("native Seedance relay payload", () => {
             "https://example.com/a.mp3",
             "https://example.com/b.mp3",
         ]);
+        expect(body.metadata).toMatchObject({ content: body.content });
         expect(payloadKeepsAllSeedanceRelayAudioReferences(body, 2)).toBe(true);
     });
 

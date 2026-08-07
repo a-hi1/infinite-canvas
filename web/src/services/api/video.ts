@@ -1916,8 +1916,8 @@ async function createSeedanceTask(config: AiConfig, model: string, prompt: strin
 
 async function createSeedanceRelayTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions): Promise<VideoGenerationTask> {
     // OpenAI2API / New API Seedance relay contract: keep every selected reference in
-    // explicit top-level fields. The relay accepts image/image(s), video(s), and
-    // audio(s); never fall back to a text-only request when media is selected.
+    // role-labeled content[] and mirror it into metadata.content for New API. Never
+    // fall back to a text-only request when media is selected.
     if (videoReferences.length) assertSeedanceVideoReferences(videoReferences);
     if (audioReferences.length) assertSeedanceAudioReferences(audioReferences);
     const createPath = seedanceCreatePath(config);
@@ -2044,7 +2044,7 @@ function buildSeedanceRelayContent(prompt: string, images: string[] = [], videos
 
 function buildSeedanceRelayLabeledPrompt(prompt: string, imageCount: number, videoCount: number, audioCount = 0) {
     // Reuse Agent Plan labeling so 图片1/视频1 bind to media order.
-    // Placeholders only supply length for labels; media bytes go in top-level Comfy fields.
+    // Placeholders only supply length for labels; media bytes are sent in content[].
     const imagePlaceholders: ReferenceImage[] = Array.from({ length: imageCount }, (_, index) => ({
         id: `seedance-relay-img-${index}`,
         name: `图片${index + 1}`,
@@ -2099,8 +2099,8 @@ async function resolveSeedanceRelayAudios(audioReferences: ReferenceAudio[]) {
 }
 
 /**
- * Seedance relay media payload. Keep the legacy single-media fields for
- * compatibility, while also sending complete arrays for multi-reference relays.
+ * Seedance relay media payload. Direct relays consume content[]; New API
+ * preserves metadata and expands metadata.content into the provider request.
  */
 function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: string, images?: string[], videos?: string[], audios?: string[]): Record<string, unknown> {
     const duration = normalizeSeedanceDuration(config.videoSeconds);
@@ -2124,11 +2124,19 @@ function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: stri
     }
 
     const labeledPrompt = buildSeedanceRelayLabeledPrompt(prompt, imageList.length, videoList.length, audioList.length);
+    const content = buildSeedanceRelayContent(labeledPrompt, imageList, videoList, audioList);
     return {
         ...base,
-        // Some relays require top-level prompt even when content[] contains text.
+        // Direct relays consume content; New API keeps metadata and expands it into
+        // the Doubao provider request after its TaskSubmitReq drops unknown fields.
         prompt: labeledPrompt,
-        content: buildSeedanceRelayContent(labeledPrompt, imageList, videoList, audioList),
+        content,
+        metadata: {
+            content,
+            resolution: base.resolution,
+            ratio: base.ratio,
+            generate_audio: base.generate_audio,
+        },
     };
 }
 
@@ -2142,76 +2150,39 @@ function seedanceRelayContentItems(payload: Record<string, unknown>, type: "imag
     return payload.content.filter((item) => item && typeof item === "object" && (item as { type?: string }).type === type);
 }
 
-function seedanceRelayImageCount(payload: Record<string, unknown>) {
-    let count = 0;
-    if (typeof payload.image === "string" && payload.image) count += 1;
-    if (typeof payload.first_frame === "string" && payload.first_frame) count += 1;
-    if (typeof payload.last_frame === "string" && payload.last_frame) count += 1;
-    if (Array.isArray(payload.images)) count += (payload.images as unknown[]).filter((item) => typeof item === "string" && item).length;
-    if (Array.isArray(payload.reference_images)) {
-        count += (payload.reference_images as unknown[]).filter((item) => typeof item === "string" && item).length;
-    }
-    // Single-image path may set both `images[]` and `image` for compatibility — count unique urls.
-    const urls = new Set<string>();
-    if (typeof payload.image === "string" && payload.image) urls.add(payload.image);
-    if (typeof payload.first_frame === "string" && payload.first_frame) urls.add(payload.first_frame);
-    if (typeof payload.last_frame === "string" && payload.last_frame) urls.add(payload.last_frame);
-    if (Array.isArray(payload.images)) {
-        for (const item of payload.images as unknown[]) {
-            if (typeof item === "string" && item) urls.add(item);
-        }
-    }
-    if (Array.isArray(payload.reference_images)) {
-        for (const item of payload.reference_images as unknown[]) {
-            if (typeof item === "string" && item) urls.add(item);
-        }
-    }
-    if (urls.size > 0) return urls.size;
-    if (seedanceRelayContentItems(payload, "image_url").length) return seedanceRelayContentItems(payload, "image_url").length;
-    return count;
+function seedanceRelayMetadataContentItems(payload: Record<string, unknown>, type: "image_url" | "video_url" | "audio_url") {
+    const metadata = payload.metadata;
+    if (!metadata || typeof metadata !== "object") return [];
+    const content = (metadata as { content?: unknown }).content;
+    if (!Array.isArray(content)) return [];
+    return content.filter((item) => item && typeof item === "object" && (item as { type?: string }).type === type);
 }
 
-function seedanceRelayVideoCount(payload: Record<string, unknown>) {
-    const urls = new Set<string>();
-    if (typeof payload.video === "string" && payload.video) urls.add(payload.video);
-    for (const field of ["videos", "reference_videos"] as const) {
-        if (!Array.isArray(payload[field])) continue;
-        for (const item of payload[field] as unknown[]) if (typeof item === "string" && item) urls.add(item);
-    }
-    if (urls.size > 0) return urls.size;
-    return seedanceRelayContentItems(payload, "video_url").length;
-}
-
-function seedanceRelayAudioCount(payload: Record<string, unknown>) {
-    const urls = new Set<string>();
-    if (typeof payload.audio === "string" && payload.audio) urls.add(payload.audio);
-    for (const field of ["audios", "reference_audios"] as const) {
-        if (!Array.isArray(payload[field])) continue;
-        for (const item of payload[field] as unknown[]) if (typeof item === "string" && item) urls.add(item);
-    }
-    if (urls.size > 0) return urls.size;
-    return seedanceRelayContentItems(payload, "audio_url").length;
-}
-
-/** Exposed for regression tests: every selected image must remain on the relay body. */
+/** Exposed for regression tests: every selected image must exist in both relay representations. */
 export function payloadKeepsAllSeedanceRelayReferences(payload: Record<string, unknown>, expectedCount: number) {
-    if (expectedCount <= 0) {
-        return seedanceRelayImageCount(payload) === 0;
-    }
-    return seedanceRelayImageCount(payload) === expectedCount;
+    const expected = Math.max(0, expectedCount);
+    const contentCount = seedanceRelayContentItems(payload, "image_url").length;
+    const metadataCount = seedanceRelayMetadataContentItems(payload, "image_url").length;
+    if (expected === 0) return contentCount === 0 && metadataCount === 0;
+    return contentCount === expected && metadataCount === expected;
 }
 
-/** Exposed for regression tests: every selected video must remain on the relay body. */
+/** Exposed for regression tests: every selected video must exist in both relay representations. */
 export function payloadKeepsAllSeedanceRelayVideoReferences(payload: Record<string, unknown>, expectedCount: number) {
-    if (expectedCount <= 0) {
-        return seedanceRelayVideoCount(payload) === 0;
-    }
-    return seedanceRelayVideoCount(payload) === expectedCount;
+    const expected = Math.max(0, expectedCount);
+    const contentCount = seedanceRelayContentItems(payload, "video_url").length;
+    const metadataCount = seedanceRelayMetadataContentItems(payload, "video_url").length;
+    if (expected === 0) return contentCount === 0 && metadataCount === 0;
+    return contentCount === expected && metadataCount === expected;
 }
 
-/** Exposed for regression tests: every selected audio reference must remain on the relay body. */
+/** Exposed for regression tests: every selected audio must exist in both relay representations. */
 export function payloadKeepsAllSeedanceRelayAudioReferences(payload: Record<string, unknown>, expectedCount: number) {
-    return seedanceRelayAudioCount(payload) === Math.max(0, expectedCount);
+    const expected = Math.max(0, expectedCount);
+    const contentCount = seedanceRelayContentItems(payload, "audio_url").length;
+    const metadataCount = seedanceRelayMetadataContentItems(payload, "audio_url").length;
+    if (expected === 0) return contentCount === 0 && metadataCount === 0;
+    return contentCount === expected && metadataCount === expected;
 }
 
 async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
