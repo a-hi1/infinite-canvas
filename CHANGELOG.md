@@ -2,6 +2,11 @@
 
 ## Unreleased
 
++ [修复] 画布节点提示词文本框支持滚轮滚动：不再被画布容器的全局 wheel 拦截吃掉；长提示词可在框内滚动查看。
++ [修复] 画布已有内容节点编辑提示词时即时写回 `metadata.prompt`；切换节点或关闭面板不再丢失未点生成的草稿。
++ [修复] openai2api Grok 视频主机适配补全：创建、轮询和完成态内容下载统一由 host profile 决定，只使用 singular `/video/generations` 系列路径；多参考首包使用 New API 明确保留的完整 `images[]`，不再让未知 `reference_images` 被忽略后仍创建无参考任务；用户选择 1080p 时始终先请求 1080p，只有创建失败才降档。
++ [修复] openai2api GPT 生图自动识别为脆弱中转：文生图去掉易被网关拒绝的严格输出字段并保留瘦身重试；多参考编辑旁路每次携带全部 `images[]`，禁止只保留第一张或用纯文生结果冒充多参考成功。
+
 + [修复] openai2api/New API Seedance 参考媒体完整适配：带媒体请求统一发送带 role 的 `content[]`，并镜像写入 `metadata.content` 供 New API Doubao 适配器展开（图 `image_url`、视频 `video_url`、音频 `audio_url`）；不再混发会让中转只进入首图分支的顶层 `image`/`video`/`audio` 字段；双图使用 `first_frame`/`last_frame`，3+ 图完整保留首尾与中间参考图。前端不再因音频或多视频提前拦截，所有媒体解析失败均在请求前报错且不退回文生。
 + [修复] openai2api Grok 不再试 `POST /v1/videos/generations`（用户实测 `Invalid URL` 404）；主机 profile 仅保留 `/video/generations`。Seedance 中转 body 补 `durationSeconds` 对齐可用脚本字段；`duration` 仍为数字、`seconds` 仍为字符串。
 + [优化] 视频中转**主机级自动适配**（`web/src/lib/video-host-profile.ts`）：`openai2api` / `codex2api` / xAI / 内网 New API / lan-ai 的 Grok 创建路径、是否允许 `/videos` 兜底、Seedance 中转路径、多图压图规则收口到一处；扩展新主机优先改 profile，避免每次散改 `video.ts`。openai2api 上 Grok 多图按中转压 data URI 并发完整 `reference_images`。

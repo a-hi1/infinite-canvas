@@ -19,6 +19,8 @@ import {
 import {
     describeGrokMultiImagePublicCapability,
     hostGrokCreatePaths,
+    hostGrokContentPaths,
+    hostGrokPollPaths,
     hostSeedanceRelayCreatePath,
     isNewApiStyleVideoHost,
     resolveVideoHostProfile,
@@ -1527,21 +1529,7 @@ class GrokPollNotReadyError extends Error {
  */
 export function grokPollPathTemplates(config: AiConfig): string[] {
     const hostKey = hostKeyOf(config);
-    const codex = isCodex2apiBaseUrl(config.baseUrl);
-    const xai = isXaiBaseUrl(config.baseUrl);
-    let ordered: string[];
-    if (codex || xai) {
-        ordered = ["/videos/{id}", "/videos/generations?request_id={id}", "/videos/generations?id={id}"];
-    } else {
-        ordered = [
-            "/videos/{id}",
-            "/videos/generations/{id}",
-            "/video/generations/{id}",
-            "/videos/generations?request_id={id}",
-            "/videos?request_id={id}",
-            "/videos/generations?id={id}",
-        ];
-    }
+    const ordered = hostGrokPollPaths(config.baseUrl);
     const cached = grokPollPathState.get(hostKey);
     if (!cached || !ordered.includes(cached)) return ordered;
     return [cached, ...ordered.filter((path) => path !== cached)];
@@ -1561,13 +1549,15 @@ async function fetchGrokTaskState(config: AiConfig, task: VideoGenerationTask, o
         throw new Error("Grok 任务缺少 request_id，无法查询状态。请查看创建接口响应是否返回 request_id/id");
     }
 
-    const templates = grokPollPathTemplates(config);
+    const templates = hostGrokPollPaths(config.baseUrl);
+    const cachedTemplate = grokPollPathState.get(hostKey);
+    const orderedTemplates = cachedTemplate && templates.includes(cachedTemplate) ? [cachedTemplate, ...templates.filter((path) => path !== cachedTemplate)] : templates;
     let sawTaskNotFound = false;
     let sawRouteMissing = false;
     let routeExists = false;
     let lastError: unknown;
 
-    for (const template of templates) {
+    for (const template of orderedTemplates) {
         const path = materializeGrokPollPath(template, task.id);
         try {
             const response = await axios.get<ApiGrokVideoResponse>(aiApiUrl(config, path), {
@@ -1696,15 +1686,7 @@ function isGrokPollSoftNotFoundPayload(payload: unknown) {
 }
 
 async function tryFetchGrokVideoContent(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationResult | null> {
-    const id = encodeURIComponent(task.id);
-    // codex 上 content 路径可能不存在；失败则静默跳过
-    const paths = [
-        `/videos/${id}/content`,
-        `/videos/${id}/download`,
-        `/videos/${id}/file`,
-        `/videos/generations/${id}/content`,
-        `/video/generations/${id}/content`,
-    ];
+    const paths = hostGrokContentPaths(config.baseUrl).map((template) => materializeGrokPollPath(template, task.id));
     for (const path of paths) {
         try {
             const response = await axios.get<Blob>(aiApiUrl(config, path), {
@@ -2655,6 +2637,11 @@ export async function buildGrokPayloadCandidates(config: AiConfig, model: string
                 if (!payloads.some((item) => JSON.stringify(item) === key)) payloads.push(payload);
             };
             // 1) 用户所选清晰度 + 全量参考图（字段变体）
+            // New API 的 TaskSubmitReq 明确保留 images[]；openai2api 首包用它，避免未知
+            // reference_images 被 Go JSON 解码忽略后仍创建成无参考任务。
+            if (hostProfile.kind === "openai2api" || hostProfile.kind === "private-new-api") {
+                push({ model: nextModel, prompt: labeledPrompt, images: urls, duration, seconds: String(duration), aspect_ratio: aspectRatio, resolution });
+            }
             push({
                 model: nextModel,
                 prompt: labeledPrompt,

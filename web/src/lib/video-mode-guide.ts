@@ -33,7 +33,7 @@ export const GROK_VIDEO_MODE_GUIDE: VideoModeGuide = {
 
 /**
  * openai2api.com 上跑 Grok 时的额外说明。
- * 本机已按主机 profile 自动适配：Grok → /video/generations；多图发完整 reference_images。
+ * 本机已按主机 profile 自动适配：Grok → /video/generations；New API 多图首包发完整 images[]。
  * platform 48 仍表示后台「模型所属渠道类型」未绑 xAI/Grok。
  */
 export const GROK_ON_OPENAI2API_MODE_GUIDE: VideoModeGuide = {
@@ -42,7 +42,7 @@ export const GROK_ON_OPENAI2API_MODE_GUIDE: VideoModeGuide = {
     tags: ["仅 /video/generations", "多图完整参考", "渠道类型"],
     bullets: [
         "Grok 路径仅 /v1/video/generations（不再试会 404 的 /videos/generations）",
-        "多图最多 7 张，完整 reference_images，不静默只发第一张",
+        "多图最多 7 张，New API 首包完整发送 images[]，不静默只发第一张",
         "该路径仍 platform 48 → 后台把 grok-imagine-video* 绑 xAI/Grok 视频渠道类型",
         "多图也可改 Seedance（清空 modelScripts 用内置 Comfy 字段）；Grok 可另建 codex2api",
     ],

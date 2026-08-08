@@ -34,6 +34,10 @@ export type VideoHostProfile = {
   grokCreatePaths: string[];
   /** Grok 是否允许把 /videos 当 generation 兜底（OpenAI Sora 适配器）。openai2api/New API 禁止。 */
   allowGrokOpenAiVideosFallback: boolean;
+  /** Grok 轮询路径模板（`{id}` 会替换为任务 ID），按优先级。 */
+  grokPollPaths: string[];
+  /** Grok 完成无 URL 时的内容下载路径模板，按优先级。 */
+  grokContentPaths: string[];
   /** Seedance 非 Agent Plan 中转创建路径 */
   seedanceRelayCreatePath: string;
   /**
@@ -98,6 +102,13 @@ const OPENAI2API_PROFILE: VideoHostProfile = {
   // 仅 singular generations；勿再试 /videos/generations（用户实测 404 Invalid URL）
   grokCreatePaths: ["/video/generations"],
   allowGrokOpenAiVideosFallback: false,
+  grokPollPaths: [
+    "/video/generations/{id}",
+    "/video/generations?task_id={id}",
+    "/video/generations?request_id={id}",
+    "/video/generations?id={id}",
+  ],
+  grokContentPaths: ["/video/generations/{id}/content"],
   seedanceRelayCreatePath: "/video/generations",
   // 本机发完整多图；出片仍依赖该站 Grok 渠道类型 + 上游 multi-ref
   grokMultiImageCapability: "supported",
@@ -109,6 +120,8 @@ const CODEX2API_PROFILE: VideoHostProfile = {
   compressLikeRelay: true,
   grokCreatePaths: ["/videos/generations"],
   allowGrokOpenAiVideosFallback: false,
+  grokPollPaths: ["/videos/{id}", "/videos/generations?request_id={id}", "/videos/generations?id={id}"],
+  grokContentPaths: ["/videos/{id}/content", "/videos/{id}/download", "/videos/{id}/file"],
   seedanceRelayCreatePath: "/video/generations",
   // 历史：多图常 xAI upstream 404（套餐/映射未开 multi-ref）
   grokMultiImageCapability: "fragile",
@@ -120,6 +133,8 @@ const XAI_PROFILE: VideoHostProfile = {
   compressLikeRelay: false,
   grokCreatePaths: ["/videos/generations"],
   allowGrokOpenAiVideosFallback: false,
+  grokPollPaths: ["/videos/{id}", "/videos/generations?request_id={id}", "/videos/generations?id={id}"],
+  grokContentPaths: ["/videos/{id}/content", "/videos/{id}/download", "/videos/{id}/file"],
   seedanceRelayCreatePath: "/video/generations",
   grokMultiImageCapability: "supported",
 };
@@ -130,6 +145,8 @@ const LAN_AI_PROFILE: VideoHostProfile = {
   compressLikeRelay: true,
   grokCreatePaths: ["/videos/generations", "/video/generations"],
   allowGrokOpenAiVideosFallback: false,
+  grokPollPaths: ["/videos/{id}", "/videos/generations?request_id={id}", "/videos/generations?id={id}", "/video/generations/{id}"],
+  grokContentPaths: ["/videos/{id}/content", "/videos/{id}/download", "/videos/{id}/file", "/video/generations/{id}/content"],
   seedanceRelayCreatePath: "/video/generations",
   grokMultiImageCapability: "supported",
 };
@@ -141,6 +158,8 @@ const PRIVATE_NEW_API_PROFILE: VideoHostProfile = {
   // 实测 /videos/generations 404；/videos → platform 48
   grokCreatePaths: ["/video/generations"],
   allowGrokOpenAiVideosFallback: false,
+  grokPollPaths: ["/video/generations/{id}", "/video/generations?task_id={id}", "/video/generations?request_id={id}", "/video/generations?id={id}"],
+  grokContentPaths: ["/video/generations/{id}/content"],
   seedanceRelayCreatePath: "/video/generations",
   grokMultiImageCapability: "unknown",
 };
@@ -151,6 +170,21 @@ const GENERIC_PROFILE: VideoHostProfile = {
   compressLikeRelay: false,
   grokCreatePaths: ["/video/generations", "/videos/generations", "/videos"],
   allowGrokOpenAiVideosFallback: true,
+  grokPollPaths: [
+    "/videos/{id}",
+    "/videos/generations/{id}",
+    "/video/generations/{id}",
+    "/videos/generations?request_id={id}",
+    "/videos?request_id={id}",
+    "/videos/generations?id={id}",
+  ],
+  grokContentPaths: [
+    "/videos/{id}/content",
+    "/videos/{id}/download",
+    "/videos/{id}/file",
+    "/videos/generations/{id}/content",
+    "/video/generations/{id}/content",
+  ],
   seedanceRelayCreatePath: "/video/generations",
   grokMultiImageCapability: "unknown",
 };
@@ -205,6 +239,16 @@ export function hostGrokCreatePaths(baseUrl: string, model = ""): string[] {
     return ["/videos", "/video/generations", "/videos/generations"];
   }
   return [...profile.grokCreatePaths];
+}
+
+/** Grok 轮询路径模板（主机 profile 驱动）。 */
+export function hostGrokPollPaths(baseUrl: string): string[] {
+  return [...resolveVideoHostProfile(baseUrl).grokPollPaths];
+}
+
+/** Grok 完成无 URL 时的内容下载路径模板（主机 profile 驱动）。 */
+export function hostGrokContentPaths(baseUrl: string): string[] {
+  return [...resolveVideoHostProfile(baseUrl).grokContentPaths];
 }
 
 /** Seedance 中转创建路径（非 Agent Plan）。 */

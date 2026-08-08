@@ -173,6 +173,20 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, c
                 aria-disabled={disabled || undefined}
                 className={`${className || ""} relative z-1 overflow-y-auto whitespace-pre-wrap break-words outline-none ${disabled ? "pointer-events-none cursor-not-allowed opacity-60" : ""}`}
                 style={{ ...style, cursor: disabled ? "not-allowed" : "text" }}
+                onWheel={(event) => {
+                    // 画布层会拦截 wheel；提示词框自己滚动，并阻止冒泡到缩放。
+                    event.stopPropagation();
+                    const editor = editorRef.current;
+                    if (!editor) return;
+                    const { scrollTop, scrollHeight, clientHeight } = editor;
+                    const maxScrollTop = Math.max(0, scrollHeight - clientHeight);
+                    if (maxScrollTop <= 0) return;
+                    const next = Math.min(maxScrollTop, Math.max(0, scrollTop + event.deltaY));
+                    if (next !== scrollTop) {
+                        event.preventDefault();
+                        editor.scrollTop = next;
+                    }
+                }}
                 onInput={() => {
                     if (disabled) return;
                     // 组合输入中也刷新占位可见性，但不向父级 emit（避免打断 IME）

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   describeGrokMultiImagePublicCapability,
+  hostGrokContentPaths,
   hostGrokCreatePaths,
+  hostGrokPollPaths,
   hostSeedanceRelayCreatePath,
   isNewApiStyleVideoHost,
   isPrivateNewApiBaseUrl,
@@ -31,6 +33,14 @@ describe("video-host-profile", () => {
     expect(hostGrokCreatePaths(base, "grok-imagine-video-1.5")).toEqual(["/video/generations"]);
     expect(hostGrokCreatePaths(base, "grok-imagine-video")).not.toContain("/videos");
     expect(hostGrokCreatePaths(base, "grok-imagine-video")).not.toContain("/videos/generations");
+    expect(hostGrokPollPaths(base)).toEqual([
+      "/video/generations/{id}",
+      "/video/generations?task_id={id}",
+      "/video/generations?request_id={id}",
+      "/video/generations?id={id}",
+    ]);
+    expect(hostGrokPollPaths(base).every((path) => !path.startsWith("/videos"))).toBe(true);
+    expect(hostGrokContentPaths(base)).toEqual(["/video/generations/{id}/content"]);
     expect(hostSeedanceRelayCreatePath(base)).toBe("/video/generations");
   });
 

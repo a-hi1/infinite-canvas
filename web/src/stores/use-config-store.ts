@@ -465,7 +465,7 @@ export function resolveChannelCompatProfile(baseUrl: string, profile?: ChannelCo
     } catch {
         /* ignore */
     }
-    if (value.includes("codex2api") || value.includes("chatgpt2api")) return "relay-fragile";
+    if (value.includes("codex2api") || value.includes("chatgpt2api") || value.includes("openai2api.com")) return "relay-fragile";
     return "openai";
 }
 

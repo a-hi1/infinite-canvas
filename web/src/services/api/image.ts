@@ -1477,17 +1477,18 @@ async function requestEditOnFragileRelay(requestConfig: AiConfig, config: AiConf
     }
 
     let primary = "";
+    let referenceDataUrls: string[] = [];
     try {
-        const dataUrl = await ensureLocalImageDataUrl(references[0]);
-        if (dataUrl.startsWith("data:image/")) {
-            primary = await compressImageDataUrl(dataUrl, FRAGILE_REF_MAX_EDGE, FRAGILE_REF_JPEG_QUALITY);
-            // 仍偏大再压一档，降低 JSON body 被中转掐断概率
-            if (primary.length > 400_000) {
-                primary = await compressImageDataUrl(primary, 512, 0.65);
-            }
-        } else {
-            primary = dataUrl;
-        }
+        referenceDataUrls = await Promise.all(
+            references.map(async (reference) => {
+                const dataUrl = await ensureLocalImageDataUrl(reference);
+                if (!dataUrl.startsWith("data:image/")) throw new Error("参考图无法读取为本地图片，请重新上传本地图片后再试图生图");
+                let compressed = await compressImageDataUrl(dataUrl, FRAGILE_REF_MAX_EDGE, FRAGILE_REF_JPEG_QUALITY);
+                if (compressed.length > 400_000) compressed = await compressImageDataUrl(compressed, 512, 0.65);
+                return compressed;
+            }),
+        );
+        primary = referenceDataUrls[0] || "";
     } catch (error) {
         throw new Error(error instanceof Error ? error.message : "参考图无法读取，请重新上传本地图片后再试图生图");
     }
@@ -1497,10 +1498,15 @@ async function requestEditOnFragileRelay(requestConfig: AiConfig, config: AiConf
 
     const fullPrompt = withSystemPrompt(requestConfig, requestPrompt);
     // 只试 2 个带图候选（dataURL / raw b64），避免多次 CONNECTION_CLOSED 刷控制台
-    const candidates: Record<string, unknown>[] = [
-        { model: requestConfig.model, prompt: fullPrompt, n: 1, response_format: "b64_json", image: primary },
-        { model: requestConfig.model, prompt: fullPrompt, n: 1, response_format: "b64_json", image: dataUrlToRawBase64(primary) },
-    ];
+    const candidates: Record<string, unknown>[] = references.length > 1
+        ? [
+            { model: requestConfig.model, prompt: fullPrompt, n: 1, response_format: "b64_json", images: referenceDataUrls },
+            { model: requestConfig.model, prompt: fullPrompt, n: 1, response_format: "b64_json", images: referenceDataUrls.map(dataUrlToRawBase64) },
+        ]
+        : [
+            { model: requestConfig.model, prompt: fullPrompt, n: 1, response_format: "b64_json", image: primary },
+            { model: requestConfig.model, prompt: fullPrompt, n: 1, response_format: "b64_json", image: dataUrlToRawBase64(primary) },
+        ];
 
     let lastError: unknown = editsError;
     let allConnectionClosed = isConnectionClosedError(editsError);
@@ -1525,8 +1531,8 @@ async function requestEditOnFragileRelay(requestConfig: AiConfig, config: AiConf
         }
     }
 
-    // 最后手段：该中转对「带图」请求一律掐连接时，降级纯文生图（仅 fragile + 无蒙版）
-    if (!options?.signal?.aborted && allConnectionClosed) {
+    // 最后手段仅限单参考图：多参考必须全量参与，不能用纯文生结果冒充成功。
+    if (!options?.signal?.aborted && allConnectionClosed && references.length === 1) {
         try {
             const degradedPrompt = `${requestPrompt}\n\n（说明：当前中转不支持参考图编辑，已按文生图生成，未实际使用参考图像素。）`;
             const images = await requestGeneration({ ...config, model: requestConfig.model, count: String(n) }, degradedPrompt, options);

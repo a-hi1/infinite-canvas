@@ -15,6 +15,7 @@ import {
     payloadKeepsAllSeedanceRelayAudioReferences,
     payloadKeepsAllSeedanceRelayReferences,
     payloadKeepsAllSeedanceRelayVideoReferences,
+    pollVideoGenerationTask,
     seedanceRelayImageRole,
     readGrokTaskId,
     resolveVideoModelForReferences,
@@ -403,6 +404,42 @@ return "https://example.com/script-only.mp4";`,
 });
 
 describe("Grok video model routing", () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        vi.stubGlobal("window", globalThis);
+    });
+
+    it("creates and polls openai2api Grok only through singular video paths", async () => {
+        const channel: ModelChannel = {
+            id: "public",
+            name: "openai2api",
+            baseUrl: "http://openai2api.com:3000",
+            apiKey: "test-only",
+            apiFormat: "openai",
+            compatProfile: "auto",
+            models: ["grok-imagine-video"],
+        };
+        const config = {
+            ...withChannels([channel], "public::grok-imagine-video"),
+            videoSeconds: "8",
+            size: "16:9",
+            vquality: "1080p",
+        };
+        vi.mocked(axios.post).mockResolvedValueOnce({ data: { id: "grok-task" } });
+        vi.mocked(axios.get).mockResolvedValueOnce({
+            data: { id: "grok-task", status: "completed", video: { url: "https://cdn.example.com/result.mp4" } },
+        });
+
+        const task = await createVideoGenerationTask(config, "cinematic shot", [], [], []);
+        expect(vi.mocked(axios.post).mock.calls[0]?.[0]).toBe("http://openai2api.com:3000/v1/video/generations");
+        expect(vi.mocked(axios.post).mock.calls[0]?.[1]).toMatchObject({ resolution: "1080p" });
+
+        const state = await pollVideoGenerationTask(config, task);
+        expect(state.status).toBe("completed");
+        expect(vi.mocked(axios.get).mock.calls[0]?.[0]).toBe("http://openai2api.com:3000/v1/video/generations/grok-task");
+        expect(vi.mocked(axios.get).mock.calls.some(([url]) => String(url).includes("/v1/videos"))).toBe(false);
+    });
+
     it("keeps channel qualification when auto-switching from image model to base video (not 1.5 first)", () => {
         const channel: ModelChannel = {
             id: "home",
@@ -897,6 +934,43 @@ describe("Grok video model routing", () => {
 
         expect(grokCreatePathCandidates(config, 2, config.videoModel)).not.toContain("/videos/edits");
         expect(grokCreatePathCandidates(config, 2, config.videoModel)[0]).toBe("/videos/generations");
+    });
+
+    it("puts New API images[] first for openai2api multi-ref while preserving 1080p", async () => {
+        const channel: ModelChannel = {
+            id: "public",
+            name: "openai2api",
+            baseUrl: "http://openai2api.com:3000",
+            apiKey: "test-only",
+            apiFormat: "openai",
+            compatProfile: "auto",
+            models: ["grok-imagine-video"],
+        };
+        const config = {
+            ...withChannels([channel], "public::grok-imagine-video"),
+            videoSeconds: "8",
+            size: "16:9",
+            vquality: "1080p",
+        };
+        const references = ["a", "b"].map((id) => ({
+            id,
+            name: `${id}.png`,
+            type: "image/png",
+            dataUrl: `https://example.com/${id}.png`,
+        }));
+
+        const candidates = await buildGrokPayloadCandidates(config, config.videoModel, "双图跟图", references);
+        expect(candidates[0]).toMatchObject({
+            model: "grok-imagine-video",
+            duration: 8,
+            seconds: "8",
+            aspect_ratio: "16:9",
+            resolution: "1080p",
+            images: ["https://example.com/a.png", "https://example.com/b.png"],
+        });
+        expect(payloadKeepsAllGrokVideoReferences(candidates[0], 2)).toBe(true);
+        expect(candidates.every((payload) => payloadKeepsAllGrokVideoReferences(payload, 2))).toBe(true);
+        expect(grokCreatePathCandidates(config, 2, config.videoModel)).toEqual(["/video/generations"]);
     });
 
     it("puts aspect_ratio first on Grok edit candidates too", async () => {

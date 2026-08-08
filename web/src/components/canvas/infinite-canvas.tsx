@@ -167,7 +167,12 @@ export function InfiniteCanvas({ containerRef, viewport, backgroundMode = "lines
         const container = containerRef.current;
         if (!container) return;
 
-        const preventWheelScroll = (event: WheelEvent) => event.preventDefault();
+        // 阻止画布页被浏览器默认滚动/回弹；但节点提示词等可滚动面板要放行原生滚轮。
+        const preventWheelScroll = (event: WheelEvent) => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (target?.closest("[data-canvas-no-zoom],.ant-modal,.ant-popover,.ant-dropdown,.ant-select-dropdown,.ant-picker-dropdown")) return;
+            event.preventDefault();
+        };
         container.addEventListener("wheel", preventWheelScroll, { passive: false });
         return () => container.removeEventListener("wheel", preventWheelScroll);
     }, [containerRef]);

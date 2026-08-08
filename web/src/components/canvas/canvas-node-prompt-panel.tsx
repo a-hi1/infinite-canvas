@@ -41,21 +41,33 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const config = mergeCanvasNodeAiConfig(globalConfig, node, mode);
     const hasTextContent = node.type === CanvasNodeType.Text && Boolean(node.metadata?.content?.trim());
     const hasImageContent = node.type === CanvasNodeType.Image && Boolean(node.metadata?.content);
-    const isEditingExistingContent = hasTextContent || hasImageContent;
     // 点击已生成节点时始终回填 metadata.prompt，与上游一致；不要因已有 content 清空。
     const [prompt, setPrompt] = useState(node.metadata?.prompt || "");
     const [optimizingPrompt, setOptimizingPrompt] = useState(false);
     const optimizeAbortRef = useRef<AbortController | null>(null);
     const promptEditorHostRef = useRef<HTMLDivElement | null>(null);
+    const promptRef = useRef(prompt);
+    const onPromptChangeRef = useRef(onPromptChange);
     const credits = requestCreditCost({ channelMode: config.channelMode, model: config.model, count: mode === "image" ? config.count : 1 });
     const textModel = (globalConfig.textModel || globalConfig.model || "").trim();
     const optimizeMode = promptOptimizeMode(mode);
     const canOptimize = Boolean(prompt.trim()) && !optimizingPrompt && !isRunning;
 
+    promptRef.current = prompt;
+    onPromptChangeRef.current = onPromptChange;
+
     // 仅切换到其它节点时恢复对应提示词；同一节点生成完成后继续保留当前输入。
     useEffect(() => {
         setPrompt(node.metadata?.prompt || "");
         // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only reset on node switch
+    }, [node.id]);
+
+    // 切换/关闭节点面板时兜底写回草稿，避免 contentEditable 最后一次输入尚未同步就卸载。
+    useEffect(() => {
+        const nodeId = node.id;
+        return () => {
+            onPromptChangeRef.current(nodeId, promptRef.current);
+        };
     }, [node.id]);
 
     const getPromptEditor = () => promptEditorHostRef.current?.querySelector<HTMLElement>("[contenteditable='true']") || null;
@@ -131,7 +143,8 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
 
     const updatePrompt = (value: string) => {
         setPrompt(value);
-        if (!isEditingExistingContent) onPromptChange(node.id, value);
+        // 空节点与已有内容节点都即时写回 metadata.prompt，切换节点后草稿不丢失。
+        onPromptChange(node.id, value);
     };
 
     const submit = () => {
