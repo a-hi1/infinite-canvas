@@ -164,15 +164,18 @@ describe("native Seedance relay payload", () => {
         expect(payloadKeepsAllSeedanceRelayReferences(payload, 2)).toBe(true);
     });
 
-    it("uses role-labeled content for 3+ images", () => {
+    it("uses all reference_image roles for 3+ images (no last_frame mix)", () => {
+        // Upstream rejects: last_frame mixed with reference_image / draft_task content.
         const images = ["data:image/png;base64,aaa", "data:image/png;base64,bbb", "data:image/png;base64,ccc"];
-        expect(seedanceRelayImageRole(0, 3)).toBe("first_frame");
+        expect(seedanceRelayImageRole(0, 3)).toBe("reference_image");
         expect(seedanceRelayImageRole(1, 3)).toBe("reference_image");
-        expect(seedanceRelayImageRole(2, 3)).toBe("last_frame");
+        expect(seedanceRelayImageRole(2, 3)).toBe("reference_image");
+        expect(seedanceRelayImageRole(0, 6)).toBe("reference_image");
+        expect(seedanceRelayImageRole(5, 6)).toBe("reference_image");
         const payload = seedanceRelayPayloadForTest({ ...defaultConfig }, "seedance2", "图生视频", images);
         const imageItems = (payload.content as Array<Record<string, unknown>>).filter((item) => item.type === "image_url");
         expect(imageItems).toHaveLength(3);
-        expect(imageItems.map((item) => item.role)).toEqual(["first_frame", "reference_image", "last_frame"]);
+        expect(imageItems.map((item) => item.role)).toEqual(["reference_image", "reference_image", "reference_image"]);
         expect(imageItems.map((item) => (item.image_url as { url: string }).url)).toEqual(images);
         expect(payload.metadata).toMatchObject({ content: payload.content });
         expect(payloadKeepsAllSeedanceRelayReferences(payload, 3)).toBe(true);
@@ -226,7 +229,7 @@ describe("native Seedance relay payload", () => {
         const imageItems = (payload.content as Array<Record<string, unknown>>).filter((item) => item.type === "image_url");
         expect(imageItems).toHaveLength(3);
         expect(imageItems.map((item) => (item.image_url as { url: string }).url)).toEqual(["data:image/png;base64,aaa", "data:image/png;base64,bbb", "data:image/png;base64,ccc"]);
-        expect(imageItems.map((item) => item.role)).toEqual(["first_frame", "reference_image", "last_frame"]);
+        expect(imageItems.map((item) => item.role)).toEqual(["reference_image", "reference_image", "reference_image"]);
         expect(payload).not.toHaveProperty("images");
         expect(payload.metadata).toMatchObject({ content: payload.content });
         expect(payloadKeepsAllSeedanceRelayReferences(payload, 3)).toBe(true);
@@ -365,7 +368,7 @@ return "https://example.com/script-only.mp4";`,
         const body = vi.mocked(axios.post).mock.calls[0]?.[1] as Record<string, unknown>;
         const content = body.content as Array<Record<string, unknown>>;
         expect(content.filter((item) => item.type === "image_url")).toHaveLength(3);
-        expect(content.map((item) => item.role).filter(Boolean)).toEqual(["first_frame", "reference_image", "last_frame"]);
+        expect(content.map((item) => item.role).filter(Boolean)).toEqual(["reference_image", "reference_image", "reference_image"]);
         expect(payloadKeepsAllSeedanceRelayReferences(body, 3)).toBe(true);
     });
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
++ [修复] Seedance 中转 3+ 参考图：全部使用 `reference_image` role，不再把首/末张标成 `first_frame`/`last_frame` 与中间参考混用（上游 `InvalidParameter: last frame image content cannot be mixed with reference image`）。单图 `reference_image`、双图首尾帧不变；不丢图、不退回文生。
 + [修复] Seedance 视频可上云：`api` `from-url` 与前端 `cloud-history` / 落盘 media 代理白名单补齐火山/字节 CDN（`volces` / `volcengine` / `byteimg` 等），与 `ai-proxy/media` 对齐；不再因域名被拦表现为「Seedance 不支持云端」。有 `storageKey` 的本机落盘路径不变；Grok/xAI 路径不变。
 + [部署] 新增 `docker-compose.ic3011.yml`：公司机 `-p ic3011` 时用 `!override` 只绑 `3011:3000`，避免与 `docker-compose.local.yml` 的 3001 端口数组合并抢占同机其它服务。
 + [调整] 新增渠道 / 默认中转站 Base URL 改为 `http://openai2api.com:3000`；未改过的旧默认 `codex2api` / 官方 OpenAI URL 会软迁移到该地址，用户自定义渠道不覆盖。

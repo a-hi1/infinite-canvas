@@ -2000,12 +2000,17 @@ async function resolveSeedanceRelayVideos(videoReferences: ReferenceVideo[]) {
  * Seedance media roles for OpenAI-compatible relays (openai2api / New API).
  * Every media item is sent once through content[] so the relay cannot select a
  * top-level single-image branch and silently ignore the remaining references.
+ *
+ * Upstream (Doubao/Seedance via New API) rejects mixing last_frame with
+ * reference_image: "last frame image content cannot be mixed with reference
+ * image or draft_task content". Therefore:
+ * - 1 image → reference_image
+ * - 2 images only → first_frame + last_frame (pure I2V bookends)
+ * - 3+ images → all reference_image (identity / multi-ref; no first/last mix)
  */
 export function seedanceRelayImageRole(index: number, total: number) {
     if (total <= 1) return "reference_image";
     if (total === 2) return index === 0 ? "first_frame" : "last_frame";
-    if (index === 0) return "first_frame";
-    if (index === total - 1) return "last_frame";
     return "reference_image";
 }
 

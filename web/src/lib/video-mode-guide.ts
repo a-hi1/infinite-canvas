@@ -71,7 +71,7 @@ export const SEEDANCE_VIDEO_MODE_GUIDE: VideoModeGuide = {
     summary: "支持参考图、参考视频和参考音频；OpenAI 中转同时保留 content[] 与 metadata.content，Agent Plan 按带角色的 content[] 发送。",
     tags: ["多图参考", "参考视频", "参考音频"],
     bullets: [
-        "OpenAI2API/New API：所有图片进入 content[].image_url，并镜像到 metadata.content；双图标记首帧/尾帧，3+ 图保留首帧、尾帧和中间参考图",
+        "OpenAI2API/New API：所有图片进入 content[].image_url，并镜像到 metadata.content；双图 first_frame+last_frame；3+ 图全部 reference_image（上游禁止 last_frame 与 reference_image 混用）",
         "参考视频与音频分别进入 content[].video_url / audio_url，每项都带 reference_video / reference_audio role",
         "参考视频建议 mp4/mov · H.264/H.265 · 2–15s · ≤50MB；参考音频遵守 2–15s / 总时长限制",
         "带参考媒体时会绕过纯文生本地调用脚本，确保媒体字段进入内置请求",
