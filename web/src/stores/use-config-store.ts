@@ -13,11 +13,11 @@ export type ReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
 export type ChannelCompatProfile = "auto" | "openai" | "openai-slim" | "grok-image" | "relay-fragile";
 
 export const CHANNEL_COMPAT_OPTIONS: Array<{ value: ChannelCompatProfile; label: string; hint: string }> = [
-    { value: "auto", label: "自动（推荐）", hint: "按 Base URL 推断：/lan-ai→Grok 比例；codex2api→精简中转；其它→标准 OpenAI" },
+    { value: "auto", label: "自动（推荐）", hint: "按 Base URL 推断：/lan-ai→Grok 比例；openai2api/codex2api→精简中转；其它→标准 OpenAI" },
     { value: "openai", label: "标准 OpenAI", hint: "size / quality / background / output_format 完整字段" },
     { value: "openai-slim", label: "OpenAI 精简", hint: "少带 output_format 等扩展字段，适合挑剔中转" },
     { value: "grok-image", label: "Grok / Grok2API 生图", hint: "文生图 aspect_ratio+resolution；图生图 JSON /images/edits（非 multipart）" },
-    { value: "relay-fragile", label: "脆弱中转（如 codex2api）", hint: "精简字段；图生图 edits 失败可旁路/降级" },
+    { value: "relay-fragile", label: "脆弱中转（如 openai2api）", hint: "精简字段；图生图 edits 失败可旁路/降级" },
 ];
 
 export type ModelChannel = {
@@ -89,7 +89,13 @@ export const LAN_AI_BASE_URL = "/lan-ai";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 // Built-in relay for self-deploy / first-run convenience. API Key stays empty; users fill their own.
-export const DEFAULT_RELAY_BASE_URL = "https://www.codex2api.com";
+export const DEFAULT_RELAY_BASE_URL = "http://openai2api.com:3000";
+const LEGACY_DEFAULT_RELAY_BASE_URLS = new Set([
+    "https://www.codex2api.com",
+    "https://www.codex2api.com/v1",
+    OPENAI_BASE_URL.toLowerCase(),
+    `${OPENAI_BASE_URL.toLowerCase()}/v1`,
+]);
 const DEFAULT_CHANNEL_ID = "default";
 const DEFAULT_CHANNEL_NAME = "默认中转站";
 const DEFAULT_RELAY_MODELS = ["gpt-image-2", "grok-imagine-video", "gpt-5.5", "gpt-4o-mini-tts"] as const;
@@ -619,13 +625,13 @@ function normalizeChannels(config: AiConfig) {
         );
     }
     return channels.map((channel) => {
-        // Soft-migrate the built-in default channel from OpenAI official URL to the project relay.
+        // Soft-migrate the built-in default channel from older stock URLs to the project relay.
         // Only rewrite when it still looks like the untouched stock default, never overwrite user customizations.
         if (channel.id === DEFAULT_CHANNEL_ID) {
             const baseUrl = channel.baseUrl.trim().replace(/\/+$/, "").toLowerCase();
-            const isStockOpenAiDefault = !baseUrl || baseUrl === OPENAI_BASE_URL.toLowerCase() || baseUrl === `${OPENAI_BASE_URL.toLowerCase()}/v1`;
+            const isStockDefaultBase = !baseUrl || LEGACY_DEFAULT_RELAY_BASE_URLS.has(baseUrl);
             const nameLooksStock = !channel.name.trim() || channel.name.trim() === "默认渠道" || channel.name.trim() === DEFAULT_CHANNEL_NAME;
-            if (isStockOpenAiDefault && nameLooksStock) {
+            if (isStockDefaultBase && nameLooksStock) {
                 return {
                     ...channel,
                     name: DEFAULT_CHANNEL_NAME,
