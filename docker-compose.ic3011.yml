@@ -1,0 +1,9 @@
+# 公司机专用：只绑 3011，避免与同机 :3000 / :3001 其它服务冲突。
+# 用法（必须 -p ic3011）：
+#   docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.yml up -d --build
+#
+# ports 使用 !override，否则会与 local 的 3001/3011 数组合并，仍抢 3001。
+services:
+  app:
+    ports: !override
+      - "3011:3000"

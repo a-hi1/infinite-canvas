@@ -139,8 +139,9 @@ sudo docker compose -f docker-compose.local.yml ps
 cd D:\wyx_group\project\infinite-canvas
 git fetch origin
 git reset --hard origin/main   # 或 git pull，以该机 remote 名为准
-docker compose -p ic3011 -f docker-compose.local.yml up -d --build
-docker compose -p ic3011 -f docker-compose.local.yml ps
+# 必须叠加 ic3011 覆盖：只用 3011，避免与 local 的 3001 数组合并抢端口
+docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.yml up -d --build
+docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.yml ps
 ```
 
 已知部署坑（`846d2ea` 一带已修，部署后须确认镜像含这些）：

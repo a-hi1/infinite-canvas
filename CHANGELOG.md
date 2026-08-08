@@ -2,6 +2,7 @@
 
 ## Unreleased
 
++ [部署] 新增 `docker-compose.ic3011.yml`：公司机 `-p ic3011` 时用 `!override` 只绑 `3011:3000`，避免与 `docker-compose.local.yml` 的 3001 端口数组合并抢占同机其它服务。
 + [调整] 新增渠道 / 默认中转站 Base URL 改为 `http://openai2api.com:3000`；未改过的旧默认 `codex2api` / 官方 OpenAI URL 会软迁移到该地址，用户自定义渠道不覆盖。
 + [修复] 画布节点提示词文本框支持滚轮滚动：不再被画布容器的全局 wheel 拦截吃掉；长提示词可在框内滚动查看。
 + [修复] 画布已有内容节点编辑提示词时即时写回 `metadata.prompt`；切换节点或关闭面板不再丢失未点生成的草稿。
