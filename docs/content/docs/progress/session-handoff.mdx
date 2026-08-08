@@ -197,7 +197,7 @@ docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.ym
 - **Grok 图生图**：JSON `POST /images/edits`；有参考图**不再**自动跳 `*-edit`；多参考必须完整 multi-image payload，**禁止静默只发第一张**
 - **视频主机级自动适配**：`web/src/lib/video-host-profile.ts` 按 Base URL 收口 Grok 创建路径 / 是否允许 `/videos` 兜底 / Seedance 中转路径 / 多图压图；扩展新中转优先改 profile，避免散改 `video.ts`
 - **Grok 视频路径（按主机 profile）**：用户当前选择永远优先；禁止硬塞不存在的模型插队；多参考勿退化首图。**codex2api/xAI** → `/videos/generations`；**内网 New API / 公网 openai2api** → **仅** `/video/generations`，创建、轮询、完成态内容下载均走 singular 路径（openai2api **不再**试 `/videos/generations`，实测 Invalid URL 404），**禁止** Grok 打 `/videos`（platform 48）。openai2api/New API 多参考首包优先完整 `images[]`（其 TaskSubmitReq 明确保留该字段），不以可能被忽略的 `reference_images` 抢先；选 1080p 时先发 1080p，只有创建失败才降档。旧会话若缓存了 `/videos` 成功路径，New API 风格下会忽略。**公网 Grok 多图：** 本机发完整多图字段；出片依赖渠道类型 + 上游 multi-ref；失败可改 Seedance
-- **Grok 完成态 URL**：官方形状 `video.url`；`status=done` 时 url 可能空串/晚写——优先读嵌套 `video.url`，完成无地址再等约 3 分钟并试 content 下载，禁止过早当失败
+- **Grok 完成态 URL**：官方形状 `video.url`；`status=done` 时 url 可能空串/晚写——优先读嵌套 `video.url`，完成无地址再等约 3 分钟并试 content 下载，禁止过早当失败。**相对路径**（如 `/v1/videos/{id}/content`）按渠道 Base 解析并鉴权下载，不得当「无 URL」失败
 - Sora/Veo：多路径 create/poll；图生禁止无参考文生回退
 - Seedance/Agnes 保留；平台视频仍无参考素材服务端路径
 - 参考图本地上限 6（平台积分图生图仍最多 4）

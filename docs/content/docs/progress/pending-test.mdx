@@ -5,6 +5,8 @@ description: 当前版本已实现但仍需人工验证的变更项
 
 # 待测试
 
+- **Grok 完成态相对 `video.url`**：部分中转 `status=done` 时 `video.url` 为 `/v1/videos/{id}/content`（约 55 字符）而非 `https://vidgen…`；前端按渠道 Base 解析并带 API Key 下载 blob，禁止再报「没有可播放的视频地址」。绝对 CDN URL / 空串晚写 grace / content 回落不变。需验证：① 该中转形态完成可播（画布+工作台）；② 官方/绝对 `vidgen.x.ai` 无回归；③ 空串仍等约 3 分钟；④ 失败文案仍可读；⑤ Seedance/Sora 无回归。**Docker 需 `up -d --build app` 后硬刷新。**
+
 - **Seedance 中转 3+ 参考图 role**：上游拒绝 `last_frame` 与 `reference_image` 混用；3+ 图全部 `reference_image`，双图仍 `first_frame`+`last_frame`，单图仍 `reference_image`；全量保留不静默丢图。需验证：① 3/6 张参考图创建不再 400 InvalidParameter last frame mix；② 2 张仍首尾帧；③ 1 张不变；④ Network `content[]`/`metadata.content` 角色正确且数量与 UI 一致；⑤ 纯文生/Agent Plan/Grok 无回归。**Docker 需 `up -d --build app` 后硬刷新。**
 
 - **Seedance 视频上云**：`api` `POST /jobs/video/from-url` 白名单与前端 `cloud-history` / 落盘同源 media 代理已含火山/字节 CDN（`*.volces.com` / `*.volcengine*.com` / `*.byteimg.com` 等），与 `ai-proxy/media` 对齐。**不改** 生成路径、Grok/xAI 上云、multipart `storageKey` 优先逻辑。需人工验证：① Seedance 生成成功且仅远程 CDN URL、本机无 storageKey 时，登录后上云可成功或失败文案可读（非笼统「不支持」）；② 已落盘有 storageKey 仍 multipart 成功；③ Grok `vidgen.x.ai` 上云无回归；④ 非白名单域名仍 403；⑤ 容器出网不通时 502 文案仍可操作。**Docker 需 `up -d --build app api ai-proxy` 后硬刷新。**

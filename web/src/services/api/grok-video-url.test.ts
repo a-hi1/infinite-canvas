@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { readGrokVideoUrl, unwrapGrokVideoResponse } from "@/services/api/video";
+import { readGrokVideoUrl, resolveGrokRelativeMediaUrl, unwrapGrokVideoResponse } from "@/services/api/video";
 
 describe("readGrokVideoUrl", () => {
     it("reads official done shape video.url", () => {
@@ -78,5 +78,63 @@ describe("readGrokVideoUrl", () => {
             video: { url: "https://files.example-cdn.net/a/b/c?token=xyz" },
         });
         expect(url).toBe("https://files.example-cdn.net/a/b/c?token=xyz");
+    });
+
+    it("resolves relative content path against channel baseUrl (codex2api shape, len≈55)", () => {
+        const relative = "/v1/videos/a9668b7a-f30a-9515-985f-f8dd9d5ab7ef/content";
+        expect(relative.length).toBe(55);
+        const url = readGrokVideoUrl(
+            {
+                model: "grok-imagine-video",
+                progress: 100,
+                status: "done",
+                video: {
+                    duration: 8,
+                    respect_moderation: true,
+                    url: relative,
+                },
+            },
+            "https://www.codex2api.com",
+        );
+        expect(url).toBe("https://www.codex2api.com/v1/videos/a9668b7a-f30a-9515-985f-f8dd9d5ab7ef/content");
+    });
+
+    it("resolves relative content path when baseUrl already ends with /v1", () => {
+        const url = readGrokVideoUrl(
+            {
+                status: "done",
+                video: { url: "/v1/videos/abc-123/content" },
+            },
+            "https://www.codex2api.com/v1",
+        );
+        expect(url).toBe("https://www.codex2api.com/v1/videos/abc-123/content");
+        expect(url).not.toContain("/v1/v1/");
+    });
+
+    it("returns empty for relative path without baseUrl (legacy callers)", () => {
+        const url = readGrokVideoUrl({
+            status: "done",
+            video: { url: "/v1/videos/abc-123/content" },
+        });
+        expect(url).toBe("");
+    });
+});
+
+describe("resolveGrokRelativeMediaUrl", () => {
+    it("joins path-relative content URLs to channel origin", () => {
+        expect(resolveGrokRelativeMediaUrl("/v1/videos/task-1/content", "https://www.codex2api.com")).toBe(
+            "https://www.codex2api.com/v1/videos/task-1/content",
+        );
+    });
+
+    it("keeps absolute https unchanged", () => {
+        expect(resolveGrokRelativeMediaUrl("https://vidgen.x.ai/v/a.mp4", "https://www.codex2api.com")).toBe(
+            "https://vidgen.x.ai/v/a.mp4",
+        );
+    });
+
+    it("maps same-origin /ai-proxy base to proxy prefix + path", () => {
+        const resolved = resolveGrokRelativeMediaUrl("/v1/videos/task-1/content", "/ai-proxy");
+        expect(resolved.includes("/ai-proxy/v1/videos/task-1/content")).toBe(true);
     });
 });

@@ -1244,7 +1244,7 @@ async function createGrokTask(config: AiConfig, model: string, prompt: string, r
                 );
                 rememberGrokCreatePath(config, path, references.length);
                 const id = readGrokTaskId(created) || "grok-inline";
-                const ready = extractGrokReadyResult(created);
+                const ready = extractGrokReadyResult(created, config.baseUrl);
                 const acceptedResolution = readPayloadResolution(payload);
                 const taskBase: VideoGenerationTask = {
                     id,
@@ -1371,7 +1371,7 @@ async function createGrokEditTask(config: AiConfig, model: string, prompt: strin
                 const requestModel = isForm
                     ? modelOptionName(model)
                     : String((payload as Record<string, unknown>).model || modelOptionName(model));
-                const ready = extractGrokReadyResult(created);
+                const ready = extractGrokReadyResult(created, config.baseUrl);
                 const acceptedResolution = isForm ? readFormDataResolution(payload) : readPayloadResolution(payload as Record<string, unknown>);
                 const taskBase: VideoGenerationTask = {
                     id,
@@ -1430,8 +1430,8 @@ function pollMissKey(config: AiConfig, taskId: string) {
     return `${hostKeyOf(config)}::${taskId}`;
 }
 
-function extractGrokReadyResult(payload: GrokVideoResponse) {
-    const url = readGrokVideoUrl(payload);
+function extractGrokReadyResult(payload: GrokVideoResponse, baseUrl?: string) {
+    const url = readGrokVideoUrl(payload, baseUrl);
     if (!url) return "";
     const status = String(payload.status || "").toLowerCase();
     if (["pending", "queued", "running", "processing", "in_progress", "generating"].includes(status)) return "";
@@ -1470,7 +1470,8 @@ async function pollGrokTask(config: AiConfig, task: VideoGenerationTask, options
         const state = unwrapGrokVideoResponse(raw);
         const status = String(state.status || (state as Record<string, unknown>).state || "").toLowerCase();
         const progress = Number((state as Record<string, unknown>).progress ?? (state as Record<string, unknown>).percent ?? NaN);
-        const url = readGrokVideoUrl(state) || readGrokVideoUrl(raw as GrokVideoResponse);
+        // 中转可能把 video.url 写成 /v1/videos/{id}/content 这类相对路径（len≈55），须按渠道 Base 解析
+        const url = readGrokVideoUrl(state, config.baseUrl) || readGrokVideoUrl(raw as GrokVideoResponse, config.baseUrl);
         const completed =
             status === "done" ||
             status === "completed" ||
@@ -1703,7 +1704,7 @@ async function tryFetchGrokVideoContent(config: AiConfig, task: VideoGenerationT
                 try {
                     const text = await blob.text();
                     const json = JSON.parse(text) as GrokVideoResponse;
-                    const url = readGrokVideoUrl(json);
+                    const url = readGrokVideoUrl(json, config.baseUrl);
                     if (url) return await videoResultFromUrl(url, options, config);
                 } catch {
                     continue;
@@ -1788,7 +1789,7 @@ function formatGrokDoneWithoutUrlError(raw: unknown, state: GrokVideoResponse, t
         parts.push("常见于中转 status/progress 先到 100、video.url 晚写或永不写；已等待约 3 分钟仍无地址");
         parts.push("可换渠道重试，或打开 Network 的 GET …/videos/{id} 看 video.url 是否始终为空");
     } else if (urlShape.includes("相对") || urlShape.includes("非 http")) {
-        parts.push("video.url 存在但不是可直接播放的 http(s) 地址，已尝试 content 下载仍失败");
+        parts.push("video.url 为相对路径时应按渠道 Base URL 解析并鉴权下载；若仍失败请检查中转 content 接口与 API Key");
     }
     return parts.join("。");
 }
@@ -3040,18 +3041,25 @@ async function videoResultFromUrl(url: string, options?: RequestOptions, config?
     }
 
     const candidates = videoDownloadCandidates(originalUrl, config);
+    let lastError: unknown = null;
     for (const candidate of candidates) {
         try {
             const blob = await downloadVideoBlob(candidate, options, config);
             return { blob: ensureVideoBlob(blob), mimeType: "video/mp4" };
         } catch (error) {
             if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+            lastError = error;
             // try next candidate
         }
     }
     // 私网地址下载失败：不要回退 127.0.0.1（浏览器必 REFUSED）
     if (isPrivateOrLoopbackHost(safeHostname(originalUrl))) {
         throw new Error("无法从内网视频地址下载文件（需 /lan-ai + API Key）。请检查内网中继与 Key");
+    }
+    // 中转 content 相对路径解析后的地址：需要 Bearer，不能当公开 CDN 塞进 <video src>
+    if (isChannelHostedVideoUrl(originalUrl, config)) {
+        const detail = lastError instanceof Error && lastError.message ? lastError.message : "下载失败";
+        throw new Error(`中转返回了需鉴权的视频地址，但拉取失败（${detail}）。请确认 API Key 与中转 content 接口可用`);
     }
     // 公网：仍返回原始远端 URL，避免把必 502 的 /ai-proxy/media 写进播放器
     return { url: originalUrl, mimeType: "video/mp4" };
@@ -3063,6 +3071,10 @@ async function downloadVideoBlob(url: string, options?: RequestOptions, config?:
         const headers: Record<string, string> = {};
         const isLan = url.includes("/lan-ai") || url.startsWith(LAN_AI_BASE_URL);
         if (isLan && config?.apiKey?.trim()) {
+            headers.Authorization = `Bearer ${config.apiKey.trim()}`;
+        }
+        // 同源 /ai-proxy 下的相对 content 路径也需 Key
+        if (!isLan && isAiProxyBaseUrl(config?.baseUrl || "") && config?.apiKey?.trim() && isChannelHostedVideoUrl(url, config)) {
             headers.Authorization = `Bearer ${config.apiKey.trim()}`;
         }
         const response = await fetch(url, {
@@ -3086,10 +3098,50 @@ async function downloadVideoBlob(url: string, options?: RequestOptions, config?:
         if (!lan) throw new Error("内网视频地址无法在浏览器直连");
         return downloadVideoBlob(lan, options, config);
     }
-    const response = await axios.get<Blob>(url, { responseType: "blob", timeout: 120000, signal: options?.signal });
+    // 中转 content 路径（相对 video.url 解析后）需要 Bearer；公网 CDN 不带 Key
+    const headers: Record<string, string> = {};
+    if (config?.apiKey?.trim() && isChannelHostedVideoUrl(url, config)) {
+        headers.Authorization = `Bearer ${config.apiKey.trim()}`;
+    }
+    const response = await axios.get<Blob>(url, {
+        responseType: "blob",
+        timeout: 120000,
+        signal: options?.signal,
+        headers: Object.keys(headers).length ? headers : undefined,
+    });
     await assertVideoBlob(response.data);
     if (!response.data.size) throw new Error("视频内容为空");
     return response.data;
+}
+
+/** 下载地址是否落在当前 AI 渠道主机上（相对 video.url 解析结果 / content 路径） */
+function isChannelHostedVideoUrl(url: string, config?: AiConfig) {
+    if (!config?.baseUrl?.trim() || !url) return false;
+    // 相对同源路径：若是 content/download 形态则视为渠道托管
+    if (url.startsWith("/")) {
+        return isChannelContentPath(url) || isSameOriginRelayBaseUrl(config.baseUrl);
+    }
+    try {
+        const target = new URL(url);
+        // 路径像 content 下载，且主机与渠道一致
+        if (!isChannelContentPath(target.pathname) && !/\/(?:videos?|video)\//i.test(target.pathname)) {
+            // 宽松：主机相同也允许带 Key（部分中转 content 无 /content 后缀）
+            // 但公网 CDN（vidgen.x.ai）不能带中转 Key
+            if (isBrowserCorsBlockedVideoHost(url) || /vidgen\.|imgen\.|cdn\.x\.ai|byteimg|volces|volcengine/i.test(target.hostname)) {
+                return false;
+            }
+        }
+        const rawBase = config.baseUrl.trim();
+        if (isSameOriginRelayBaseUrl(rawBase)) {
+            // 同源代理：页面 origin 下的 /ai-proxy|/lan-ai 路径
+            return target.pathname.startsWith(AI_PROXY_BASE_URL) || target.pathname.startsWith(LAN_AI_BASE_URL);
+        }
+        const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(rawBase) ? rawBase : `https://${rawBase}`;
+        const baseHost = new URL(withScheme).hostname.toLowerCase();
+        return target.hostname.toLowerCase() === baseHost;
+    } catch {
+        return false;
+    }
 }
 
 function ensureVideoBlob(blob: Blob, mimeType = "video/mp4") {
@@ -3114,7 +3166,7 @@ function videoDownloadCandidates(url: string, config?: AiConfig) {
     //    这样本地可落盘 storageKey，云端上云才能成功。
     const sameOriginProxy = sameOriginMediaProxyUrl(url);
     if (sameOriginProxy && !list.includes(sameOriginProxy)) list.push(sameOriginProxy);
-    // 3) 非封锁主机才尝试浏览器直连
+    // 3) 非封锁主机才尝试浏览器直连（含中转相对路径解析后的渠道 content 地址）
     if (isPublicMediaUrl(url) && !isBrowserCorsBlockedVideoHost(url) && !list.includes(url)) list.push(url);
     if (!list.length && isPublicMediaUrl(url)) list.push(url);
     return list;
@@ -3462,75 +3514,146 @@ function readAgnesError(payload: AgnesTaskResponse) {
  * 从 Grok 创建/轮询响应里抠可播放 URL。
  * 官方完成态常见：`{ status:"done", progress:100, video:{ url, duration, respect_moderation } }`
  * 注意：status=done 时 video.url 可能仍是空串，调用方需 grace 等待。
+ * 部分中转会返回 `/v1/videos/{id}/content` 等相对路径——传入 baseUrl 时按渠道解析成绝对地址。
  */
-export function readGrokVideoUrl(payload: GrokVideoResponse | Record<string, unknown> | null | undefined) {
+export function readGrokVideoUrl(payload: GrokVideoResponse | Record<string, unknown> | null | undefined, baseUrl?: string) {
     if (!payload || typeof payload !== "object") return "";
     const record = payload as Record<string, unknown>;
 
     // 官方嵌套优先：video.url / video.video_url（避免被其它同名 url 干扰）
     const nestedVideo = record.video;
     if (typeof nestedVideo === "string") {
-        const direct = coercePlayableMediaUrl(nestedVideo);
+        const direct = coercePlayableMediaUrl(nestedVideo, baseUrl);
         if (direct) return direct;
     } else if (nestedVideo && typeof nestedVideo === "object" && !Array.isArray(nestedVideo)) {
         const videoRecord = nestedVideo as Record<string, unknown>;
         for (const key of ["url", "video_url", "videoUrl", "download_url", "output_url", "result_url", "signed_url", "file_url", "play_url", "playUrl", "mp4", "uri"]) {
-            const direct = coercePlayableMediaUrl(videoRecord[key]);
+            const direct = coercePlayableMediaUrl(videoRecord[key], baseUrl);
             if (direct) return direct;
         }
     }
 
     return (
-        coercePlayableMediaUrl(record.video_url) ||
-        coercePlayableMediaUrl(record.url) ||
-        coercePlayableMediaUrl(record.output_url) ||
-        coercePlayableMediaUrl(record.download_url) ||
-        coercePlayableMediaUrl(record.result_url) ||
-        coercePlayableMediaUrl(record.videoUrl) ||
-        coercePlayableMediaUrl(record.video_uri) ||
-        coercePlayableMediaUrl(record.uri) ||
-        coercePlayableMediaUrl(record.signed_url) ||
-        coercePlayableMediaUrl(record.file_url) ||
-        readGrokUnknownUrl(record.data) ||
-        readGrokUnknownUrl(record.content) ||
-        readGrokUnknownUrl(record.response) ||
-        readGrokUnknownUrl(record.result) ||
-        readGrokUnknownUrl(Array.isArray(record.videos) ? record.videos[0] : undefined) ||
-        readGrokUnknownUrl(record.output) ||
-        readGrokUnknownUrl(record.outputs) ||
-        readGrokUnknownUrl(record.choices) ||
-        findFirstVideoUrl(payload) ||
+        coercePlayableMediaUrl(record.video_url, baseUrl) ||
+        coercePlayableMediaUrl(record.url, baseUrl) ||
+        coercePlayableMediaUrl(record.output_url, baseUrl) ||
+        coercePlayableMediaUrl(record.download_url, baseUrl) ||
+        coercePlayableMediaUrl(record.result_url, baseUrl) ||
+        coercePlayableMediaUrl(record.videoUrl, baseUrl) ||
+        coercePlayableMediaUrl(record.video_uri, baseUrl) ||
+        coercePlayableMediaUrl(record.uri, baseUrl) ||
+        coercePlayableMediaUrl(record.signed_url, baseUrl) ||
+        coercePlayableMediaUrl(record.file_url, baseUrl) ||
+        readGrokUnknownUrl(record.data, baseUrl) ||
+        readGrokUnknownUrl(record.content, baseUrl) ||
+        readGrokUnknownUrl(record.response, baseUrl) ||
+        readGrokUnknownUrl(record.result, baseUrl) ||
+        readGrokUnknownUrl(Array.isArray(record.videos) ? record.videos[0] : undefined, baseUrl) ||
+        readGrokUnknownUrl(record.output, baseUrl) ||
+        readGrokUnknownUrl(record.outputs, baseUrl) ||
+        readGrokUnknownUrl(record.choices, baseUrl) ||
+        findFirstVideoUrl(payload, 0, baseUrl) ||
         ""
     );
 }
 
-function asHttpUrl(value: unknown): string {
+/**
+ * 把中转返回的相对/协议相对 video.url 解析成绝对 http(s)。
+ * 例：`/v1/videos/{id}/content` + base `https://www.codex2api.com` → `https://www.codex2api.com/v1/videos/{id}/content`
+ * 注意：Base 可能已带 `/v1`，path 也可能以 `/v1/...` 开头，避免拼出 `/v1/v1/...`。
+ */
+export function resolveGrokRelativeMediaUrl(value: string, baseUrl?: string): string {
+    const text = value.trim();
+    if (!text) return "";
+    if (/^https?:\/\//i.test(text)) return text;
+    if (text.startsWith("//") && text.includes(".")) return `https:${text}`;
+    if (!baseUrl?.trim()) return "";
+    if (!(text.startsWith("/") || text.startsWith("./") || text.startsWith("../") || /^v1\//i.test(text) || /^videos?\//i.test(text))) {
+        return "";
+    }
+
+    let path = text.startsWith("./") ? text.slice(1) : text;
+    if (!path.startsWith("/") && !path.startsWith("../")) path = `/${path}`;
+
+    try {
+        const rawBase = baseUrl.trim();
+        // 同源 /ai-proxy、/lan-ai：相对媒体路径挂在页面 origin 下的代理前缀
+        if (isSameOriginRelayBaseUrl(rawBase)) {
+            const origin = typeof window !== "undefined" && window.location?.origin ? window.location.origin : "http://local.invalid";
+            const prefix = isAiProxyBaseUrl(rawBase) ? AI_PROXY_BASE_URL : isLanAiBaseUrl(rawBase) ? LAN_AI_BASE_URL : "";
+            // path 已含 /v1/... 时：origin + prefix + path
+            const joined = new URL(`${prefix}${path.startsWith("/") ? path : `/${path}`}`, origin).toString();
+            return joined.startsWith("http://local.invalid") ? `${prefix}${path}` : joined;
+        }
+
+        const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(rawBase) ? rawBase : `https://${rawBase}`;
+        const base = new URL(withScheme);
+        // 去掉 base 末尾 /v1 或 /api/v3 再拼 path，path 自带 /v1 时不重复
+        let basePath = base.pathname.replace(/\/+$/, "") || "";
+        const lowerBasePath = basePath.toLowerCase();
+        if (lowerBasePath.endsWith("/v1") || lowerBasePath.endsWith("/api/v3") || lowerBasePath.endsWith("/api/plan/v3")) {
+            // path 已是 /v1/... 时用 origin 根；path 是 /videos/... 时保留 /v1
+            if (/^\/v1(?:\/|$)/i.test(path) || /^\/api\/v3(?:\/|$)/i.test(path)) {
+                base.pathname = "/";
+            }
+        }
+        const resolved = new URL(path, base);
+        return resolved.toString();
+    } catch {
+        // 回退：简单字符串拼接
+        try {
+            const apiRoot = buildApiUrl(baseUrl, "");
+            // buildApiUrl 总带 /v1；若 path 也以 /v1 开头则用 origin 根
+            if (/^\/v1(?:\/|$)/i.test(path)) {
+                const origin = new URL(/^https?:\/\//i.test(baseUrl.trim()) ? baseUrl.trim() : `https://${baseUrl.trim()}`).origin;
+                return `${origin}${path}`;
+            }
+            return `${apiRoot.replace(/\/+$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
+        } catch {
+            return "";
+        }
+    }
+}
+
+function asHttpUrl(value: unknown, baseUrl?: string): string {
     if (typeof value !== "string") return "";
     const text = value.trim();
     if (!text) return "";
     if (/^https?:\/\//i.test(text)) return text;
     // 少数中转返回协议相对地址
     if (text.startsWith("//") && text.includes(".")) return `https:${text}`;
+    // 中转完成态：video.url = "/v1/videos/{id}/content"（约 55 字符）
+    const resolved = resolveGrokRelativeMediaUrl(text, baseUrl);
+    if (resolved) return resolved;
     return "";
 }
 
 /** 比 asHttpUrl 更宽松：接受常见 CDN 无扩展名链接；仍拒绝空串与明显非媒体路径 */
-function coercePlayableMediaUrl(value: unknown): string {
+function coercePlayableMediaUrl(value: unknown, baseUrl?: string): string {
     if (typeof value !== "string") return "";
     const text = value.trim();
     if (!text) return "";
-    const direct = asHttpUrl(text);
+    const direct = asHttpUrl(text, baseUrl);
     if (!direct) return "";
-    if (isLikelyVideoUrl(direct) || isLooseMediaUrl(direct)) return direct;
+    if (isLikelyVideoUrl(direct) || isLooseMediaUrl(direct) || isChannelContentPath(text)) return direct;
     return "";
 }
 
-function readGrokUnknownUrl(value: unknown): string {
+/** 中转常见「相对 content 下载路径」，本身不是 CDN 域名但可鉴权下载 */
+function isChannelContentPath(value: string) {
+    const text = value.trim();
+    if (!text) return false;
+    if (/\/(?:videos?|video)(?:\/generations)?\/[^/?#]+\/(?:content|download|file)(?:[/?#]|$)/i.test(text)) return true;
+    if (/^\/v1\/(?:videos?|video)\//i.test(text)) return true;
+    return false;
+}
+
+function readGrokUnknownUrl(value: unknown, baseUrl?: string): string {
     if (!value) return "";
-    if (typeof value === "string") return coercePlayableMediaUrl(value);
+    if (typeof value === "string") return coercePlayableMediaUrl(value, baseUrl);
     if (Array.isArray(value)) {
         for (const item of value) {
-            const url = readGrokUnknownUrl(item);
+            const url = readGrokUnknownUrl(item, baseUrl);
             if (url) return url;
         }
         return "";
@@ -3538,38 +3661,38 @@ function readGrokUnknownUrl(value: unknown): string {
     if (typeof value !== "object") return "";
     const record = value as Record<string, unknown>;
     for (const key of ["video_url", "videoUrl", "url", "output_url", "download_url", "result_url", "signed_url", "file_url", "media_url", "uri", "video_uri", "href", "src", "mp4", "play_url", "playUrl"]) {
-        const direct = coercePlayableMediaUrl(record[key]);
+        const direct = coercePlayableMediaUrl(record[key], baseUrl);
         if (direct) return direct;
         const nested = record[key];
         if (nested && typeof nested === "object") {
-            const url = readGrokUnknownUrl(nested);
+            const url = readGrokUnknownUrl(nested, baseUrl);
             if (url) return url;
         }
     }
     for (const key of ["video", "videos", "data", "result", "response", "output", "outputs", "content", "file", "asset", "media", "message", "choices"]) {
-        const url = readGrokUnknownUrl(record[key]);
+        const url = readGrokUnknownUrl(record[key], baseUrl);
         if (url) return url;
     }
     return "";
 }
 
-function findFirstVideoUrl(value: unknown, depth = 0): string {
+function findFirstVideoUrl(value: unknown, depth = 0, baseUrl?: string): string {
     if (!value || depth > 8) return "";
     if (typeof value === "string") {
-        const direct = asHttpUrl(value);
+        const direct = asHttpUrl(value, baseUrl);
         if (!direct) return "";
-        return isLikelyVideoUrl(direct) || isLooseMediaUrl(direct) ? direct : "";
+        return isLikelyVideoUrl(direct) || isLooseMediaUrl(direct) || isChannelContentPath(value) ? direct : "";
     }
     if (Array.isArray(value)) {
         for (const item of value) {
-            const url = findFirstVideoUrl(item, depth + 1);
+            const url = findFirstVideoUrl(item, depth + 1, baseUrl);
             if (url) return url;
         }
         return "";
     }
     if (typeof value !== "object") return "";
     for (const item of Object.values(value as Record<string, unknown>)) {
-        const url = findFirstVideoUrl(item, depth + 1);
+        const url = findFirstVideoUrl(item, depth + 1, baseUrl);
         if (url) return url;
     }
     return "";
