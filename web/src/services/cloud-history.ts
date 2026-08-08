@@ -1,6 +1,7 @@
 import { getImageBlob } from "@/services/image-storage";
 import { getMediaBlob } from "@/services/file-storage";
 import { blobFromUrl, CloudApiError, isCloudApiError, uploadCloudJob, type CloudJob } from "@/services/cloud-api";
+import { isAllowedRemoteMediaHost } from "@/lib/remote-media-host";
 import { AI_PROXY_BASE_URL } from "@/stores/use-config-store";
 import { useAuthStore } from "@/stores/use-auth-store";
 
@@ -12,18 +13,9 @@ function isLocalObjectUrl(value: string) {
     return (value || "").startsWith("blob:") || (value || "").startsWith("data:");
 }
 
-function isXaiMediaHost(url: string) {
-    try {
-        const host = new URL(url).hostname.toLowerCase();
-        return host.includes("vidgen.x.ai") || host.includes("imgen.x.ai") || host.includes("cdn.x.ai") || host === "x.ai" || host.endsWith(".x.ai");
-    } catch {
-        return /vidgen\.x\.ai|imgen\.x\.ai|cdn\.x\.ai/i.test(url);
-    }
-}
-
-/** 中转站返回的 xAI 临时链：浏览器 CORS 读不到；优先走同源 /ai-proxy/media 取字节 */
+/** 中转/上游临时链：浏览器 CORS 常读不到；白名单内优先走同源 /ai-proxy/media 取字节再 multipart 上云 */
 async function tryFetchViaSameOriginMediaProxy(remoteUrl: string): Promise<Blob | null> {
-    if (!isRemoteHttpUrl(remoteUrl) || !isXaiMediaHost(remoteUrl)) return null;
+    if (!isRemoteHttpUrl(remoteUrl) || !isAllowedRemoteMediaHost(remoteUrl)) return null;
     const proxyUrl = `${AI_PROXY_BASE_URL}/media?${new URLSearchParams({ url: remoteUrl }).toString()}`;
     try {
         const response = await fetch(proxyUrl, { credentials: "same-origin" });
@@ -252,7 +244,7 @@ export async function saveVideoToCloudDetailed(input: {
             return { job };
         }
         if (isRemoteHttpUrl(input.url)) {
-            // 中转站 + vidgen：浏览器读不到；先试同源 ai-proxy 取字节再 multipart 上云
+            // 远程 CDN（xAI / Seedance 火山等）：浏览器 CORS 常读不到；先试同源 ai-proxy 再 from-url
             const viaProxy = await tryFetchViaSameOriginMediaProxy(input.url);
             if (viaProxy) {
                 const job = await uploadCloudJob({
@@ -270,7 +262,7 @@ export async function saveVideoToCloudDetailed(input: {
                 });
                 return { job };
             }
-            // 再让服务端直拉远程 CDN（本机/服务器能出网时成功）
+            // 再让服务端直拉远程 CDN（域名须在 api 白名单；容器能出网时成功）
             try {
                 const job = await uploadCloudJobFromUrl({
                     type: "video",
@@ -286,11 +278,24 @@ export async function saveVideoToCloudDetailed(input: {
                 });
                 return { job };
             } catch (fromUrlError) {
+                const detail = isCloudApiError(fromUrlError) ? fromUrlError.message : "";
+                const hostHint = (() => {
+                    try {
+                        return new URL(input.url).hostname;
+                    } catch {
+                        return "";
+                    }
+                })();
+                const seedanceHint =
+                    /volces|volcengine|byteimg|bytecdn|bytedance/i.test(hostHint || input.url)
+                        ? "当前像 Seedance/火山 CDN；已扩白名单后仍失败多为容器出网或签名链过期。"
+                        : "";
                 return {
                     job: null,
                     ...toSaveError(
                         fromUrlError,
-                        "视频可播放但无法上云：浏览器代理不等于 Docker 出网。ai-proxy/api 容器拉不到 vidgen 时会 502。可：① 给容器配置 HTTP_PROXY/HTTPS_PROXY（host.docker.internal:本地代理端口）后重建 api/ai-proxy；② 浏览器下载视频后本地导入再上云；③ 生成时尽量先落盘到本机 storageKey",
+                        detail ||
+                            `视频可播放但无法上云${hostHint ? `（${hostHint}）` : ""}。${seedanceHint}浏览器代理≠Docker 出网；ai-proxy/api 拉不到远程时会 502/403。可：① 给容器配 HTTP_PROXY 后重建 api/ai-proxy；② 浏览器下载后本地导入再上云；③ 生成时尽量先落盘 storageKey`,
                     ),
                 };
             }

@@ -25,6 +25,7 @@ import {
     isNewApiStyleVideoHost,
     resolveVideoHostProfile,
 } from "@/lib/video-host-profile";
+import { isLikelyCorsBlockedMediaHost } from "@/lib/remote-media-host";
 import { boolConfig, buildSeedancePromptText, isArkPlanBaseUrl, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import {
     buildSoraVeoFormFieldCandidates,
@@ -3151,19 +3152,8 @@ function unwrapMediaProxyUrl(url: string) {
 }
 
 function isBrowserCorsBlockedVideoHost(url: string) {
-    try {
-        const host = new URL(url).hostname.toLowerCase();
-        return (
-            host === "vidgen.x.ai" ||
-            host.endsWith(".vidgen.x.ai") ||
-            host === "imgen.x.ai" ||
-            host.endsWith(".imgen.x.ai") ||
-            host === "cdn.x.ai" ||
-            host.endsWith(".cdn.x.ai")
-        );
-    } catch {
-        return /vidgen\.x\.ai|imgen\.x\.ai|cdn\.x\.ai/i.test(url);
-    }
+    // xAI + Seedance/火山等临时 CDN：JS fetch 常被 CORS 拦，落盘优先 /ai-proxy/media
+    return isLikelyCorsBlockedMediaHost(url);
 }
 
 class VideoOutputNotReadyError extends Error {

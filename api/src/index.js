@@ -1476,14 +1476,44 @@ async function handleUploadJobFromUrl(req, res, type) {
 }
 
 function isAllowedMediaHost(hostname) {
+    // Keep in sync with web/src/lib/remote-media-host.ts (isAllowedRemoteMediaHost).
     const host = String(hostname || "")
         .toLowerCase()
         .replace(/\.$/, "");
     if (!host || isPrivateOrLocalHost(host)) return false;
-    const exact = new Set(["imgen.x.ai", "vidgen.x.ai", "cdn.x.ai", "x.ai"]);
+    const exact = new Set([
+        "imgen.x.ai",
+        "vidgen.x.ai",
+        "cdn.x.ai",
+        "x.ai",
+        "platform-outputs.agnes-ai.space",
+        "apihub.agnes-ai.com",
+    ]);
     if (exact.has(host)) return true;
-    // Keep CDN suffixes for temporary media; still blocked if DNS resolves private (assertPublicResolvedHost).
-    const suffixes = [".imgen.x.ai", ".vidgen.x.ai", ".cdn.x.ai", ".x.ai", ".amazonaws.com", ".cloudfront.net", ".r2.dev"];
+    // Temporary media CDNs; still blocked if DNS resolves private (assertPublicResolvedHost).
+    const suffixes = [
+        ".imgen.x.ai",
+        ".vidgen.x.ai",
+        ".cdn.x.ai",
+        ".x.ai",
+        ".amazonaws.com",
+        ".cloudfront.net",
+        ".r2.dev",
+        // Seedance / 火山 / 字节
+        ".volces.com",
+        ".volcengine.com",
+        ".volcengineapi.com",
+        ".byteimg.com",
+        ".bytedance.net",
+        ".bytecdn.com",
+        // common object storage / CDN
+        ".aliyuncs.com",
+        ".myqcloud.com",
+        ".googleusercontent.com",
+        ".blob.core.windows.net",
+        ".agnes-ai.space",
+        ".agnes-ai.com",
+    ];
     return suffixes.some((s) => host.endsWith(s));
 }
 

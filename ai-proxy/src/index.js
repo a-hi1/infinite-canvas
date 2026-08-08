@@ -267,29 +267,43 @@ function buildMediaTargetUrl(incomingUrl) {
 function isAllowedMediaTarget(target) {
     if (target.protocol !== "https:" && target.protocol !== "http:") return false;
     const hostname = target.hostname.toLowerCase();
-    // 生成视频 CDN 域名变化快；允许常见云存储/CDN，并覆盖 xAI / Agnes 相关主机。
+    // 生成视频 CDN 域名变化快；允许常见云存储/CDN，并覆盖 xAI / Agnes / Seedance(火山) 主机。
     // 仍禁止 localhost / 内网地址，避免 SSRF。
+    // 后缀列表尽量与 api isAllowedMediaHost / web remote-media-host 对齐。
     if (isPrivateHostname(hostname)) return false;
+    const exact = new Set([
+        "platform-outputs.agnes-ai.space",
+        "apihub.agnes-ai.com",
+        "imgen.x.ai",
+        "vidgen.x.ai",
+        "cdn.x.ai",
+        "x.ai",
+    ]);
+    if (exact.has(hostname)) return true;
+    const suffixes = [
+        ".agnes-ai.space",
+        ".agnes-ai.com",
+        ".imgen.x.ai",
+        ".vidgen.x.ai",
+        ".cdn.x.ai",
+        ".x.ai",
+        ".amazonaws.com",
+        ".cloudfront.net",
+        ".r2.dev",
+        ".googleusercontent.com",
+        ".blob.core.windows.net",
+        ".aliyuncs.com",
+        ".myqcloud.com",
+        // Seedance / 火山 / 字节临时媒体
+        ".volces.com",
+        ".volcengine.com",
+        ".volcengineapi.com",
+        ".byteimg.com",
+        ".bytedance.net",
+        ".bytecdn.com",
+    ];
+    if (suffixes.some((s) => hostname.endsWith(s))) return true;
     return (
-        hostname === "platform-outputs.agnes-ai.space" ||
-        hostname.endsWith(".agnes-ai.space") ||
-        hostname === "apihub.agnes-ai.com" ||
-        hostname.endsWith(".agnes-ai.com") ||
-        hostname === "imgen.x.ai" ||
-        hostname.endsWith(".imgen.x.ai") ||
-        hostname === "vidgen.x.ai" ||
-        hostname.endsWith(".vidgen.x.ai") ||
-        hostname === "cdn.x.ai" ||
-        hostname.endsWith(".cdn.x.ai") ||
-        hostname === "x.ai" ||
-        hostname.endsWith(".x.ai") ||
-        hostname.endsWith(".amazonaws.com") ||
-        hostname.endsWith(".cloudfront.net") ||
-        hostname.endsWith(".r2.dev") ||
-        hostname.endsWith(".googleusercontent.com") ||
-        hostname.endsWith(".blob.core.windows.net") ||
-        hostname.endsWith(".aliyuncs.com") ||
-        hostname.endsWith(".myqcloud.com") ||
         hostname.includes("video") ||
         hostname.includes("media") ||
         hostname.includes("cdn") ||
