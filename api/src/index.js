@@ -41,6 +41,7 @@ import {
     isPrivateOrLocalHost,
     isValidEmail,
     json,
+    normalizeEmail,
     parseCookies,
     parseMultipart,
     randomId,
@@ -98,6 +99,8 @@ const trustProxySameOrigin = String(process.env.API_TRUST_PROXY_SAME_ORIGIN || "
 const SESSION_COOKIE = "ic_session";
 const loginHits = new Map();
 const registerHits = new Map();
+/** Serialize register-by-email so concurrent same-email signups cannot race past uniqueness. */
+const registerEmailLocks = new Map();
 const uploadHits = new Map();
 
 function requestIdOf(req) {
@@ -654,12 +657,31 @@ function requireUser(req, res) {
     return { user, token };
 }
 
+/** Per-email mutex so concurrent register of the same address cannot both pass uniqueness. */
+async function withRegisterEmailLock(email, fn) {
+    const key = normalizeEmail(email);
+    const prev = registerEmailLocks.get(key) || Promise.resolve();
+    let release;
+    const gate = new Promise((resolve) => {
+        release = resolve;
+    });
+    const chained = prev.catch(() => undefined).then(() => gate);
+    registerEmailLocks.set(key, chained);
+    await prev.catch(() => undefined);
+    try {
+        return await fn();
+    } finally {
+        release();
+        if (registerEmailLocks.get(key) === chained) registerEmailLocks.delete(key);
+    }
+}
+
 async function handleRegister(req, res) {
     const ip = clientIp(req);
     if (!rateLimit(registerHits, ip, 5, 60 * 60 * 1000)) return fail(res, 429, "注册过于频繁，请稍后再试", CLOUD_ERROR_REASON.REGISTER_RATE_LIMITED);
 
     const body = await readJson(req);
-    const email = String(body.email || "").trim().toLowerCase();
+    const email = normalizeEmail(body.email);
     const password = String(body.password || "");
     const displayName = String(body.display_name || body.displayName || "").trim();
     const code = String(body.invite_code || body.inviteCode || "").trim();
@@ -667,12 +689,28 @@ async function handleRegister(req, res) {
     if (!isValidEmail(email)) return fail(res, 400, "邮箱格式不正确", CLOUD_ERROR_REASON.INVALID_EMAIL);
     if (password.length < 8) return fail(res, 400, "密码至少 8 位", CLOUD_ERROR_REASON.WEAK_PASSWORD);
     if (inviteCode && code !== inviteCode) return fail(res, 403, "邀请码无效", CLOUD_ERROR_REASON.INVITE_CODE_INVALID);
-    if (usersRepo.findByEmail(email)) return fail(res, 409, "该邮箱已注册", CLOUD_ERROR_REASON.EMAIL_ALREADY_REGISTERED);
 
-    const passwordHash = await hashPassword(password);
-    const user = usersRepo.create({ email, passwordHash, displayName });
-    const token = issueSession(req, res, user.id);
-    json(res, 200, { user: publicUser(user), session: Boolean(token) }, "注册成功");
+    try {
+        await withRegisterEmailLock(email, async () => {
+            if (usersRepo.findByEmail(email)) {
+                throw httpError("该邮箱已注册", 409, CLOUD_ERROR_REASON.EMAIL_ALREADY_REGISTERED);
+            }
+
+            const passwordHash = await hashPassword(password);
+            // createUser re-checks uniqueness; lock covers the async hash window.
+            const user = usersRepo.create({ email, passwordHash, displayName });
+            // New login should not keep a previous account's cookie if one existed in this browser.
+            const previousToken = parseCookies(req.headers.cookie || "")[SESSION_COOKIE];
+            if (previousToken) sessionsRepo.revokeByToken(previousToken);
+            const token = issueSession(req, res, user.id);
+            json(res, 200, { user: publicUser(user), session: Boolean(token) }, "注册成功");
+        });
+    } catch (error) {
+        if (error && typeof error === "object" && error.status) {
+            return fail(res, error.status, error.message || "注册失败", error.reason || CLOUD_ERROR_REASON.BAD_REQUEST);
+        }
+        throw error;
+    }
 }
 
 async function handleLogin(req, res) {
@@ -680,29 +718,67 @@ async function handleLogin(req, res) {
     if (!rateLimit(loginHits, ip, 10, 60 * 1000)) return fail(res, 429, "登录过于频繁，请稍后再试", CLOUD_ERROR_REASON.LOGIN_RATE_LIMITED);
 
     const body = await readJson(req);
-    const email = String(body.email || "").trim().toLowerCase();
+    const email = normalizeEmail(body.email);
     const password = String(body.password || "");
-    const user = usersRepo.findByEmail(email);
-    if (!user) return fail(res, 401, "邮箱或密码错误", CLOUD_ERROR_REASON.LOGIN_INVALID_CREDENTIALS);
-    if (user.status !== USER_STATUS.ACTIVE) return fail(res, 403, "账号不可用", CLOUD_ERROR_REASON.ACCOUNT_DISABLED);
-    if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) return fail(res, 429, "账号暂时锁定，请稍后再试", CLOUD_ERROR_REASON.ACCOUNT_TEMPORARILY_LOCKED);
+    if (!email || !password) return fail(res, 401, "邮箱或密码错误", CLOUD_ERROR_REASON.LOGIN_INVALID_CREDENTIALS);
 
-    const ok = await verifyPassword(password, user.password_hash);
-    if (!ok) {
-        user.failed_login_count = (user.failed_login_count || 0) + 1;
-        if (user.failed_login_count >= 8) {
-            user.locked_until = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-            user.failed_login_count = 0;
+    // If historical duplicates exist for the same email, pick the account whose password matches
+    // (oldest first among matches). Never silently return the first row with a wrong password.
+    const candidates = usersRepo.findAllByEmail(email);
+    if (!candidates.length) return fail(res, 401, "邮箱或密码错误", CLOUD_ERROR_REASON.LOGIN_INVALID_CREDENTIALS);
+
+    let matched = null;
+    for (const candidate of candidates) {
+        if (candidate.status !== USER_STATUS.ACTIVE) continue;
+        if (candidate.locked_until && new Date(candidate.locked_until).getTime() > Date.now()) continue;
+        // eslint-disable-next-line no-await-in-loop
+        const ok = await verifyPassword(password, candidate.password_hash);
+        if (ok) {
+            matched = candidate;
+            break;
         }
-        usersRepo.update(user);
+    }
+
+    if (!matched) {
+        // Count failures on the oldest active account (stable target) without revealing which row matched.
+        const primary =
+            candidates.find((u) => u.status === USER_STATUS.ACTIVE) ||
+            candidates[0];
+        if (primary && primary.status === USER_STATUS.ACTIVE) {
+            if (primary.locked_until && new Date(primary.locked_until).getTime() > Date.now()) {
+                return fail(res, 429, "账号暂时锁定，请稍后再试", CLOUD_ERROR_REASON.ACCOUNT_TEMPORARILY_LOCKED);
+            }
+            primary.failed_login_count = (primary.failed_login_count || 0) + 1;
+            if (primary.failed_login_count >= 8) {
+                primary.locked_until = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+                primary.failed_login_count = 0;
+            }
+            usersRepo.update(primary);
+        }
+        // If every candidate is disabled, surface account disabled once.
+        if (candidates.every((u) => u.status !== USER_STATUS.ACTIVE)) {
+            return fail(res, 403, "账号不可用", CLOUD_ERROR_REASON.ACCOUNT_DISABLED);
+        }
+        if (
+            candidates.some(
+                (u) => u.status === USER_STATUS.ACTIVE && u.locked_until && new Date(u.locked_until).getTime() > Date.now(),
+            ) &&
+            !candidates.some((u) => u.status === USER_STATUS.ACTIVE && !(u.locked_until && new Date(u.locked_until).getTime() > Date.now()))
+        ) {
+            return fail(res, 429, "账号暂时锁定，请稍后再试", CLOUD_ERROR_REASON.ACCOUNT_TEMPORARILY_LOCKED);
+        }
         return fail(res, 401, "邮箱或密码错误", CLOUD_ERROR_REASON.LOGIN_INVALID_CREDENTIALS);
     }
 
-    user.failed_login_count = 0;
-    user.locked_until = null;
-    usersRepo.update(user);
-    issueSession(req, res, user.id);
-    json(res, 200, { user: publicUser(user) }, "登录成功");
+    matched.failed_login_count = 0;
+    matched.locked_until = null;
+    usersRepo.update(matched);
+
+    // Replace any previous browser session so the cookie cannot keep pointing at another account.
+    const previousToken = parseCookies(req.headers.cookie || "")[SESSION_COOKIE];
+    if (previousToken) sessionsRepo.revokeByToken(previousToken);
+    issueSession(req, res, matched.id);
+    json(res, 200, { user: publicUser(matched) }, "登录成功");
 }
 
 function handleLogout(req, res) {

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { ensureDir, randomId, sha256 } from "./util.js";
+import { ensureDir, httpError, normalizeEmail, randomId, sha256 } from "./util.js";
 import {
         CLOUD_ERROR_REASON,
         CREDIT_CURRENCY,
@@ -16,6 +16,10 @@ import {
         WORKSPACE_STATUS,
         WORKSPACE_TASK_STATUS,
     } from "./model/cloud-domain.js";
+
+function normalizeEmailKey(email) {
+    return normalizeEmail(email);
+}
 
 /**
  * Lightweight JSON-file database.
@@ -147,8 +151,22 @@ export function createDb(dataDir) {
         flush: persist,
 
         findUserByEmail(email) {
-            const key = String(email || "").trim().toLowerCase();
-            return state.users.find((u) => u.email === key) || null;
+            const key = normalizeEmailKey(email);
+            if (!key) return null;
+            // Prefer oldest account when historical duplicates exist (login may still password-match others).
+            const matches = state.users
+                .filter((u) => normalizeEmailKey(u.email) === key)
+                .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+            return matches[0] || null;
+        },
+
+        /** All accounts sharing the same normalized email (should be 0–1 after uniqueness guard). */
+        findUsersByEmail(email) {
+            const key = normalizeEmailKey(email);
+            if (!key) return [];
+            return state.users
+                .filter((u) => normalizeEmailKey(u.email) === key)
+                .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
         },
 
         findUserById(id) {
@@ -156,9 +174,18 @@ export function createDb(dataDir) {
         },
 
         createUser({ email, passwordHash, displayName }) {
+            const normalized = normalizeEmailKey(email);
+            if (!normalized) {
+                throw httpError("邮箱格式不正确", 400, CLOUD_ERROR_REASON.INVALID_EMAIL);
+            }
+            // Re-check under create path so concurrent register cannot insert two rows for one email
+            // (hashPassword is async and used to leave a race window between find + create).
+            if (state.users.some((u) => normalizeEmailKey(u.email) === normalized)) {
+                throw httpError("该邮箱已注册", 409, CLOUD_ERROR_REASON.EMAIL_ALREADY_REGISTERED);
+            }
             const user = {
                 id: randomId(),
-                email: String(email).trim().toLowerCase(),
+                email: normalized,
                 password_hash: passwordHash,
                 display_name: displayName || "",
                 status: USER_STATUS.ACTIVE,

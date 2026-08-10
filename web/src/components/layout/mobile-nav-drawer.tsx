@@ -2,6 +2,7 @@ import { Drawer } from "antd";
 import { Link } from "react-router-dom";
 
 import { navigationTools, type NavigationToolSlug } from "@/constant/navigation-tools";
+import { requestOpenDirectorDesk } from "@/lib/director-desk";
 import { cn } from "@/lib/utils";
 import { useConfigStore } from "@/stores/use-config-store";
 
@@ -33,6 +34,22 @@ export function MobileNavDrawer({ open, activeToolSlug, onClose }: MobileNavDraw
                                 onClick={() => {
                                     onClose();
                                     openConfigDialog(false);
+                                }}
+                            >
+                                <Icon className="size-5" />
+                                <span>{tool.label}</span>
+                            </button>
+                        );
+                    }
+                    if ("action" in tool && tool.action === "open-director-desk") {
+                        return (
+                            <button
+                                key={tool.slug}
+                                type="button"
+                                className={itemClass}
+                                onClick={() => {
+                                    onClose();
+                                    requestOpenDirectorDesk();
                                 }}
                             >
                                 <Icon className="size-5" />

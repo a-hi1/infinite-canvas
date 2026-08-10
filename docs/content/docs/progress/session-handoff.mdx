@@ -167,6 +167,7 @@ docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.ym
 ### 云与底座
 
 - 云历史双轨；上云幂等 `client_local_id`；远程 URL 可走 `from-url` / `/ai-proxy/media`（白名单含 xAI + Seedance/火山/字节 CDN，见 `web/src/lib/remote-media-host.ts` 与 `api` `isAllowedMediaHost`）
+- **云账号邮箱唯一**：注册归一化 + 串行锁 + create 二次校验；登录按密码匹配同邮箱候选，换号吊销旧 session Cookie（见 pending-test）
 - P0.5c / S0 已出门
 - P1 底座 A–G 代码在仓（平台代生成默认关）
 - P2.0-A/B/C：画布 JSON + blob + 素材 manifest/tombstone；未做 Postgres/S3
@@ -212,6 +213,7 @@ docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.ym
 - **工作台提示词 `@` 引用**：图/视频工作台复用 `CanvasPromptChipInput`，选择已添加参考素材插入 `图片N` 等 label（见 pending-test）
 - **版本弹窗双源**：本机 CHANGELOG 常显；上游 basketikun 折叠可展开，检查更新不覆盖本机列表
 - **视频结果真实清晰度**：低于所选时标「实 720p · 选 1080p」，不虚标
+- **3D 导演台 modal iframe / 新窗口（可回退切片）**：同域 `/director-desk/` 静态资源 + 顶栏/画布底栏入口；弹层与新窗口共享 `instanceId` 场景；截图经 postMessage + BroadcastChannel 回流「我的资产」，画布页额外插入图片节点；`VITE_DIRECTOR_DESK_ENABLED` / localStorage 可关；**不**硬嵌画布节点、不改生成主路径
 - 部署体验：`/assets` 刷新、资产导入顺序、nginx 不误跳 :3000
 - 其它以代码与 pending-test 为准
 
@@ -223,7 +225,7 @@ docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.ym
 - 完整可调宽侧栏资产 Tab 大包 / 插件 registry 大改
 - ai-proxy 更细白名单、Vitest lock 等微修可暂缓
 - 剪贴板上传图片失败：用户点名再做
-
+- 3D 导演台：画布节点硬嵌入 / 全景双向边 / 独立路由整页 / monorepo 源码合入
 ## 工作方式硬约束
 
 - 先理解与建议，**等用户确认再改代码**；未确认不提交、不推送

@@ -3,8 +3,10 @@ import { Link, useLocation } from "react-router-dom";
 
 import { navigationTools, type NavigationToolSlug } from "@/constant/navigation-tools";
 import { AppConfigModal } from "@/components/layout/app-config-modal";
+import { DirectorDeskModal } from "@/components/director-desk/director-desk-modal";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
+import { requestOpenDirectorDesk } from "@/lib/director-desk";
 import { cn } from "@/lib/utils";
 import { useConfigStore } from "@/stores/use-config-store";
 import { useState } from "react";
@@ -62,6 +64,14 @@ export function AppTopNav() {
                                             </button>
                                         );
                                     }
+                                    if ("action" in tool && tool.action === "open-director-desk") {
+                                        return (
+                                            <button key={tool.slug} type="button" className={itemClass} onClick={() => requestOpenDirectorDesk()} aria-label="3D导演台" title="3D导演台">
+                                                <Icon className="size-4" />
+                                                <span className="truncate">{tool.label}</span>
+                                            </button>
+                                        );
+                                    }
                                     return (
                                         <Link key={tool.slug} to={`/${tool.slug}`} className={itemClass}>
                                             <Icon className="size-4" />
@@ -82,6 +92,7 @@ export function AppTopNav() {
 
             <MobileNavDrawer open={mobileNavOpen} activeToolSlug={activeToolSlug} onClose={() => setMobileNavOpen(false)} />
             <AppConfigModal />
+            <DirectorDeskModal />
         </>
     );
 }

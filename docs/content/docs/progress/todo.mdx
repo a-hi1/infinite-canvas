@@ -18,3 +18,4 @@ description: 当前项目后续值得处理的事项
 - 渠道生图兼容：`compatProfile` = auto / openai / openai-slim / grok-image / relay-fragile。**auto 与历史行为一致**（/lan-ai→Grok 比例；codex2api→fragile；其它→OpenAI）。换中转优先改预设，复杂协议再用模型自定义脚本。
 - 提示词库预览：精选只认可用封面 + 坏链 runtime 剔除已落地；单条「生成预览图」按需 BYOK 已落地。**不做：** 打开库自动批量给无图条目生封面；一键「给所有精选补图」。后续若有需要，仅考虑「我的提示词」小批量补图。
 - 内网 OpenAI 兼容（局域网 Grok 等）：已支持可选同源中继 `/lan-ai`（`LAN_AI_UPSTREAM`）。**不要**让浏览器直连 `http://192.168.x.x`（CORS）。公网要用家里 Grok2API：见 `deploy/lan-tunnel/README.md`（FRP 方案 B，独立 compose，默认不启动）。公网共享时须 API Key，`18000` 仅绑本机。
+- **3D 导演台后续（modal iframe / 新窗口已落地，待人工验收）**：弹层+新窗口共享场景，截图回流资产；画布页可再插入图片节点。**后置** 画布节点硬嵌入、全景图双向边、独立 `/director` 路由整页、把导演台源码合进 monorepo 开发依赖。上游更新时按 `web/public/director-desk/README.md` 旁路重建覆盖，勿手改 dist。

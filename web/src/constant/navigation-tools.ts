@@ -1,6 +1,8 @@
-import { FileText, ImagePlus, Images, Maximize2, Settings2, Users, Video } from "lucide-react";
+import { Clapperboard, FileText, ImagePlus, Images, Maximize2, Settings2, Users, Video } from "lucide-react";
 
-export const navigationTools = [
+import { isDirectorDeskEnabled } from "@/lib/director-desk";
+
+const baseNavigationTools = [
     {
         slug: "canvas",
         label: "我的画布",
@@ -32,6 +34,13 @@ export const navigationTools = [
         icon: Users,
     },
     {
+        slug: "director-desk",
+        label: "3D导演台",
+        icon: Clapperboard,
+        /** 打开同域 iframe 弹层，不走路由页；可由 feature flag 隐藏 */
+        action: "open-director-desk" as const,
+    },
+    {
         slug: "config",
         label: "配置",
         icon: Settings2,
@@ -40,4 +49,10 @@ export const navigationTools = [
     },
 ] as const;
 
-export type NavigationToolSlug = (typeof navigationTools)[number]["slug"];
+/** 运行时按开关过滤；关闭后顶栏/移动端不展示导演台入口。 */
+export const navigationTools = baseNavigationTools.filter((tool) => {
+    if ("action" in tool && tool.action === "open-director-desk") return isDirectorDeskEnabled();
+    return true;
+}) as unknown as typeof baseNavigationTools;
+
+export type NavigationToolSlug = (typeof baseNavigationTools)[number]["slug"];

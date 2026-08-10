@@ -336,6 +336,27 @@ export const CanvasNode = React.memo(function CanvasNode({
                     )}
                 </div>
             )}
+            {/* 文本节点「生图」放在卡片外侧右上，与标题同层，不压正文 */}
+            {data.type === CanvasNodeType.Text && (isSelected || hovered) && onGenerateImage ? (
+                <div className="pointer-events-auto absolute right-0 top-0 z-[90] -translate-y-[calc(100%+6px)]" data-canvas-no-zoom>
+                    <button
+                        type="button"
+                        className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-[11px] font-medium shadow-sm transition hover:scale-[1.02]"
+                        style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke, color: theme.node.text }}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            onGenerateImage(data);
+                        }}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        title="用文本生图"
+                        aria-label="用文本生图"
+                    >
+                        <ImageIcon className="size-3" />
+                        生图
+                    </button>
+                </div>
+            ) : null}
             <div
                 className="relative h-full w-full overflow-visible rounded-3xl border-2"
                 style={{
@@ -398,7 +419,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 </div>
 
                 {showImageInfo && hasImageContent ? <ImageInfoBar node={data} /> : null}
-                {resourceLabel ? <ResourceLabelBadge reference={resourceLabel} /> : null}
+                {resourceLabel ? <ResourceLabelBadge reference={resourceLabel} outside={data.type === CanvasNodeType.Text} /> : null}
 
                 {!isGroup && !hasImageContent && !hasVideoContent && !hasAudioContent ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} /> : null}
 
@@ -497,32 +518,16 @@ function UnknownNodeContent({ theme }: Pick<NodeContentRendererProps, "theme">) 
     );
 }
 
-function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, onContentChange, onStopEditing, onGenerateImage }: NodeContentRendererProps) {
+function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, onContentChange, onStopEditing }: NodeContentRendererProps) {
     const fontSize = node.metadata?.fontSize || 14;
     const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;
 
     return (
-        <div className="flex h-full w-full flex-col overflow-hidden pt-8">
-            <button
-                type="button"
-                className="absolute right-3 top-3 z-20 inline-flex h-9 items-center gap-1.5 rounded-full border px-3 text-xs font-medium opacity-90 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
-                style={{ background: `${theme.toolbar.panel}ee`, borderColor: theme.node.stroke, color: theme.node.text }}
-                onClick={(event) => {
-                    event.stopPropagation();
-                    onGenerateImage?.(node);
-                }}
-                onMouseDown={(event) => event.stopPropagation()}
-                onPointerDown={(event) => event.stopPropagation()}
-                title="用文本生图"
-                aria-label="用文本生图"
-            >
-                <ImageIcon className="size-3.5" />
-                生图
-            </button>
+        <div className="flex h-full w-full flex-col overflow-hidden">
             {isEditingContent ? (
                 <CanvasResourceMentionTextarea
                     ref={textareaRef}
-                    className="canvas-prompt-scrollbar block h-full w-full resize-none overflow-y-auto whitespace-pre-wrap break-words border-none bg-transparent pl-4 pr-5 pt-0 pb-4 m-0 font-mono outline-none select-text appearance-none"
+                    className="canvas-prompt-scrollbar block h-full min-h-0 w-full flex-1 resize-none overflow-y-auto whitespace-pre-wrap break-words border-none bg-transparent px-3.5 py-3 m-0 font-mono outline-none select-text appearance-none"
                     style={textStyle}
                     value={node.metadata?.content || ""}
                     references={mentionReferences}
@@ -538,7 +543,7 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                 />
             ) : (
                 <div
-                    className="canvas-prompt-scrollbar block h-full w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent pl-4 pr-5 pt-0 pb-4 font-mono"
+                    className="canvas-prompt-scrollbar block h-full min-h-0 w-full flex-1 overflow-y-auto whitespace-pre-wrap break-words bg-transparent px-3.5 py-3 font-mono"
                     style={textStyle}
                     onWheel={(event) => event.stopPropagation()}
                 >
@@ -549,9 +554,13 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
     );
 }
 
-function ResourceLabelBadge({ reference }: { reference: CanvasResourceReference }) {
+function ResourceLabelBadge({ reference, outside }: { reference: CanvasResourceReference; outside?: boolean }) {
+    // 文本节点：标签放在卡片外侧，避免挡住正文；媒体节点仍贴在内容右上角
+    const positionClass = outside
+        ? "absolute right-2 top-0 z-30 -translate-y-[calc(100%+4px)]"
+        : "absolute right-2 top-2 z-30";
     return (
-        <span className={`pointer-events-none absolute right-2 top-2 z-30 rounded-md px-1.5 py-0.5 text-[10px] font-medium ${reference.active ? "bg-[#2f80ff] text-white shadow-sm" : "bg-black/35 text-white/75"}`}>
+        <span className={`pointer-events-none rounded-md px-1.5 py-0.5 text-[10px] font-medium ${positionClass} ${reference.active ? "bg-[#2f80ff] text-white shadow-sm" : "bg-black/35 text-white/75"}`}>
             {reference.label}
         </span>
     );

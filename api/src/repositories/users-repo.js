@@ -7,6 +7,12 @@ export function createUsersRepo(db) {
         findByEmail(email) {
             return db.findUserByEmail(email);
         },
+        /** All rows with the same normalized email (for login password match / diagnostics). */
+        findAllByEmail(email) {
+            if (typeof db.findUsersByEmail === "function") return db.findUsersByEmail(email);
+            const one = db.findUserByEmail(email);
+            return one ? [one] : [];
+        },
         findById(id) {
             return db.findUserById(id);
         },

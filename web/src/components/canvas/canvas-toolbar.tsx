@@ -1,9 +1,10 @@
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, RefObject } from "react";
 import { useRef, useState } from "react";
 import { Button, Segmented, Switch } from "antd";
-import { CircleDot, Eraser, FolderOpen, Grid2x2, Group, Hand, Image as ImageIcon, Info, LayoutGrid, Moon, MousePointer2, Music2, Palette, Redo2, Settings2, Square, Sun, Trash2, Type, Undo2, Upload, Video } from "lucide-react";
+import { CircleDot, Clapperboard, Eraser, FolderOpen, Grid2x2, Group, Hand, Image as ImageIcon, Info, LayoutGrid, Moon, MousePointer2, Music2, Palette, Redo2, Settings2, Square, Sun, Trash2, Type, Undo2, Upload, Video } from "lucide-react";
 
 import { canvasThemes, type CanvasBackgroundMode, type CanvasColorTheme, type CanvasTheme } from "@/lib/canvas-theme";
+import { isDirectorDeskEnabled } from "@/lib/director-desk";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { AnimatedThemeToggler } from "@/components/ui/animated-theme-toggler";
 import type { CanvasPointerMode } from "@/components/canvas/infinite-canvas";
@@ -31,6 +32,7 @@ export function CanvasToolbar({
     onBackgroundModeChange,
     onShowImageInfoChange,
     onOpenMyAssets,
+    onOpenDirectorDesk,
 }: {
     selectedCount: number;
     canUndo: boolean;
@@ -54,6 +56,7 @@ export function CanvasToolbar({
     onBackgroundModeChange: (mode: CanvasBackgroundMode) => void;
     onShowImageInfoChange: (show: boolean) => void;
     onOpenMyAssets: () => void;
+    onOpenDirectorDesk?: () => void;
 }) {
     const wrapRef = useRef<HTMLDivElement>(null);
     const colorTheme = useThemeStore((state) => state.theme);
@@ -113,6 +116,11 @@ export function CanvasToolbar({
                 <ToolbarButton id="tool-assets" label="我的资产" hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onOpenMyAssets}>
                     <FolderOpen className="size-4.5" />
                 </ToolbarButton>
+                {isDirectorDeskEnabled() && onOpenDirectorDesk ? (
+                    <ToolbarButton id="tool-director" label="3D导演台" hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onOpenDirectorDesk}>
+                        <Clapperboard className="size-4.5" />
+                    </ToolbarButton>
+                ) : null}
                 <ToolbarButton
                     id="tool-style"
                     label="画布外观"
@@ -315,6 +323,7 @@ function toolLabel(id: string) {
     if (id === "tool-group") return "组";
     if (id === "tool-upload") return "上传素材";
     if (id === "tool-assets") return "我的资产";
+    if (id === "tool-director") return "3D导演台";
     if (id === "tool-style") return "画布外观";
     if (id === "tool-delete") return "删除选中";
     if (id === "tool-clear") return "清空画布";

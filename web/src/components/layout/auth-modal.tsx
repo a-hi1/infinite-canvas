@@ -8,7 +8,7 @@ function authErrorText(error: unknown, fallback: string) {
     if (isCloudApiError(error)) {
         if (error.reason === CLOUD_ERROR_REASON.ORIGIN_NOT_ALLOWED) return error.message;
         if (error.reason === CLOUD_ERROR_REASON.INVITE_CODE_INVALID) return "邀请码无效，请检查服务器邀请码配置";
-        if (error.reason === CLOUD_ERROR_REASON.EMAIL_ALREADY_REGISTERED) return "该邮箱已注册，请直接登录";
+        if (error.reason === CLOUD_ERROR_REASON.EMAIL_ALREADY_REGISTERED) return "该邮箱已注册，请直接登录（同一邮箱只能有一个账号）";
         if (error.reason === CLOUD_ERROR_REASON.ACCOUNT_TEMPORARILY_LOCKED) return "登录失败次数过多，账号已暂时锁定，请稍后再试";
         if (error.status === 0) return "无法连接云端服务，请稍后重试；未登录仍可本地使用";
         return error.message || fallback;
@@ -30,7 +30,8 @@ export function AuthModal({ open, onClose }: { open: boolean; onClose: () => voi
         const values = await loginForm.validateFields();
         setLoading(true);
         try {
-            await login(values.email, values.password);
+            const email = String(values.email || "").trim();
+            await login(email, values.password);
             message.success("登录成功");
             onClose();
         } catch (error) {
@@ -45,12 +46,12 @@ export function AuthModal({ open, onClose }: { open: boolean; onClose: () => voi
         setLoading(true);
         try {
             await register({
-                email: values.email,
+                email: String(values.email || "").trim(),
                 password: values.password,
                 displayName: values.displayName,
                 inviteCode: values.inviteCode,
             });
-            message.success("注册成功");
+            message.success("注册成功，已自动登录当前账号");
             onClose();
         } catch (error) {
             message.error(authErrorText(error, "注册失败"));

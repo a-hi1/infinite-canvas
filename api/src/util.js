@@ -158,8 +158,23 @@ export function isPrivateOrLocalHost(hostname) {
     return false;
 }
 
+/**
+ * Canonical email for auth lookup / uniqueness.
+ * - trim + lower-case
+ * - NFKC so fullwidth/compat forms collapse
+ * Does not rewrite Gmail dots/+tags (would change real addresses).
+ */
+export function normalizeEmail(email) {
+    return String(email || "")
+        .normalize("NFKC")
+        .trim()
+        .toLowerCase();
+}
+
 export function isValidEmail(email) {
-    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    const value = normalizeEmail(email);
+    // Reject control / whitespace already stripped; still block empty labels.
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && !value.includes("..") && !value.startsWith(".") && !value.endsWith(".");
 }
 
 export function extForMime(mime) {

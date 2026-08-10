@@ -55,6 +55,11 @@ import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNode } from "@/components/canvas/canvas-node";
 import { CanvasNodePromptPanel, type CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import { CanvasToolbar } from "@/components/canvas/canvas-toolbar";
+import {
+    DIRECTOR_DESK_CAPTURES_EVENT,
+    requestOpenDirectorDesk,
+    type DirectorDeskCapturesDetail,
+} from "@/lib/director-desk";
 import { applyLayoutPositions, layoutCanvasNodes } from "@/lib/canvas/canvas-auto-layout";
 import {
     collectGroupableMemberIds,
@@ -3044,6 +3049,32 @@ function InfiniteCanvasPage() {
         [insertAssistantImage, insertAssistantText, screenToCanvas, size.height, size.width],
     );
 
+    // 3D 导演台截图回流：已进资产后，若打开时带了 canvasProjectId 且为本页，再插入图片节点。
+    useEffect(() => {
+        if (!projectId) return;
+        const onCaptures = (event: Event) => {
+            const detail = (event as CustomEvent<DirectorDeskCapturesDetail>).detail;
+            if (!detail?.captures?.length) return;
+            if (!detail.canvasProjectId || detail.canvasProjectId !== projectId) return;
+            void (async () => {
+                for (const [index, capture] of detail.captures.entries()) {
+                    try {
+                        await insertAssistantImage({
+                            id: `director-desk-${Date.now()}-${index}`,
+                            prompt: capture.title || "导演台截图",
+                            dataUrl: capture.dataUrl,
+                            storageKey: capture.storageKey,
+                        });
+                    } catch {
+                        // 单张失败不阻断后续
+                    }
+                }
+            })();
+        };
+        window.addEventListener(DIRECTOR_DESK_CAPTURES_EVENT, onCaptures as EventListener);
+        return () => window.removeEventListener(DIRECTOR_DESK_CAPTURES_EVENT, onCaptures as EventListener);
+    }, [insertAssistantImage, projectId]);
+
     const assistantOpen = assistantMounted && !assistantCollapsed;
     const openAgent = (mode: CanvasAgentMode = agentMode) => {
         if (agentCloseTimerRef.current) {
@@ -3434,6 +3465,12 @@ function InfiniteCanvasPage() {
                     onOpenMyAssets={() => {
                         setAssetPickerOpen(true);
                     }}
+                    onOpenDirectorDesk={() =>
+                        requestOpenDirectorDesk({
+                            instanceId: `canvas-${projectId || "unknown"}`,
+                            canvasProjectId: projectId || undefined,
+                        })
+                    }
                 />
 
                 <CanvasMultiSelectBar
