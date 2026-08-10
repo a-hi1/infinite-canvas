@@ -5,6 +5,10 @@ description: 当前版本已实现但仍需人工验证的变更项
 
 # 待测试
 
+- **一键排版美化 + 多选成组**：排版后链路左→右、同层少交叉、后继大致对齐前驱中线、连线不甩大弯；组/batch 仍为单元；可撤销。成组：多选 ≥2 → 多选栏/右键「成组」出框且拖组带动成员；「取消成组」拆框位置不变；仅选 1 个或不可成组时不显示成组。**不改** 生成 API / Grok / Seedance / 云双轨。Docker `up -d --build app` 后硬刷新。
+
+- **画布体验切片（提示词放大 / 选择移动 / 定位 100% / 多图操作 / 一键排版）**：不改生成 API、Grok/Seedance、云双轨、并发生成 root+子节点模型。需验证：① 长提示词点「放大编辑」，Modal 与节点浮层双向同步，生成仍用同一 prompt，关闭 Modal 不清词；② 默认空白拖仍平移；底栏切「选择」后可点选/框选；Space 临时反转，松手恢复；输入框/contentEditable 内空格正常打字；③ 侧栏节点列表定位缩放不超过 100%，滚轮仍可 >100%；④ count>1 失败子项：悬停可见重试（强制）、删除、副本（脱批独立）、有 content 可下载；root 主图切换/折叠仍可用；⑤ 一键排版：有选中只动选中，无选中全画布；组不拆、batch 子相对 root 保持；可撤销；⑥ 图/视/音/文生成与云同步无回归。**Docker 需 `up -d --build app` 后硬刷新。**
+
 - **Grok 完成态相对 `video.url`**：部分中转 `status=done` 时 `video.url` 为 `/v1/videos/{id}/content`（约 55 字符）而非 `https://vidgen…`；前端按渠道 Base 解析并带 API Key 下载 blob，禁止再报「没有可播放的视频地址」。绝对 CDN URL / 空串晚写 grace / content 回落不变。需验证：① 该中转形态完成可播（画布+工作台）；② 官方/绝对 `vidgen.x.ai` 无回归；③ 空串仍等约 3 分钟；④ 失败文案仍可读；⑤ Seedance/Sora 无回归。**Docker 需 `up -d --build app` 后硬刷新。**
 
 - **Seedance 中转 3+ 参考图 role**：上游拒绝 `last_frame` 与 `reference_image` 混用；3+ 图全部 `reference_image`，双图仍 `first_frame`+`last_frame`，单图仍 `reference_image`；全量保留不静默丢图。需验证：① 3/6 张参考图创建不再 400 InvalidParameter last frame mix；② 2 张仍首尾帧；③ 1 张不变；④ Network `content[]`/`metadata.content` 角色正确且数量与 UI 一致；⑤ 纯文生/Agent Plan/Grok 无回归。**Docker 需 `up -d --build app` 后硬刷新。**

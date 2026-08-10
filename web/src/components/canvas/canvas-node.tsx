@@ -469,19 +469,22 @@ function ErrorContent({ node, theme, onRetry }: Pick<NodeContentRendererProps, "
     return (
         <div className="flex max-w-[260px] flex-col items-center gap-3 px-5 text-center">
             <div className="text-xs leading-5 text-red-300">{node.metadata?.errorDetails || "生成失败"}</div>
-            <button
-                type="button"
-                className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"
-                style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
-                onClick={(event) => {
-                    event.stopPropagation();
-                    onRetry?.(node);
-                }}
-                onMouseDown={(event) => event.stopPropagation()}
-            >
-                <RefreshCw className="size-3.5" />
-                重试
-            </button>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+                <button
+                    type="button"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"
+                    style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onRetry?.(node);
+                    }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                >
+                    <RefreshCw className="size-3.5" />
+                    重试
+                </button>
+            </div>
+            <div className="text-[10px] opacity-55">悬停节点可删除 / 副本 / 下载</div>
         </div>
     );
 }

@@ -4,10 +4,14 @@ import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ViewportTransform } from "@/types/canvas";
 
+export type CanvasPointerMode = "select" | "pan";
+
 type InfiniteCanvasProps = {
     containerRef: React.RefObject<HTMLDivElement | null>;
     viewport: ViewportTransform;
     backgroundMode?: CanvasBackgroundMode;
+    /** Sticky tool mode; Space temporarily inverts. Default pan keeps blank-drag = pan. */
+    pointerMode?: CanvasPointerMode;
     onViewportChange: (viewport: ViewportTransform) => void;
     onCanvasMouseDown?: (event: React.PointerEvent<HTMLDivElement>) => void;
     onCanvasDeselect?: () => void;
@@ -17,7 +21,26 @@ type InfiniteCanvasProps = {
     children: React.ReactNode;
 };
 
-export function InfiniteCanvas({ containerRef, viewport, backgroundMode = "lines", onViewportChange, onCanvasMouseDown, onCanvasDeselect, onCanvasDoubleClick, onContextMenu, onDrop, children }: InfiniteCanvasProps) {
+function isEditableKeyboardTarget(target: EventTarget | null) {
+    if (!(target instanceof Element)) return false;
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;
+    if (target.closest("[contenteditable='true'],[contenteditable=''],[data-canvas-no-zoom],.ant-modal,.ant-popover,.ant-dropdown,.ant-select-dropdown")) return true;
+    return false;
+}
+
+export function InfiniteCanvas({
+    containerRef,
+    viewport,
+    backgroundMode = "lines",
+    pointerMode = "pan",
+    onViewportChange,
+    onCanvasMouseDown,
+    onCanvasDeselect,
+    onCanvasDoubleClick,
+    onContextMenu,
+    onDrop,
+    children,
+}: InfiniteCanvasProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const panState = useRef({
         isPanning: false,
@@ -46,7 +69,9 @@ export function InfiniteCanvas({ containerRef, viewport, backgroundMode = "lines
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
             if (event.code !== "Space") return;
-            if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+            if (isEditableKeyboardTarget(event.target)) return;
+            // Avoid page scroll when using Space as temporary invert on the canvas.
+            event.preventDefault();
             setIsSpacePressed(true);
         };
 
@@ -54,13 +79,21 @@ export function InfiniteCanvas({ containerRef, viewport, backgroundMode = "lines
             if (event.code === "Space") setIsSpacePressed(false);
         };
 
-        window.addEventListener("keydown", handleKeyDown);
+        const handleBlur = () => setIsSpacePressed(false);
+
+        window.addEventListener("keydown", handleKeyDown, { passive: false });
         window.addEventListener("keyup", handleKeyUp);
+        window.addEventListener("blur", handleBlur);
         return () => {
             window.removeEventListener("keydown", handleKeyDown);
             window.removeEventListener("keyup", handleKeyUp);
+            window.removeEventListener("blur", handleBlur);
         };
     }, []);
+
+    // Space temporarily inverts sticky mode (pan ↔ select).
+    const effectiveMode: CanvasPointerMode = isSpacePressed ? (pointerMode === "pan" ? "select" : "pan") : pointerMode;
+    const blankDragIsPan = effectiveMode === "pan";
 
     const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
         const target = event.target instanceof Element ? event.target : null;
@@ -90,14 +123,8 @@ export function InfiniteCanvas({ containerRef, viewport, backgroundMode = "lines
         if (target?.closest("[data-connection-create-menu]")) return;
         const isBackgroundClick = !target?.closest("[data-node-id],[data-connection-id]");
 
-        if (event.button === 0 && (event.ctrlKey || event.metaKey) && isBackgroundClick) {
-            event.preventDefault();
-            event.currentTarget.setPointerCapture(event.pointerId);
-            onCanvasMouseDown?.(event);
-            return;
-        }
-
-        if (event.button === 1 || (event.button === 0 && !isSpacePressed && isBackgroundClick)) {
+        // Middle mouse always pans.
+        if (event.button === 1 && isBackgroundClick) {
             event.preventDefault();
             event.currentTarget.setPointerCapture(event.pointerId);
             panState.current = {
@@ -112,9 +139,32 @@ export function InfiniteCanvas({ containerRef, viewport, backgroundMode = "lines
             return;
         }
 
-        if (event.button === 0 && isSpacePressed && isBackgroundClick) {
+        if (event.button !== 0 || !isBackgroundClick) return;
+
+        // Ctrl/Meta on blank: always marquee-select (compatible with previous force-select).
+        // Also start marquee when effective mode is select (without needing Ctrl).
+        const forceSelect = event.ctrlKey || event.metaKey;
+        const shouldMarquee = forceSelect || !blankDragIsPan;
+
+        if (shouldMarquee) {
             event.preventDefault();
+            event.currentTarget.setPointerCapture(event.pointerId);
+            onCanvasMouseDown?.(event);
+            return;
         }
+
+        // Effective pan: blank left-drag pans the canvas.
+        event.preventDefault();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        panState.current = {
+            isPanning: true,
+            startX: event.clientX,
+            startY: event.clientY,
+            initialX: viewport.x,
+            initialY: viewport.y,
+            hasMoved: false,
+        };
+        document.body.style.cursor = "grabbing";
     };
 
     const handleDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -177,10 +227,12 @@ export function InfiniteCanvas({ containerRef, viewport, backgroundMode = "lines
         return () => container.removeEventListener("wheel", preventWheelScroll);
     }, [containerRef]);
 
+    const cursorClass = blankDragIsPan ? "cursor-grab" : "cursor-default";
+
     return (
         <div
             ref={containerRef}
-            className="relative h-full w-full cursor-grab select-none overflow-hidden"
+            className={`relative h-full w-full select-none overflow-hidden ${cursorClass}`}
             style={{ background: theme.canvas.background }}
             onPointerDown={handlePointerDown}
             onDoubleClick={handleDoubleClick}

@@ -50,11 +50,19 @@ import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/compon
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
 import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
-import { InfiniteCanvas } from "@/components/canvas/infinite-canvas";
+import { InfiniteCanvas, type CanvasPointerMode } from "@/components/canvas/infinite-canvas";
 import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNode } from "@/components/canvas/canvas-node";
 import { CanvasNodePromptPanel, type CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import { CanvasToolbar } from "@/components/canvas/canvas-toolbar";
+import { applyLayoutPositions, layoutCanvasNodes } from "@/lib/canvas/canvas-auto-layout";
+import {
+    collectGroupableMemberIds,
+    createGroupFromSelection,
+    resolveUngroupTargetIds,
+    ungroupSelection,
+} from "@/lib/canvas/canvas-group";
+import { fitViewportScaleForNode } from "@/lib/canvas/canvas-node-list";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { CanvasZoomControls } from "@/components/canvas/canvas-zoom-controls";
 import { CanvasLocalAgentPanel } from "@/components/canvas/canvas-local-agent-panel";
@@ -332,6 +340,7 @@ function InfiniteCanvasPage() {
     const [pendingConnectionCreate, setPendingConnectionCreate] = useState<PendingConnectionCreate | null>(null);
     const [mouseWorld, setMouseWorld] = useState<Position>({ x: 0, y: 0 });
     const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
+    const [pointerMode, setPointerMode] = useState<CanvasPointerMode>("pan");
     const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
     const [nodeCreatePosition, setNodeCreatePosition] = useState<Position | null>(null);
     const [runningNodeIds, setRunningNodeIds] = useState<Set<string>>(() => new Set());
@@ -1072,11 +1081,22 @@ function InfiniteCanvasPage() {
         if (!source) return;
 
         const id = `${source.type}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        // Detach batch metadata so copies become independent nodes (no ghost children / orphan roots).
+        const {
+            isBatchRoot: _isBatchRoot,
+            batchRootId: _batchRootId,
+            batchChildIds: _batchChildIds,
+            primaryImageId: _primaryImageId,
+            imageBatchExpanded: _imageBatchExpanded,
+            batchUsesReferenceImages: _batchUsesReferenceImages,
+            ...restMetadata
+        } = source.metadata || {};
         const next: CanvasNodeData = {
             ...source,
             id,
             title: `${source.title} Copy`,
             position: { x: source.position.x + 36, y: source.position.y + 36 },
+            metadata: Object.keys(restMetadata).length ? restMetadata : undefined,
         };
 
         setNodes((prev) => [...prev, next]);
@@ -1138,9 +1158,22 @@ function InfiniteCanvasPage() {
         });
 
         const pastedNodes = nextNodes.map((node) => {
+            // Remap group membership; always detach batch so pasted nodes don't share ghost child ids.
             const groupId = node.metadata?.groupId;
-            if (!groupId) return node;
-            return { ...node, metadata: { ...node.metadata, groupId: idMap.get(groupId) } };
+            const {
+                isBatchRoot: _isBatchRoot,
+                batchRootId: _batchRootId,
+                batchChildIds: _batchChildIds,
+                primaryImageId: _primaryImageId,
+                imageBatchExpanded: _imageBatchExpanded,
+                batchUsesReferenceImages: _batchUsesReferenceImages,
+                ...restMetadata
+            } = node.metadata || {};
+            const nextMetadata = {
+                ...restMetadata,
+                groupId: groupId ? idMap.get(groupId) : undefined,
+            };
+            return { ...node, metadata: Object.keys(nextMetadata).length ? nextMetadata : undefined };
         });
 
         const nextConnections = clipboard.connections.flatMap((connection, index) => {
@@ -1235,17 +1268,12 @@ function InfiniteCanvasPage() {
 
     const handleCanvasMouseDown = useCallback(
         (event: ReactPointerEvent<HTMLDivElement>) => {
+            // InfiniteCanvas only forwards blank-canvas marquee intents here
+            // (select mode, Space invert, or Ctrl/Meta force-select). Always start marquee.
             setContextMenu(null);
             setNodeCreatePosition(null);
             if (pendingConnectionCreateRef.current) cancelPendingConnectionCreate();
             if (event.button !== 0) return;
-
-            if (!event.ctrlKey && !event.metaKey) {
-                setSelectionBox(null);
-                setSelectedNodeIds(new Set());
-                setSelectedConnectionId(null);
-                return;
-            }
 
             const world = screenToCanvas(event.clientX, event.clientY);
             const nextSelectionBox = {
@@ -3037,6 +3065,60 @@ function InfiniteCanvasPage() {
             setAssistantClosing(false);
         }, CANVAS_AGENT_PANEL_MOTION_MS);
     };
+    const tidyCanvasLayout = useCallback(() => {
+        const selected = selectedNodeIdsRef.current;
+        const positions = layoutCanvasNodes(nodesRef.current, connectionsRef.current, {
+            selectedIds: selected.size ? selected : undefined,
+        });
+        if (!positions.size) {
+            message.info("没有可整理的节点");
+            return;
+        }
+        setNodes((prev) => applyLayoutPositions(prev, positions));
+        message.success(selected.size ? `已整理 ${positions.size} 个节点` : "画布已整理");
+    }, [message]);
+
+    const groupSelectedNodes = useCallback(() => {
+        const selected = selectedNodeIdsRef.current;
+        const result = createGroupFromSelection(nodesRef.current, selected);
+        if (!result) {
+            message.info("请至少选中 2 个可成组节点（组本身不计入）");
+            return;
+        }
+        setNodes(result.nodes);
+        setSelectedNodeIds(new Set([result.groupId, ...result.memberIds]));
+        setSelectedConnectionId(null);
+        setContextMenu(null);
+        message.success(`已成组（${result.memberIds.length} 个节点）`);
+    }, [message]);
+
+    const ungroupSelectedNodes = useCallback(() => {
+        const selected = selectedNodeIdsRef.current;
+        const targets = resolveUngroupTargetIds(nodesRef.current, selected);
+        if (!targets.length) {
+            message.info("当前选择没有可取消的组");
+            return;
+        }
+        const next = ungroupSelection(nodesRef.current, targets);
+        setNodes(next);
+        // Keep non-group selection; drop removed group ids.
+        const targetSet = new Set(targets);
+        setSelectedNodeIds(new Set(Array.from(selected).filter((id) => !targetSet.has(id))));
+        setSelectedConnectionId(null);
+        setContextMenu(null);
+        message.success(targets.length === 1 ? "已取消成组" : `已取消 ${targets.length} 个组`);
+    }, [message]);
+
+    const canGroupSelection = useMemo(() => {
+        if (selectedNodeIds.size < 2) return false;
+        return collectGroupableMemberIds(nodes, selectedNodeIds).length >= 2;
+    }, [nodes, selectedNodeIds]);
+
+    const canUngroupSelection = useMemo(() => {
+        if (!selectedNodeIds.size) return false;
+        return resolveUngroupTargetIds(nodes, selectedNodeIds).length > 0;
+    }, [nodes, selectedNodeIds]);
+
     const focusNodeFromList = useCallback(
         (nodeId: string) => {
             const node = nodesRef.current.find((item) => item.id === nodeId);
@@ -3056,7 +3138,8 @@ function InfiniteCanvasPage() {
             const viewWidth = Math.max(size.width - leftInset, 120);
             const worldX = node.position.x + node.width / 2;
             const worldY = node.position.y + node.height / 2;
-            const k = Math.min(Math.max(Math.min((viewWidth * 0.6) / Math.max(node.width, 1), (size.height * 0.6) / Math.max(node.height, 1)), 0.05), 1.5);
+            // Locate zoom capped at 100%; free wheel zoom still goes up to 5×.
+            const k = fitViewportScaleForNode(node, { width: size.width, height: size.height }, { leftInset });
             const target = {
                 x: leftInset + viewWidth / 2 - worldX * k,
                 y: size.height / 2 - worldY * k,
@@ -3125,6 +3208,7 @@ function InfiniteCanvasPage() {
                     containerRef={containerRef}
                     viewport={viewport}
                     backgroundMode={backgroundMode}
+                    pointerMode={pointerMode}
                     onViewportChange={(next) => {
                         setViewport(next);
                         setContextMenu(null);
@@ -3320,6 +3404,7 @@ function InfiniteCanvasPage() {
                     onViewImage={(node) => setPreviewNodeId(node.id)}
                     onReversePrompt={createImageReversePromptNodes}
                     onRetry={(node) => void handleRetryNode(node)}
+                    onDuplicate={(node) => duplicateNode(node.id)}
                     onToggleFreeResize={(node) => toggleNodeFreeResize(node.id)}
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
                 />
@@ -3330,6 +3415,9 @@ function InfiniteCanvasPage() {
                     canRedo={historyState.canRedo}
                     backgroundMode={backgroundMode}
                     showImageInfo={showImageInfo}
+                    pointerMode={pointerMode}
+                    onPointerModeChange={setPointerMode}
+                    onTidyLayout={tidyCanvasLayout}
                     onAddImage={() => createNode(CanvasNodeType.Image)}
                     onAddVideo={() => createNode(CanvasNodeType.Video)}
                     onAddAudio={() => createNode(CanvasNodeType.Audio)}
@@ -3341,7 +3429,6 @@ function InfiniteCanvasPage() {
                     onUpload={() => handleUploadRequest()}
                     onDelete={() => deleteNodes(new Set(selectedNodeIds))}
                     onClear={() => setClearConfirmOpen(true)}
-                    onDeselect={deselectCanvas}
                     onBackgroundModeChange={setBackgroundMode}
                     onShowImageInfoChange={setShowImageInfo}
                     onOpenMyAssets={() => {
@@ -3354,6 +3441,9 @@ function InfiniteCanvasPage() {
                     onDelete={() => deleteNodes(new Set(selectedNodeIds))}
                     onDeselect={deselectCanvas}
                     onCopy={copySelectedNodes}
+                    onTidyLayout={tidyCanvasLayout}
+                    onGroup={canGroupSelection ? groupSelectedNodes : undefined}
+                    onUngroup={canUngroupSelection ? ungroupSelectedNodes : undefined}
                     onShareWorkspace={shareSelectedNodes}
                 />
 
@@ -3375,6 +3465,51 @@ function InfiniteCanvasPage() {
                             copySelectedNodes();
                             setContextMenu(null);
                         }}
+                        onTidyLayout={() => {
+                            if (contextMenu.type === "node" && selectedNodeIds.has(contextMenu.nodeId) && selectedNodeIds.size > 1) {
+                                tidyCanvasLayout();
+                            } else if (contextMenu.type === "node") {
+                                // Right-click single node: tidy that node (and co-moved units via selectedIds).
+                                const only = new Set([contextMenu.nodeId]);
+                                const positions = layoutCanvasNodes(nodesRef.current, connectionsRef.current, { selectedIds: only });
+                                if (positions.size) setNodes((prev) => applyLayoutPositions(prev, positions));
+                            } else {
+                                tidyCanvasLayout();
+                            }
+                            setContextMenu(null);
+                        }}
+                        onGroup={
+                            contextMenu.type === "node" &&
+                            selectedNodeIds.has(contextMenu.nodeId) &&
+                            selectedNodeIds.size > 1 &&
+                            canGroupSelection
+                                ? () => groupSelectedNodes()
+                                : undefined
+                        }
+                        onUngroup={
+                            contextMenu.type === "node"
+                                ? (() => {
+                                      // Multi-select that includes the target, or single node that can ungroup.
+                                      const ids =
+                                          selectedNodeIds.has(contextMenu.nodeId) && selectedNodeIds.size > 1
+                                              ? selectedNodeIds
+                                              : new Set([contextMenu.nodeId]);
+                                      if (!resolveUngroupTargetIds(nodes, ids).length) return undefined;
+                                      return () => {
+                                          if (selectedNodeIds.has(contextMenu.nodeId) && selectedNodeIds.size > 1) {
+                                              ungroupSelectedNodes();
+                                          } else {
+                                              const targets = resolveUngroupTargetIds(nodesRef.current, [contextMenu.nodeId]);
+                                              if (!targets.length) return;
+                                              setNodes(ungroupSelection(nodesRef.current, targets));
+                                              setSelectedNodeIds(new Set(Array.from(selectedNodeIds).filter((id) => !targets.includes(id) && id !== contextMenu.nodeId)));
+                                              setContextMenu(null);
+                                              message.success("已取消成组");
+                                          }
+                                      };
+                                  })()
+                                : undefined
+                        }
                         onShareWorkspace={
                             contextMenu.type === "node"
                                 ? () => {

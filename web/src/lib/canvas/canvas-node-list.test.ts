@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { centerViewportOnNode, filterCanvasNavigationNodes, listCanvasNavigationNodes } from "@/lib/canvas/canvas-node-list";
+import { CANVAS_LOCATE_MAX_ZOOM, centerViewportOnNode, filterCanvasNavigationNodes, fitViewportScaleForNode, listCanvasNavigationNodes } from "@/lib/canvas/canvas-node-list";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 
 function node(id: string, type = CanvasNodeType.Image, overrides: Partial<CanvasNodeData> = {}): CanvasNodeData {
@@ -53,6 +53,22 @@ describe("filterCanvasNavigationNodes", () => {
     it("combines type filtering with search", () => {
         expect(filterCanvasNavigationNodes(nodes, "生成", CanvasNodeType.Config).map((item) => item.id)).toEqual(["config"]);
         expect(filterCanvasNavigationNodes(nodes, "生成", CanvasNodeType.Image)).toEqual([]);
+    });
+});
+
+describe("fitViewportScaleForNode", () => {
+    it("caps locate zoom at 100% by default", () => {
+        const tiny = node("tiny", CanvasNodeType.Image, { width: 40, height: 30 });
+        expect(fitViewportScaleForNode(tiny, { width: 1200, height: 800 })).toBe(CANVAS_LOCATE_MAX_ZOOM);
+        expect(CANVAS_LOCATE_MAX_ZOOM).toBe(1);
+    });
+
+    it("shrinks large nodes and respects left inset", () => {
+        const large = node("large", CanvasNodeType.Image, { width: 2000, height: 1500 });
+        const k = fitViewportScaleForNode(large, { width: 1200, height: 800 }, { leftInset: 300 });
+        expect(k).toBeLessThan(1);
+        expect(k).toBeGreaterThan(0.05);
+        expect(k).toBeCloseTo(Math.min((900 * 0.6) / 2000, (800 * 0.6) / 1500), 5);
     });
 });
 

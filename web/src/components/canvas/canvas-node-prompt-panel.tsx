@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { App, Button, Tooltip } from "antd";
-import { ArrowUp, LoaderCircle, Square, WandSparkles } from "lucide-react";
+import { App, Button, Modal, Tooltip } from "antd";
+import { ArrowUp, LoaderCircle, Maximize2, Minimize2, Square, WandSparkles } from "lucide-react";
 
 import { ModelPicker } from "@/components/model-picker";
 import { requestCreditCost } from "@/constant/credits";
@@ -44,8 +44,10 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     // 点击已生成节点时始终回填 metadata.prompt，与上游一致；不要因已有 content 清空。
     const [prompt, setPrompt] = useState(node.metadata?.prompt || "");
     const [optimizingPrompt, setOptimizingPrompt] = useState(false);
+    const [enlargeOpen, setEnlargeOpen] = useState(false);
     const optimizeAbortRef = useRef<AbortController | null>(null);
     const promptEditorHostRef = useRef<HTMLDivElement | null>(null);
+    const enlargeEditorHostRef = useRef<HTMLDivElement | null>(null);
     const promptRef = useRef(prompt);
     const onPromptChangeRef = useRef(onPromptChange);
     const credits = requestCreditCost({ channelMode: config.channelMode, model: config.model, count: mode === "image" ? config.count : 1 });
@@ -70,7 +72,12 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         };
     }, [node.id]);
 
-    const getPromptEditor = () => promptEditorHostRef.current?.querySelector<HTMLElement>("[contenteditable='true']") || null;
+    const getPromptEditor = () => {
+        if (enlargeOpen) {
+            return enlargeEditorHostRef.current?.querySelector<HTMLElement>("[contenteditable='true']") || null;
+        }
+        return promptEditorHostRef.current?.querySelector<HTMLElement>("[contenteditable='true']") || null;
+    };
 
     const focusPrompt = (options?: { placeAtEnd?: boolean }) => {
         const editor = getPromptEditor();
@@ -105,8 +112,9 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     };
 
     useEffect(() => {
-        // 等节点点击/拖拽 mouseup 结束后再聚焦；已生成媒体节点多试几次，防止 video 控件抢焦点
-        if (optimizingPrompt) return;
+        // 等节点点击/拖拽 mouseup 结束后再聚焦；已生成媒体节点多试几次，防止 video 控件抢焦点。
+        // 放大弹窗打开时暂停小面板 autofocus，避免抢 Modal 内编辑器焦点。
+        if (optimizingPrompt || enlargeOpen) return;
         let cancelled = false;
         const timers = [0, 40, 100, 200, 360, 520].map((delay) =>
             window.setTimeout(() => {
@@ -131,8 +139,19 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
             cancelled = true;
             timers.forEach((timer) => window.clearTimeout(timer));
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- focus only on node/content/optimize changes
-    }, [node.id, optimizingPrompt, node.metadata?.content]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- focus only on node/content/optimize/enlarge changes
+    }, [node.id, optimizingPrompt, enlargeOpen, node.metadata?.content]);
+
+    useEffect(() => {
+        if (!enlargeOpen) return;
+        const timers = [40, 120].map((delay) =>
+            window.setTimeout(() => {
+                focusPrompt({ placeAtEnd: true });
+            }, delay),
+        );
+        return () => timers.forEach((timer) => window.clearTimeout(timer));
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- focus enlarge editor once opened
+    }, [enlargeOpen]);
 
     useEffect(() => {
         return () => {
@@ -185,138 +204,208 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         }
     };
 
-    return (
-        <div
-            data-canvas-no-zoom
-            className="w-[min(560px,calc(100vw-32px))] rounded-2xl border p-3 shadow-2xl backdrop-blur"
-            style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
-            onMouseDown={(event) => event.stopPropagation()}
-            onPointerDown={(event) => event.stopPropagation()}
-            onWheel={(event) => event.stopPropagation()}
-        >
-            {/* 与上游一致：无顶栏标题，输入区 + 底栏（库/优化/模型/参数/发送）；@ 引用为真实缩略图 chip */}
-            <div
-                ref={promptEditorHostRef}
-                className="rounded-xl"
-                onPointerDown={(event) => {
-                    // 只拦冒泡；点到 contentEditable 本身时保留浏览器光标定位
-                    event.stopPropagation();
-                    const target = event.target;
-                    if (target instanceof HTMLElement && target.closest("[contenteditable='true']")) return;
-                    // 点到边框空白处时才 focus，保留现有光标或放到末尾
-                    focusPrompt({ placeAtEnd: true });
-                }}
-                onMouseDown={(event) => {
-                    event.stopPropagation();
-                }}
-            >
-                <CanvasPromptChipInput
-                    value={prompt}
-                    references={mentionReferences}
-                    onChange={updatePrompt}
-                    onSubmit={submit}
-                    className="canvas-prompt-scrollbar canvas-prompt-caret thin-scrollbar min-h-40 max-h-[min(50vh,28rem)] h-40 w-full cursor-text rounded-xl px-3 py-2 text-sm leading-5 outline-none select-text"
-                    style={{ background: "transparent", color: theme.node.text || "#111827", caretColor: "#2563eb" }}
-                    placeholder={promptPlaceholder(mode, hasImageContent, hasTextContent)}
-                />
-            </div>
-
-            <div className="mt-2 flex min-w-0 items-center justify-between gap-2">
-                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-                    <CanvasPromptLibrary onSelect={updatePrompt} optimizeMode={optimizeMode} />
-                    <Tooltip title={optimizeTooltip(optimizeMode)}>
+    const renderToolbar = (options?: { enlarge?: boolean }) => (
+        <div className="mt-2 flex min-w-0 items-center justify-between gap-2">
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+                <CanvasPromptLibrary onSelect={updatePrompt} optimizeMode={optimizeMode} />
+                <Tooltip title={optimizeTooltip(optimizeMode)}>
+                    <Button
+                        type="text"
+                        size="small"
+                        className="!h-8 !w-8 !min-w-8 shrink-0 !rounded-full !bg-transparent !p-0"
+                        style={{ color: theme.node.text }}
+                        icon={<WandSparkles className="size-3.5" />}
+                        loading={optimizingPrompt}
+                        disabled={!canOptimize}
+                        onClick={() => void optimizePrompt()}
+                        aria-label="AI 优化"
+                    />
+                </Tooltip>
+                {!options?.enlarge ? (
+                    <Tooltip title="放大编辑">
                         <Button
                             type="text"
                             size="small"
                             className="!h-8 !w-8 !min-w-8 shrink-0 !rounded-full !bg-transparent !p-0"
                             style={{ color: theme.node.text }}
-                            icon={<WandSparkles className="size-3.5" />}
-                            loading={optimizingPrompt}
-                            disabled={!canOptimize}
-                            onClick={() => void optimizePrompt()}
-                            aria-label="AI 优化"
+                            icon={<Maximize2 className="size-3.5" />}
+                            onClick={() => setEnlargeOpen(true)}
+                            aria-label="放大编辑"
                         />
                     </Tooltip>
-                    {mode === "image" ? (
+                ) : (
+                    <Tooltip title="缩小回浮层">
+                        <Button
+                            type="text"
+                            size="small"
+                            className="!h-8 !w-8 !min-w-8 shrink-0 !rounded-full !bg-transparent !p-0"
+                            style={{ color: theme.node.text }}
+                            icon={<Minimize2 className="size-3.5" />}
+                            onClick={() => setEnlargeOpen(false)}
+                            aria-label="缩小回浮层"
+                        />
+                    </Tooltip>
+                )}
+                {mode === "image" ? (
+                    <>
+                        <ModelPicker
+                            className="!h-8 max-w-[190px]"
+                            config={config}
+                            value={config.model}
+                            onChange={(model) => onConfigChange(node.id, { model })}
+                            capability="image"
+                            onMissingConfig={() => openConfigDialog(true)}
+                        />
+                        <CanvasImageSettingsPopover
+                            config={config}
+                            placement="topLeft"
+                            buttonClassName="!h-8 !max-w-[170px] !justify-start !rounded-full !px-3"
+                            onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
+                            onMissingConfig={() => openConfigDialog(true)}
+                            onOpenChange={onImageSettingsOpenChange}
+                        />
+                    </>
+                ) : mode === "video" ? (
+                    <>
+                        <ModelPicker
+                            className="!h-8 max-w-[190px]"
+                            config={config}
+                            value={config.model}
+                            onChange={(model) => onConfigChange(node.id, { model })}
+                            capability="video"
+                            onMissingConfig={() => openConfigDialog(true)}
+                        />
+                        <CanvasVideoSettingsPopover config={config} buttonClassName="!h-8 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
+                    </>
+                ) : mode === "audio" ? (
+                    <>
+                        <ModelPicker
+                            className="!h-8 max-w-[190px]"
+                            config={config}
+                            value={config.model}
+                            onChange={(model) => onConfigChange(node.id, { model })}
+                            capability="audio"
+                            onMissingConfig={() => openConfigDialog(true)}
+                        />
+                        <CanvasAudioSettingsPopover config={config} buttonClassName="!h-8 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
+                    </>
+                ) : (
+                    <>
+                        <ModelPicker
+                            className="!h-8 max-w-[190px]"
+                            config={config}
+                            value={config.model}
+                            onChange={(model) => onConfigChange(node.id, { model })}
+                            capability="text"
+                            onMissingConfig={() => openConfigDialog(true)}
+                        />
+                        <CanvasTextSettingsPopover config={config} onConfigChange={(_, value) => onConfigChange(node.id, { reasoningEffort: value })} />
+                    </>
+                )}
+            </div>
+            <Button
+                type="primary"
+                className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
+                danger={isRunning}
+                disabled={(!isRunning && !prompt.trim()) || optimizingPrompt}
+                onClick={() => (isRunning ? onStop(node.id) : submit())}
+                aria-label={isRunning ? "停止生成" : "生成"}
+                title={isRunning ? "停止生成" : credits > 0 ? `生成（约 ${credits}）` : "生成"}
+            >
+                <span className="flex items-center gap-1.5">
+                    {isRunning ? (
                         <>
-                            <ModelPicker
-                                className="!h-8 max-w-[190px]"
-                                config={config}
-                                value={config.model}
-                                onChange={(model) => onConfigChange(node.id, { model })}
-                                capability="image"
-                                onMissingConfig={() => openConfigDialog(true)}
-                            />
-                            <CanvasImageSettingsPopover
-                                config={config}
-                                placement="topLeft"
-                                buttonClassName="!h-8 !max-w-[170px] !justify-start !rounded-full !px-3"
-                                onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
-                                onMissingConfig={() => openConfigDialog(true)}
-                                onOpenChange={onImageSettingsOpenChange}
-                            />
-                        </>
-                    ) : mode === "video" ? (
-                        <>
-                            <ModelPicker
-                                className="!h-8 max-w-[190px]"
-                                config={config}
-                                value={config.model}
-                                onChange={(model) => onConfigChange(node.id, { model })}
-                                capability="video"
-                                onMissingConfig={() => openConfigDialog(true)}
-                            />
-                            <CanvasVideoSettingsPopover config={config} buttonClassName="!h-8 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
-                        </>
-                    ) : mode === "audio" ? (
-                        <>
-                            <ModelPicker
-                                className="!h-8 max-w-[190px]"
-                                config={config}
-                                value={config.model}
-                                onChange={(model) => onConfigChange(node.id, { model })}
-                                capability="audio"
-                                onMissingConfig={() => openConfigDialog(true)}
-                            />
-                            <CanvasAudioSettingsPopover config={config} buttonClassName="!h-8 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
+                            <LoaderCircle className="size-4 animate-spin" />
+                            <Square className="size-3.5 fill-current" />
+                            <span className="text-xs font-medium">停止</span>
                         </>
                     ) : (
-                        <>
-                            <ModelPicker
-                                className="!h-8 max-w-[190px]"
-                                config={config}
-                                value={config.model}
-                                onChange={(model) => onConfigChange(node.id, { model })}
-                                capability="text"
-                                onMissingConfig={() => openConfigDialog(true)}
-                            />
-                            <CanvasTextSettingsPopover config={config} onConfigChange={(_, value) => onConfigChange(node.id, { reasoningEffort: value })} />
-                        </>
+                        <ArrowUp className="size-4" />
                     )}
-                </div>
-                <Button
-                    type="primary"
-                    className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
-                    danger={isRunning}
-                    disabled={(!isRunning && !prompt.trim()) || optimizingPrompt}
-                    onClick={() => (isRunning ? onStop(node.id) : submit())}
-                    aria-label={isRunning ? "停止生成" : "生成"}
-                    title={isRunning ? "停止生成" : credits > 0 ? `生成（约 ${credits}）` : "生成"}
-                >
-                    <span className="flex items-center gap-1.5">
-                        {isRunning ? (
-                            <>
-                                <LoaderCircle className="size-4 animate-spin" />
-                                <Square className="size-3.5 fill-current" />
-                                <span className="text-xs font-medium">停止</span>
-                            </>
-                        ) : (
-                            <ArrowUp className="size-4" />
-                        )}
-                    </span>
-                </Button>
-            </div>
+                </span>
+            </Button>
         </div>
+    );
+
+    return (
+        <>
+            <div
+                data-canvas-no-zoom
+                className="w-[min(560px,calc(100vw-32px))] rounded-2xl border p-3 shadow-2xl backdrop-blur"
+                style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onWheel={(event) => event.stopPropagation()}
+            >
+                {/* 与上游一致：无顶栏标题，输入区 + 底栏（库/优化/模型/参数/发送）；@ 引用为真实缩略图 chip */}
+                <div
+                    ref={promptEditorHostRef}
+                    className="rounded-xl"
+                    onPointerDown={(event) => {
+                        // 只拦冒泡；点到 contentEditable 本身时保留浏览器光标定位
+                        event.stopPropagation();
+                        const target = event.target;
+                        if (target instanceof HTMLElement && target.closest("[contenteditable='true']")) return;
+                        // 点到边框空白处时才 focus，保留现有光标或放到末尾
+                        focusPrompt({ placeAtEnd: true });
+                    }}
+                    onMouseDown={(event) => {
+                        event.stopPropagation();
+                    }}
+                >
+                    <CanvasPromptChipInput
+                        value={prompt}
+                        references={mentionReferences}
+                        onChange={updatePrompt}
+                        onSubmit={submit}
+                        className="canvas-prompt-scrollbar canvas-prompt-caret thin-scrollbar min-h-40 max-h-[min(50vh,28rem)] h-40 w-full cursor-text rounded-xl px-3 py-2 text-sm leading-5 outline-none select-text"
+                        style={{ background: "transparent", color: theme.node.text || "#111827", caretColor: "#2563eb" }}
+                        placeholder={promptPlaceholder(mode, hasImageContent, hasTextContent)}
+                    />
+                </div>
+
+                {renderToolbar()}
+            </div>
+
+            <Modal
+                open={enlargeOpen}
+                title="放大编辑提示词"
+                footer={null}
+                centered
+                width={Math.min(920, typeof window !== "undefined" ? window.innerWidth - 48 : 920)}
+                destroyOnHidden
+                onCancel={() => setEnlargeOpen(false)}
+                styles={{ body: { paddingTop: 8 } }}
+                modalRender={(modal) => (
+                    <div data-canvas-no-zoom onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
+                        {modal}
+                    </div>
+                )}
+            >
+                <div
+                    ref={enlargeEditorHostRef}
+                    className="rounded-xl border"
+                    style={{ borderColor: theme.toolbar.border, background: theme.toolbar.panel }}
+                    onPointerDown={(event) => {
+                        event.stopPropagation();
+                        const target = event.target;
+                        if (target instanceof HTMLElement && target.closest("[contenteditable='true']")) return;
+                        focusPrompt({ placeAtEnd: true });
+                    }}
+                >
+                    <CanvasPromptChipInput
+                        value={prompt}
+                        references={mentionReferences}
+                        onChange={updatePrompt}
+                        onSubmit={submit}
+                        className="canvas-prompt-scrollbar canvas-prompt-caret thin-scrollbar min-h-[min(52vh,28rem)] max-h-[min(60vh,36rem)] h-[min(52vh,28rem)] w-full cursor-text rounded-xl px-4 py-3 text-base leading-6 outline-none select-text"
+                        style={{ background: "transparent", color: theme.node.text || "#111827", caretColor: "#2563eb" }}
+                        placeholder={promptPlaceholder(mode, hasImageContent, hasTextContent)}
+                    />
+                </div>
+                {renderToolbar({ enlarge: true })}
+            </Modal>
+        </>
     );
 }
 

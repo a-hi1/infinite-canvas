@@ -5,7 +5,9 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
+      # 本机习惯 3001；与公司机一致也可直接开 3011（两端口同源同一容器）
       - "3001:3000"
+      - "3011:3000"
     environment:
       # 可选：内网 OpenAI 兼容（如局域网 Grok）同源中继目标，host:port 或 http://host:port
       # 例：LAN_AI_UPSTREAM=192.168.6.78:8000 后，前端渠道 Base URL 填 /lan-ai（勿填局域网 IP，否则浏览器 CORS）

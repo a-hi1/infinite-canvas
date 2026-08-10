@@ -181,11 +181,12 @@ docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.ym
 - **若未 commit/push，服务器与公司机还没有**——以 `git status` 与 [pending-test](/docs/progress/pending-test) 首条为准
 - 权限：创建者或 owner 改元数据；显式分享，不自动全量同步私有库
 
-### 上游切片（对照 v0.10.0，不整仓 merge）
+### 上游切片（对照 v0.15.x，不整仓 merge）
 
 - 透明背景（BYOK）、组节点（最小）、modelScripts
 - 画布导出当前/选中、生成后保留节点提示词、节点名默认隐藏、提示词搜索防抖
-- 完整可调宽侧栏资产 Tab **现阶段不做**
+- 完整可调宽侧栏资产 Tab / 整包 i18n / 整包 Agent Skill / 自动跟 MIT **现阶段不做**
+- **画布体验（0.15 切片 + 自用排版/成组）：** 提示词放大 Modal、选择/移动模式（默认 pan + Space 反转）、列表定位 ≤100%、多图失败重试/副本/下载（不合并节点）、一键排版（barycenter + 垂直对齐）、**多选成组/取消成组**；详见 [upstream-follow](/docs/progress/upstream-follow) / [pending-test](/docs/progress/pending-test)
 
 ### 渠道 / 模型兼容（高频踩坑）
 

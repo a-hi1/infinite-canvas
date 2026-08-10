@@ -1,11 +1,12 @@
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, RefObject } from "react";
 import { useRef, useState } from "react";
 import { Button, Segmented, Switch } from "antd";
-import { CircleDot, Eraser, FolderOpen, Grid2x2, Group, Hand, Image as ImageIcon, Info, Moon, Music2, Palette, Redo2, Settings2, Square, Sun, Trash2, Type, Undo2, Upload, Video } from "lucide-react";
+import { CircleDot, Eraser, FolderOpen, Grid2x2, Group, Hand, Image as ImageIcon, Info, LayoutGrid, Moon, MousePointer2, Music2, Palette, Redo2, Settings2, Square, Sun, Trash2, Type, Undo2, Upload, Video } from "lucide-react";
 
 import { canvasThemes, type CanvasBackgroundMode, type CanvasColorTheme, type CanvasTheme } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { AnimatedThemeToggler } from "@/components/ui/animated-theme-toggler";
+import type { CanvasPointerMode } from "@/components/canvas/infinite-canvas";
 
 export function CanvasToolbar({
     selectedCount,
@@ -13,6 +14,9 @@ export function CanvasToolbar({
     canRedo,
     backgroundMode,
     showImageInfo,
+    pointerMode = "pan",
+    onPointerModeChange,
+    onTidyLayout,
     onAddImage,
     onAddVideo,
     onAddAudio,
@@ -24,7 +28,6 @@ export function CanvasToolbar({
     onUpload,
     onDelete,
     onClear,
-    onDeselect,
     onBackgroundModeChange,
     onShowImageInfoChange,
     onOpenMyAssets,
@@ -34,6 +37,9 @@ export function CanvasToolbar({
     canRedo: boolean;
     backgroundMode: CanvasBackgroundMode;
     showImageInfo: boolean;
+    pointerMode?: CanvasPointerMode;
+    onPointerModeChange?: (mode: CanvasPointerMode) => void;
+    onTidyLayout?: () => void;
     onAddImage: () => void;
     onAddVideo: () => void;
     onAddAudio: () => void;
@@ -45,7 +51,6 @@ export function CanvasToolbar({
     onUpload: () => void;
     onDelete: () => void;
     onClear: () => void;
-    onDeselect: () => void;
     onBackgroundModeChange: (mode: CanvasBackgroundMode) => void;
     onShowImageInfoChange: (show: boolean) => void;
     onOpenMyAssets: () => void;
@@ -67,8 +72,14 @@ export function CanvasToolbar({
         <div className="pointer-events-none absolute bottom-5 z-50 flex justify-center" style={{ left: 300, right: 16 }}>
             {tip ? <DockTip label={tip} x={tipX} theme={theme} /> : null}
             <div ref={wrapRef} className="thin-scrollbar pointer-events-auto flex h-14 max-w-full items-center gap-1 overflow-x-auto rounded-xl border px-2 shadow-lg backdrop-blur [&>*]:shrink-0" style={dockStyle}>
-                <ToolbarButton id="tool-hand" label="移动/选择" active={!selectedCount} hovered={hovered} activeStyle={activeStyle} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onDeselect}>
+                <ToolbarButton id="tool-hand" label="移动画布" active={pointerMode === "pan"} hovered={hovered} activeStyle={activeStyle} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={() => onPointerModeChange?.("pan")}>
                     <Hand className="size-4.5" />
+                </ToolbarButton>
+                <ToolbarButton id="tool-select" label="选择节点" active={pointerMode === "select"} hovered={hovered} activeStyle={activeStyle} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={() => onPointerModeChange?.("select")}>
+                    <MousePointer2 className="size-4.5" />
+                </ToolbarButton>
+                <ToolbarButton id="tool-tidy" label={selectedCount ? `整理选中（${selectedCount}）` : "一键排版"} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onTidyLayout}>
+                    <LayoutGrid className="size-4.5" />
                 </ToolbarButton>
                 <ToolbarButton id="tool-undo" label="撤销" disabled={!canUndo} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onUndo}>
                     <Undo2 className="size-4.5" />
@@ -291,7 +302,9 @@ function DockTip({ label, x, theme }: { label: string; x: number; theme: CanvasT
 }
 
 function toolLabel(id: string) {
-    if (id === "tool-hand") return "移动/选择";
+    if (id === "tool-hand") return "移动画布（Space 临时切换）";
+    if (id === "tool-select") return "选择节点（Space 临时切换）";
+    if (id === "tool-tidy") return "一键排版";
     if (id === "tool-undo") return "撤销";
     if (id === "tool-redo") return "重做";
     if (id === "tool-text") return "文本";

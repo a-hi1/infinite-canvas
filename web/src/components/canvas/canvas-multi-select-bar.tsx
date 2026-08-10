@@ -1,4 +1,4 @@
-import { Copy, Share2, Trash2, X } from "lucide-react";
+import { Copy, Group, LayoutGrid, Share2, Trash2, Ungroup, X } from "lucide-react";
 import { Button } from "antd";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -10,12 +10,20 @@ export function CanvasMultiSelectBar({
     onDelete,
     onDeselect,
     onCopy,
+    onTidyLayout,
+    onGroup,
+    onUngroup,
     onShareWorkspace,
 }: {
     count: number;
     onDelete: () => void;
     onDeselect: () => void;
     onCopy: () => void;
+    onTidyLayout?: () => void;
+    /** Create a group frame from the current selection (≥2 groupable nodes). */
+    onGroup?: () => void;
+    /** Detach selection from its group / remove selected group frame. */
+    onUngroup?: () => void;
     onShareWorkspace?: () => void;
 }) {
     const colorTheme = useThemeStore((state) => state.theme);
@@ -38,6 +46,21 @@ export function CanvasMultiSelectBar({
                 <Button size="small" type="text" icon={<Copy className="size-3.5" />} onClick={onCopy} className="!px-2">
                     复制
                 </Button>
+                {onGroup ? (
+                    <Button size="small" type="text" icon={<Group className="size-3.5" />} onClick={onGroup} className="!px-2">
+                        成组
+                    </Button>
+                ) : null}
+                {onUngroup ? (
+                    <Button size="small" type="text" icon={<Ungroup className="size-3.5" />} onClick={onUngroup} className="!px-2">
+                        取消成组
+                    </Button>
+                ) : null}
+                {onTidyLayout ? (
+                    <Button size="small" type="text" icon={<LayoutGrid className="size-3.5" />} onClick={onTidyLayout} className="!px-2">
+                        整理选中
+                    </Button>
+                ) : null}
                 {onShareWorkspace ? (
                     <Button size="small" type="text" icon={<Share2 className="size-3.5" />} onClick={onShareWorkspace} className="!px-2">
                         发布空间

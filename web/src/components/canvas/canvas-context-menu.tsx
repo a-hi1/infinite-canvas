@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import type { ReactNode } from "react";
-import { Copy, Plus, Share2, Trash2 } from "lucide-react";
+import { Copy, Group, LayoutGrid, Plus, Share2, Trash2, Ungroup } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -12,6 +12,9 @@ export function CanvasNodeContextMenu({
     onDuplicate,
     onDelete,
     onCopy,
+    onTidyLayout,
+    onGroup,
+    onUngroup,
     onShareWorkspace,
     selectedCount = 1,
 }: {
@@ -20,6 +23,9 @@ export function CanvasNodeContextMenu({
     onDuplicate: () => void;
     onDelete: () => void;
     onCopy?: () => void;
+    onTidyLayout?: () => void;
+    onGroup?: () => void;
+    onUngroup?: () => void;
     onShareWorkspace?: () => void;
     /** When right-click target is part of multi-selection, delete/copy applies to all. */
     selectedCount?: number;
@@ -48,6 +54,17 @@ export function CanvasNodeContextMenu({
             ) : null}
             {menu.type === "node" && !multi ? <MenuButton icon={<Plus className="size-4" />} label="复制节点" onClick={onDuplicate} /> : null}
             {menu.type === "node" && multi && onCopy ? <MenuButton icon={<Copy className="size-4" />} label={`复制 ${selectedCount} 个`} onClick={onCopy} /> : null}
+            {menu.type === "node" && multi && onGroup ? <MenuButton icon={<Group className="size-4" />} label="成组" onClick={onGroup} /> : null}
+            {menu.type === "node" && onUngroup ? (
+                <MenuButton icon={<Ungroup className="size-4" />} label={multi ? "取消成组" : "取消成组"} onClick={onUngroup} />
+            ) : null}
+            {onTidyLayout ? (
+                <MenuButton
+                    icon={<LayoutGrid className="size-4" />}
+                    label={menu.type === "node" && multi ? `整理选中（${selectedCount}）` : menu.type === "node" ? "整理布局" : "整理画布"}
+                    onClick={onTidyLayout}
+                />
+            ) : null}
             {menu.type === "node" && onShareWorkspace ? (
                 <MenuButton
                     icon={<Share2 className="size-4" />}

@@ -4,6 +4,13 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasConnection, CanvasNodeData, ConnectionHandle, Position } from "@/types/canvas";
 
+/** Cubic horizontal control offset: softens short edges, caps long ones for less "swoop". */
+function horizontalCurvature(dx: number) {
+    const abs = Math.abs(dx);
+    // Short reverse/back edges still need some bow; long edges stay readable without ballooning.
+    return Math.min(220, Math.max(48, abs * 0.42));
+}
+
 export function ConnectionPath({
     connection,
     from,
@@ -24,8 +31,7 @@ export function ConnectionPath({
     const startY = from.position.y + from.height / 2;
     const endX = to.position.x;
     const endY = to.position.y + to.height / 2;
-    const dx = Math.abs(endX - startX);
-    const curvature = Math.max(dx * 0.5, 50);
+    const curvature = horizontalCurvature(endX - startX);
     const pathD = `M ${startX} ${startY} C ${startX + curvature} ${startY}, ${endX - curvature} ${endY}, ${endX} ${endY}`;
 
     return (
@@ -53,6 +59,7 @@ export function ConnectionPath({
                 strokeWidth={active ? 3 : 2}
                 strokeOpacity={active ? 1 : 0.82}
                 fill="none"
+                strokeLinecap="round"
                 style={{ filter: active ? `drop-shadow(0 0 8px ${theme.node.activeStroke}66)` : undefined, pointerEvents: "none" }}
             />
         </g>
@@ -71,8 +78,8 @@ export function ActiveConnectionPath({ node, handle, mouseWorld, target }: { nod
     const snappedStartY = handle.handleType === "target" && target ? target.position.y + target.height / 2 : startY;
     const snappedEndX = handle.handleType === "source" && target ? target.position.x : endX;
     const snappedEndY = handle.handleType === "source" && target ? target.position.y + target.height / 2 : endY;
-    const distance = Math.abs(snappedEndX - snappedStartX);
-    const pathD = `M ${snappedStartX} ${snappedStartY} C ${snappedStartX + distance * 0.5} ${snappedStartY}, ${snappedEndX - distance * 0.5} ${snappedEndY}, ${snappedEndX} ${snappedEndY}`;
+    const curvature = horizontalCurvature(snappedEndX - snappedStartX);
+    const pathD = `M ${snappedStartX} ${snappedStartY} C ${snappedStartX + curvature} ${snappedStartY}, ${snappedEndX - curvature} ${snappedEndY}, ${snappedEndX} ${snappedEndY}`;
 
-    return <path d={pathD} stroke={theme.node.activeStroke} strokeWidth="2" fill="none" strokeDasharray="5,5" />;
+    return <path d={pathD} stroke={theme.node.activeStroke} strokeWidth="2" fill="none" strokeDasharray="5,5" strokeLinecap="round" />;
 }

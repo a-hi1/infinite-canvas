@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { App, Modal, Segmented, Tooltip } from "antd";
-import { Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, MessageSquare, Minus, Music2, Pencil, Plus, RefreshCw, Settings2, Share2, Trash2, Upload, Video } from "lucide-react";
+import { CopyPlus, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, MessageSquare, Minus, Music2, Pencil, Plus, RefreshCw, Settings2, Share2, Trash2, Upload, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes, getDataUrlByteSize } from "@/lib/image-utils";
@@ -34,6 +34,7 @@ type CanvasNodeHoverToolbarProps = {
     onViewImage: (node: CanvasNodeData) => void;
     onReversePrompt: (node: CanvasNodeData) => void;
     onRetry: (node: CanvasNodeData) => void;
+    onDuplicate?: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
     onDelete: (node: CanvasNodeData) => void;
 };
@@ -72,6 +73,7 @@ export function CanvasNodeHoverToolbar({
     onViewImage,
     onReversePrompt,
     onRetry,
+    onDuplicate,
     onToggleFreeResize,
     onDelete,
 }: CanvasNodeHoverToolbarProps) {
@@ -140,6 +142,7 @@ export function CanvasNodeHoverToolbar({
     ];
     const nodeToolbarTools: ToolbarTool[] = [
         ...(canRetry ? [{ id: "retry", title: "重新生成", label: "重试", icon: <RefreshCw className="size-4" />, onClick: () => onRetry(node) }] : []),
+        ...(onDuplicate ? [{ id: "duplicate", title: "复制为独立节点", label: "副本", icon: <CopyPlus className="size-4" />, onClick: () => onDuplicate(node) }] : []),
         ...(hasImage || hasVideo || isText ? [{ id: "saveAsset", title: "加入我的资产", label: "存资产", icon: <FolderPlus className="size-4" />, onClick: () => onSaveAsset(node) }] : []),
         ...(onShareWorkspace && (hasImage || hasVideo || isText) ? [{ id: "shareWorkspace", title: "发布到工作空间", label: "发布空间", icon: <Share2 className="size-4" />, onClick: () => onShareWorkspace(node) }] : []),
         ...(hasImage || hasVideo || hasAudio ? [{ id: "download", title: hasAudio ? "下载音频" : hasVideo ? "下载视频" : "下载图片", label: "下载", icon: <Download className="size-4" />, onClick: () => onDownload(node) }] : []),
@@ -154,7 +157,11 @@ export function CanvasNodeHoverToolbar({
         ...(isAudio ? [{ id: "uploadAudio", title: hasAudio ? "替换音频" : "上传音频", label: hasAudio ? "替换音频" : "上传音频", icon: <Music2 className="size-4" />, onClick: () => onUpload(node) }] : []),
         ...(hasImage ? imageTools.map((tool) => ({ id: tool.id, title: tool.title, label: tool.label, icon: tool.icon, active: tool.active, onClick: tool.onClick })) : []),
     ];
-    const toolbarTools = hasImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => quickImageToolIdSet.has(tool.id as ImageQuickToolId)) : [...baseToolbarTools, ...nodeToolbarTools];
+    // Error retry is always forced visible even if user hid it in image quick-tool settings.
+    const alwaysVisibleToolIds = new Set(["retry"]);
+    const toolbarTools = hasImage
+        ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => alwaysVisibleToolIds.has(tool.id) || quickImageToolIdSet.has(tool.id as ImageQuickToolId))
+        : [...baseToolbarTools, ...nodeToolbarTools];
     const selectableImageToolbarTools = [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => tool.id !== "retry") as ImageToolbarSettingsTool[];
 
     const closeImageToolSettings = () => {

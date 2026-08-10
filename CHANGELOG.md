@@ -2,6 +2,9 @@
 
 ## Unreleased
 
++ [优化] 画布一键排版更美观：层序 barycenter 减交叉、后继按前驱垂直对齐、列居中、列/行间距加大；连线曲率软化封顶（更直、不「甩弯」）。仍可撤销；组/batch 为单元；有选中只排选中。
++ [新增] 多选成组：选中 ≥2 个可成组节点后，多选栏 / 右键「成组」生成贴合框并写入 `groupId`（拖组仍带动成员）；「取消成组」拆框保位置。空组按钮不显示；不改生成/连线语义。
++ [新增] 画布体验切片（借鉴上游 0.15，不整仓 merge）：① 提示词面板「放大编辑」Modal，与浮层共用同一 prompt 状态实时同步，关闭不清草稿；② 底栏 **移动 / 选择** 双模式（默认仍移动=空白拖平移），Space 临时反转，Ctrl/Meta 空白仍可强制框选；③ 元素列表定位缩放上限 **100%**（滚轮仍可放大到 5×）；④ 失败/多图结果：hover 强制显示重试，新增「副本」入口（脱批为独立节点），删除仍维护 batch 主图；⑤ **一键排版**（底栏 / 多选栏 / 右键）— 有选中只排选中，否则全画布；组与 batch 按单元，链路左→右，可撤销。**不改** 生成 API / Grok / Seedance / 云双轨 / 并发生成模型。
 + [修复] Grok 完成态 `video.url` 为相对路径（如 `/v1/videos/{id}/content`，约 55 字符）时：按渠道 Base URL 解析为绝对地址并带 API Key 下载成 blob，不再误报「没有可播放的视频地址」。绝对 CDN URL / 空串晚写 / content 回落路径不变；公网 CDN 仍不带中转 Key。
 + [修复] Seedance 中转 3+ 参考图：全部使用 `reference_image` role，不再把首/末张标成 `first_frame`/`last_frame` 与中间参考混用（上游 `InvalidParameter: last frame image content cannot be mixed with reference image`）。单图 `reference_image`、双图首尾帧不变；不丢图、不退回文生。
 + [修复] Seedance 视频可上云：`api` `from-url` 与前端 `cloud-history` / 落盘 media 代理白名单补齐火山/字节 CDN（`volces` / `volcengine` / `byteimg` 等），与 `ai-proxy/media` 对齐；不再因域名被拦表现为「Seedance 不支持云端」。有 `storageKey` 的本机落盘路径不变；Grok/xAI 路径不变。
