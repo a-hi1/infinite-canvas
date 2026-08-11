@@ -130,7 +130,9 @@ curl -sS -X POST http://127.0.0.1:3011/api/admin/credits/grant \
 - 接口（需登录）：`GET /api/projects`、`GET/PUT/DELETE /api/projects/:id`
 - 存储：元数据在 `db.json` 的 `projects`；正文 JSON 在 `data/api/projects/{userId}/{id}.json`
 - 策略：**本地优先**；登录后浏览器防抖推送；云端更新冲突返回 409（可 `?force=1` 覆盖）
-- **范围：** 项目 JSON + 节点引用的本地 `storageKey` 媒体（`POST /api/blobs`，按 `client_key` 幂等；`GET /api/blobs/by-key/:key`）
+- **范围：** 项目 JSON + 节点引用的本地 `storageKey` 媒体（`POST /api/blobs`，按用户 + `client_key` 幂等；`GET /api/blobs/by-key/:key`）
+- 同一登录账号和 `storageKey` 的客户端并发上传会合并，成功后当前会话跳过重复请求；失败不缓存，可继续重试
+- API 对已有且磁盘文件完整的 `client_key` 直接返回 `deduped: true`，不计入新上传限额；新 key 或文件丢失后的修复上传仍受限流、单文件上限与用户容量约束
 - 远程仅 URL、无本地 blob 的媒体不会上传（与 CORS/临时链一致）
 - 与 WebDAV `app-sync` 并存：WebDAV 仍是可选整包同步；本接口是账号维度的项目/媒体同步
 

@@ -28,6 +28,8 @@ export const DIRECTOR_DESK_MSG = {
     close: "storyai:director-desk-close",
     capturesSent: "storyai:director-desk-captures-sent",
     panoramaRemoved: "storyai:director-desk-panorama-removed",
+    /** 子页请求宿主 BYOK 文本模型做场景规划 */
+    planRequest: "storyai:director-desk-plan-request",
 } as const;
 
 /** Parent → child */
@@ -35,7 +37,33 @@ export const DIRECTOR_DESK_HOST_MSG = {
     session: "storyai:director-desk-session",
     panorama: "storyai:director-desk-panorama",
     importResult: "storyai:director-desk-import-result",
+    /** 宿主返回文本模型规划结果（JSON 文本或解析后的 plan） */
+    planResult: "storyai:director-desk-plan-result",
 } as const;
+
+export type DirectorDeskPlanImage = {
+    dataUrl: string;
+    fileName?: string;
+};
+
+export type DirectorDeskPlanRequest = {
+    requestId: string;
+    prompt: string;
+    systemPrompt?: string;
+    /** 可选参考图（data URL），走主站 textModel 多模态识图规划 */
+    images?: DirectorDeskPlanImage[];
+    /** scene=整场景搭建；pose-adjust=对当前角色指令调姿（仍只返回文本/JSON） */
+    kind?: "scene" | "pose-adjust";
+};
+
+export type DirectorDeskPlanResult = {
+    requestId: string;
+    ok: boolean;
+    text?: string;
+    plan?: unknown;
+    message?: string;
+    error?: string;
+};
 
 export type DirectorDeskImportResult = {
     ok: boolean;
@@ -189,6 +217,34 @@ export function postDirectorDeskImportResult(
             target: result.target || "assets",
         },
     };
+    postDirectorDeskHostMessage(targets, message);
+}
+
+/** 把场景规划结果回传给导演台（postMessage + BroadcastChannel）。 */
+export function postDirectorDeskPlanResult(
+    targets: Array<Window | null | undefined>,
+    result: DirectorDeskPlanResult,
+) {
+    if (typeof window === "undefined") return;
+    const message = {
+        type: DIRECTOR_DESK_HOST_MSG.planResult,
+        payload: {
+            requestId: String(result.requestId || "").trim(),
+            ok: Boolean(result.ok),
+            text: String(result.text || ""),
+            plan: result.plan ?? null,
+            message: String(result.message || "").trim(),
+            error: String(result.error || "").trim(),
+        },
+    };
+    postDirectorDeskHostMessage(targets, message);
+}
+
+function postDirectorDeskHostMessage(
+    targets: Array<Window | null | undefined>,
+    message: { type: string; payload: unknown },
+) {
+    if (typeof window === "undefined") return;
     const origin = window.location.origin;
     const seen = new Set<Window>();
     for (const target of targets) {

@@ -20,10 +20,12 @@ import {
     soraVeoReferenceImageLimit,
 } from "@/lib/openai-compatible-video";
 import {
+    isArkPlanBaseUrl,
     isSeedanceFastModel,
     isSeedanceVideoConfig,
     normalizeSeedanceDuration,
     normalizeSeedanceRatio,
+    normalizeSeedanceRelayDuration,
     normalizeSeedanceResolution,
     seedanceDurationOptions,
     seedanceRatioOptions,
@@ -188,6 +190,9 @@ export function resolveVideoCapability(config: AiConfig): VideoCapabilityProfile
 
     if (isSeedanceVideoConfig(config)) {
         const fast = isSeedanceFastModel(modelName);
+        const requestConfig = resolveModelRequestConfig(config, config.model || config.videoModel);
+        const supportsSmartDuration = isArkPlanBaseUrl(requestConfig.baseUrl);
+        const durationOptions = supportsSmartDuration ? seedanceDurationOptions : seedanceDurationOptions.filter((value) => value !== -1);
         return {
             provider: "seedance",
             modelLabel: label,
@@ -196,7 +201,7 @@ export function resolveVideoCapability(config: AiConfig): VideoCapabilityProfile
                 label: item.value === "adaptive" ? "跟随原图" : item.label,
                 hint: item.value === "adaptive" ? "adaptive" : item.value,
             })),
-            seconds: seedanceDurationOptions.map((value) => ({
+            seconds: durationOptions.map((value) => ({
                 value: String(value),
                 label: value === -1 ? "智能" : `${value}s`,
             })),
@@ -206,12 +211,12 @@ export function resolveVideoCapability(config: AiConfig): VideoCapabilityProfile
                 disabled: fast && item.value === "1080p",
                 disabledReason: "fast 模型不支持 1080p，会自动用 720p",
             })),
-            customSeconds: { min: -1, max: 15 },
+            customSeconds: { min: supportsSmartDuration ? -1 : 4, max: 15 },
             audio: true,
             watermark: true,
             normalize: {
                 size: (value) => normalizeSeedanceRatio(value),
-                seconds: (value) => String(normalizeSeedanceDuration(value)),
+                seconds: (value) => String(supportsSmartDuration ? normalizeSeedanceDuration(value) : normalizeSeedanceRelayDuration(value)),
                 resolution: (value) => normalizeSeedanceResolution(value, modelName),
             },
             card: {
@@ -222,8 +227,8 @@ export function resolveVideoCapability(config: AiConfig): VideoCapabilityProfile
                     {
                         label: "输出规格",
                         value: fast
-                            ? "分辨率 480p/720p（fast 无 1080p）· 时长 4–15s 或智能 · 可选声音/水印"
-                            : "分辨率 480p/720p/1080p · 时长 4–15s 或智能 · 可选声音/水印",
+                            ? `分辨率 480p/720p（fast 无 1080p）· 时长 4–15s${supportsSmartDuration ? " 或智能" : ""} · 可选声音/水印`
+                            : `分辨率 480p/720p/1080p · 时长 4–15s${supportsSmartDuration ? " 或智能" : ""} · 可选声音/水印`,
                     },
                     { label: "返回格式", value: "火山/Seedance Agent Plan 任务轮询" },
                     { label: "不支持", value: fast ? "fast 模型 1080p；超限参考素材" : "超限参考素材、非 Seedance 路径字段" },

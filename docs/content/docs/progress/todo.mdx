@@ -9,7 +9,7 @@ description: 当前项目后续值得处理的事项
 
 - 本地 Agent 接入后续：按[本地 Agent 接入规划](/docs/progress/local-agent-integration-plan)把 Claude Code CLI Adapter 升级为 Claude Agent SDK Adapter，并完善工具队列体验。
 - AI 接口安全代理后续：已增加首版 `ai-proxy` 服务和前端代理渠道入口，后续继续完善多用户鉴权、额度控制、分渠道上游配置和更细粒度的接口白名单体验；公开多人使用前仍需补充更完整的用户体系。
-- **当前主线（S0 已出门，收费仍后置）：** 本地 BYOK + 云双轨/画布素材同步已验收 + **个人自用体验优化** + 上游按矩阵小切片。S1 图生图边界已合入 `main`；**视频多参考图首图静默退化已修**；ai-proxy 白名单/Vitest lock 等微修仍可暂缓。完整矩阵见 [上游跟进矩阵](/docs/progress/upstream-follow)。运维见 [日常运维自检](/docs/progress/ops-daily)。
+- **当前主线（S0 已出门，收费仍后置）：** 本地 BYOK + 云双轨/画布素材同步已验收 + **个人自用体验优化** + 上游按矩阵小切片。S1 图生图边界已合入 `main`；**视频多参考图首图静默退化已修**；Grok 14 模型画像、codex2api/xAI 原生 `/v1/tts` 与 `/v1/stt` 适配、普通 OpenAI 兼容 STT 及画布音频转文字已落地，待用户带现有凭证人工点验成功态；`grok-voice-latest` 实时协议与 `grok-web-search` 联网契约仍后置等待明确契约。ai-proxy 更细白名单/Vitest lock 等微修仍可暂缓。完整矩阵见 [上游跟进矩阵](/docs/progress/upstream-follow)。运维见 [日常运维自检](/docs/progress/ops-daily)。
 - 云端账号 P0.5c / S0：**已出门** — [P0.5c 验稳收口](/docs/progress/p05c-acceptance) 与 [S0 人工验收清单](/docs/progress/s0-human-checklist) A/B/C/D 均已勾选；自动 `check-cloud-stack` + `smoke-dual-track` 硬失败 0。账号积分余额展示已打开；平台代生成仍默认关。**支付/插件大改仍勿抢跑。**
 - 云端账号 P1：底座 A～G 代码已在（网关+账本默认关）。**画布扣积分 / 平台扣积分 / 支付均后置**（需明确要收费再开）。
 - 云端账号 P2：**P2.0-A/B/C 代码已完成且 S0 已点验**（projects/blobs/assets + tombstone）；**未做：** Postgres、S3、完整可调宽画布侧栏。
@@ -18,4 +18,4 @@ description: 当前项目后续值得处理的事项
 - 渠道生图兼容：`compatProfile` = auto / openai / openai-slim / grok-image / relay-fragile。**auto 与历史行为一致**（/lan-ai→Grok 比例；codex2api→fragile；其它→OpenAI）。换中转优先改预设，复杂协议再用模型自定义脚本。
 - 提示词库预览：精选只认可用封面 + 坏链 runtime 剔除已落地；单条「生成预览图」按需 BYOK 已落地。**不做：** 打开库自动批量给无图条目生封面；一键「给所有精选补图」。后续若有需要，仅考虑「我的提示词」小批量补图。
 - 内网 OpenAI 兼容（局域网 Grok 等）：已支持可选同源中继 `/lan-ai`（`LAN_AI_UPSTREAM`）。**不要**让浏览器直连 `http://192.168.x.x`（CORS）。公网要用家里 Grok2API：见 `deploy/lan-tunnel/README.md`（FRP 方案 B，独立 compose，默认不启动）。公网共享时须 API Key，`18000` 仅绑本机。
-- **3D 导演台后续（modal iframe / 新窗口已落地，待人工验收）**：弹层+新窗口共享场景，截图回流资产；画布页可再插入图片节点。**后置** 画布节点硬嵌入、全景图双向边、独立 `/director` 路由整页、把导演台源码合进 monorepo 开发依赖。上游更新时按 `web/public/director-desk/README.md` 旁路重建覆盖，勿手改 dist。
+- **3D 导演台后续（modal iframe / 新窗口 + 自动搭建 P0 + AI识图 + 指令调姿 已落地，待人工验收）**：弹层+新窗口共享场景，截图回流资产；场景面板可用描述/参考图自动搭建；选中角色可自然语言指令调姿（规则/BYOK 文本）。**后置** 更细动作库/道具摆放、画布节点硬嵌入、全景图双向边、独立 `/director` 路由整页、把导演台源码合进 monorepo 开发依赖、从资产库一键带图识图、视口内直接语音/快捷指令。上游更新时按 `web/public/director-desk/README.md` 旁路重建覆盖，勿手改 dist。

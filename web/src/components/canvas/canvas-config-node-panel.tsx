@@ -3,11 +3,13 @@ import { Image as ImageIcon, LoaderCircle, MessageSquare, Music2, Play, Settings
 import { Button, Segmented } from "antd";
 
 import { ModelPicker } from "@/components/model-picker";
-import { AGNES_VIDEO_SIZE, agnesVideoModeHint, agnesVideoTextOnlyError, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
+import { agnesVideoModeHint, agnesVideoTextOnlyError, isAgnesVideoConfig } from "@/lib/agnes-video";
 import { mergeCanvasNodeAiConfig, resolveCanvasModeModel } from "@/lib/canvas/canvas-node-ai-config";
+import { clampVideoConfigToCapability } from "@/lib/model-capability";
 import { useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { CreditSymbol, requestCreditCost } from "@/constant/credits";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { resolveAudioVoiceProfile } from "@/lib/audio-voice-profile";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
@@ -114,7 +116,7 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
             ) : null}
 
             <div className="mb-2 grid min-w-0 cursor-default grid-cols-[minmax(0,1fr)_148px] items-center gap-2" onMouseDown={(event) => event.stopPropagation()}>
-                <ModelPicker className="canvas-compact-control h-10" config={config} value={config.model} onChange={(model) => onConfigChange(node.id, videoModelPatch(config, model, mode))} capability={mode} onMissingConfig={() => openConfigDialog(true)} fullWidth />
+                <ModelPicker className="canvas-compact-control h-10" config={config} value={config.model} onChange={(model) => onConfigChange(node.id, modelPatch(config, model, mode))} capability={mode} audioTask={mode === "audio" ? "tts" : undefined} onMissingConfig={() => openConfigDialog(true)} fullWidth />
                 {mode === "video" ? (
                     <CanvasVideoSettingsPopover config={config} placement="topRight" buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
                 ) : mode === "image" ? (
@@ -166,16 +168,17 @@ function InputChip({ label, value, style }: { label: string; value: string; styl
     );
 }
 
-function videoModelPatch(config: AiConfig, model: string, mode: CanvasGenerationMode): Partial<CanvasNodeMetadata> {
+function modelPatch(config: AiConfig, model: string, mode: CanvasGenerationMode): Partial<CanvasNodeMetadata> {
+    if (mode === "audio") return { model, audioVoice: resolveAudioVoiceProfile({ ...config, model }, model).voice };
     if (mode !== "video") return { model };
-    const nextConfig = { ...config, model, videoModel: model };
-    if (!isAgnesVideoConfig(nextConfig)) return { model };
+    const clamped = clampVideoConfigToCapability({ ...config, model, videoModel: model });
     return {
         model,
-        size: AGNES_VIDEO_SIZE,
-        seconds: String(normalizeAgnesDuration(config.videoSeconds)),
-        generateAudio: "false",
-        watermark: "false",
+        ...(clamped.size !== undefined ? { size: clamped.size } : {}),
+        ...(clamped.videoSeconds !== undefined ? { seconds: clamped.videoSeconds } : {}),
+        ...(clamped.vquality !== undefined ? { vquality: clamped.vquality } : {}),
+        ...(clamped.videoGenerateAudio !== undefined ? { generateAudio: clamped.videoGenerateAudio } : {}),
+        ...(clamped.videoWatermark !== undefined ? { watermark: clamped.videoWatermark } : {}),
     };
 }
 

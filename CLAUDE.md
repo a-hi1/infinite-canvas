@@ -54,7 +54,9 @@
 
 **浏览器代理 ≠ Docker 出网**：系统/Clash 美国代理只影响浏览器。视频上云若走 `/ai-proxy/media` 或 `api` 的 `from-url`，是容器去拉 `vidgen.x.ai`；容器访问超时时会 502。本机可在根目录 `.env` 设置 `HTTP_PROXY`/`HTTPS_PROXY=http://host.docker.internal:代理端口` 后重建 `api` 与 `ai-proxy`。服务器不要默认照搬本机 789x 代理。
 
-**当前主线（S0/P0.5c 已出门，收费仍后置）：** 本地 BYOK + 云历史双轨与画布/素材同步已人工验收（见 `docs/.../s0-human-checklist.mdx`、`p05c-acceptance.mdx`）+ **个人自用体验优化** + 上游按矩阵切片。S1 图生图边界已合 `main`；视频多参考图首图静默退化已修；ai-proxy 白名单/Vitest lock 等微修暂缓。平台扣积分/支付/画布扣积分**后置**。**3D 导演台**可回退 modal iframe / 新窗口切片：同域 `/director-desk/`，弹层与新窗口共享 `instanceId`；截图经 postMessage + BroadcastChannel 回流资产，画布页可插入节点；不改生成主路径。
+**当前主线（S0/P0.5c 已出门，收费仍后置）：** 本地 BYOK + 云历史双轨与画布/素材同步已人工验收（见 `docs/.../s0-human-checklist.mdx`、`p05c-acceptance.mdx`）+ **个人自用体验优化** + 上游按矩阵切片。S1 图生图边界已合 `main`；视频多参考图首图静默退化已修；ai-proxy 白名单/Vitest lock 等微修暂缓。平台扣积分/支付/画布扣积分**后置**。**3D 导演台**可回退 modal iframe / 新窗口切片：同域 `/director-desk/`，弹层与新窗口共享 `instanceId`；截图经 postMessage + BroadcastChannel 回流资产，画布页可插入节点；场景面板支持描述/参考图「自动搭建」角色/姿态/机位（规则可离线，可选宿主 BYOK 文本/多模态识图）；选中角色后可自然语言「指令调姿」改预设/关节；不改生成主路径。
+
+**Grok 14 模型本地适配：** `web/src/lib/grok-model-profile.ts` 精确区分文本/搜索/生图/图片编辑/视频/TTS/STT/泛语音；普通 OpenAI 兼容渠道的 TTS/STT 走 `/audio/speech`、`/audio/transcriptions`，codex2api 与 xAI 主机上的精确 `grok-voice-tts` / `grok-voice-stt` 改走原生 `/tts`、`/stt`（最终 URL 为 `/v1/tts`、`/v1/stt`）。画布音频节点可转写为 Text 子节点。精确模型画像先于旧名称启发式，避免 xAI 主机或 `imagine` 子串误判模态；未知自定义模型仍保留原兼容逻辑。自动验证仅使用 mock，不携带真实 Key、不产生费用；无凭证路由核验已确认 codex2api 原生端点存在，带凭证成功态仍待用户人工点验。`grok-web-search` 的中转联网契约与 `grok-voice-latest` 的实时语音协议仍未知，不能宣称真实上游已验收。
 
 **P2.0-A / P2.0-B / P2.0-C：** `GET/PUT/DELETE /api/projects` + `POST /api/blobs` / `GET /api/blobs/by-key/:clientKey` + `GET/PUT /api/assets`（用户级素材 manifest + tombstones）。项目 JSON、画布媒体、素材清单本地优先同步；推送先媒体后清单/JSON；拉取补齐缺失 blob。云失败不丢本地。Postgres / S3 仍未做。
 

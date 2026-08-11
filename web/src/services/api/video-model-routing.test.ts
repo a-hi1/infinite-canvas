@@ -88,6 +88,16 @@ describe("custom video-script params", () => {
         expect(params.ratio).toBe("16:9");
         expect(params.generateAudio).toBe(true);
     });
+
+    it("maps Seedance smart duration to 5 seconds for model scripts", () => {
+        const params = videoPluginParamsForTest({
+            ...defaultConfig,
+            model: "seedance2",
+            videoModel: "seedance2",
+            videoSeconds: "-1",
+        });
+        expect(params.seconds).toBe(5);
+    });
 });
 
 describe("native Seedance relay payload", () => {
@@ -97,15 +107,21 @@ describe("native Seedance relay payload", () => {
         vi.mocked(axios.post).mockResolvedValue({ data: { id: "task-seedance-relay" } });
     });
 
-    it("routes the OpenAI2API base URL to video/generations", () => {
+    it("routes exact seedance2 on openai2api to OpenAI Video /videos", () => {
+        expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "http://openai2api.com:3000" }, "seedance2")).toBe("/videos");
+        expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "http://openai2api.com:3000" }, "relay::seedance2")).toBe("/videos");
+    });
+
+    it("keeps non-seedance2 Seedance models on host relay /video/generations", () => {
+        expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "http://openai2api.com:3000" }, "doubao-seedance-2-0-260128")).toBe("/video/generations");
         expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "http://openai2api.com:3000" })).toBe("/video/generations");
     });
 
     it("keeps Agent Plan on contents/generations/tasks", () => {
-        expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "https://ark.cn-beijing.volces.com/api/plan/v3" })).toBe("/contents/generations/tasks");
+        expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "https://ark.cn-beijing.volces.com/api/plan/v3" }, "seedance2")).toBe("/contents/generations/tasks");
     });
 
-    it("uses the Comfy OpenAI2API body contract with duration number + seconds string", () => {
+    it("uses OpenAI Video body contract for pure-text seedance2", () => {
         const payload = seedanceRelayPayloadForTest(
             { ...defaultConfig, videoSeconds: "4", vquality: "1080", size: "16:9", videoGenerateAudio: "true" },
             "sora::seedance2",
@@ -114,18 +130,34 @@ describe("native Seedance relay payload", () => {
         expect(payload).not.toHaveProperty("images");
         expect(payload).not.toHaveProperty("content");
         expect(payload).not.toHaveProperty("metadata");
-        expect(typeof payload.duration).toBe("number");
-        expect(typeof payload.seconds).toBe("string");
-        expect(typeof payload.durationSeconds).toBe("number");
-        expect(payload).not.toHaveProperty("images");
-        expect(payload).not.toHaveProperty("content");
+        expect(payload.model).toBe("seedance2");
+        expect(payload.seconds).toBe(4);
+        expect(typeof payload.seconds).toBe("number");
+        expect(payload.size).toBe("1920x1080");
+        expect(payload.duration).toBe(4);
+        expect(payload.durationSeconds).toBe(4);
         expect(payloadKeepsAllSeedanceRelayReferences(payload, 0)).toBe(true);
     });
 
-    it("keeps duration numeric and seconds string when the UI stores seconds as text", () => {
+    it("keeps duration numeric for seedance2 OpenAI Video seconds", () => {
         const payload = seedanceRelayPayloadForTest({ ...defaultConfig, videoSeconds: "5" }, "seedance2", "test");
         expect(payload.duration).toBe(5);
-        expect(typeof payload.duration).toBe("number");
+        expect(payload.seconds).toBe(5);
+        expect(typeof payload.seconds).toBe("number");
+        expect(payload.durationSeconds).toBe(5);
+        expect(payload.size).toBeTruthy();
+    });
+
+    it("maps unsupported smart duration to 5 seconds for seedance2 OpenAI Video", () => {
+        const payload = seedanceRelayPayloadForTest({ ...defaultConfig, videoSeconds: "-1" }, "seedance2", "test");
+        expect(payload.duration).toBe(5);
+        expect(payload.seconds).toBe(5);
+        expect(payload.durationSeconds).toBe(5);
+    });
+
+    it("keeps doubao-seedance Comfy relay seconds as string", () => {
+        const payload = seedanceRelayPayloadForTest({ ...defaultConfig, videoSeconds: "5" }, "doubao-seedance-2-0-260128", "test");
+        expect(payload.duration).toBe(5);
         expect(payload.seconds).toBe("5");
         expect(typeof payload.seconds).toBe("string");
         expect(payload.durationSeconds).toBe(5);
@@ -198,10 +230,13 @@ describe("native Seedance relay payload", () => {
         expect(String(payload.prompt)).toContain("视频参考");
         expect(payloadKeepsAllSeedanceRelayVideoReferences(payload, 1)).toBe(true);
         expect(payload.duration).toBe(4);
-        expect(payload.seconds).toBe("4");
+        // seedance2 OpenAI Video uses numeric seconds; doubao-seedance relay keeps string seconds.
+        expect(payload.seconds).toBe(4);
+        expect(payload.videos).toEqual(videos);
+        expect(payload.reference_videos).toEqual(videos);
     });
 
-    it("posts multi-image as image + reference_images on /video/generations", async () => {
+    it("posts multi-image seedance2 to /videos with content[] and images preserved", async () => {
         const references: ReferenceImage[] = [
             { id: "a", name: "a.png", type: "image/png", dataUrl: "data:image/png;base64,aaa" },
             { id: "b", name: "b.png", type: "image/png", dataUrl: "data:image/png;base64,bbb" },
@@ -211,15 +246,16 @@ describe("native Seedance relay payload", () => {
         const task = await createVideoGenerationTask(seedanceRelayConfig(), "图生视频", references, [], []);
 
         expect(task.provider).toBe("seedance");
-        expect(task.createPath).toBe("/video/generations");
+        expect(task.createPath).toBe("/videos");
         expect(axios.post).toHaveBeenCalledTimes(1);
         const [url, body] = vi.mocked(axios.post).mock.calls[0] ?? [];
-        expect(String(url)).toContain("/video/generations");
+        expect(String(url)).toContain("/videos");
+        expect(String(url)).not.toContain("/video/generations");
         const payload = body as Record<string, unknown>;
         expect(payload).toMatchObject({
             model: "seedance2",
             duration: 4,
-            seconds: "4",
+            seconds: 4,
             resolution: "1080p",
             ratio: "16:9",
             generate_audio: true,
@@ -230,24 +266,30 @@ describe("native Seedance relay payload", () => {
         expect(imageItems).toHaveLength(3);
         expect(imageItems.map((item) => (item.image_url as { url: string }).url)).toEqual(["data:image/png;base64,aaa", "data:image/png;base64,bbb", "data:image/png;base64,ccc"]);
         expect(imageItems.map((item) => item.role)).toEqual(["reference_image", "reference_image", "reference_image"]);
-        expect(payload).not.toHaveProperty("images");
+        expect(payload.images).toEqual(["data:image/png;base64,aaa", "data:image/png;base64,bbb", "data:image/png;base64,ccc"]);
         expect(payload.metadata).toMatchObject({ content: payload.content });
         expect(payloadKeepsAllSeedanceRelayReferences(payload, 3)).toBe(true);
     });
 
-    it("posts first_frame + last_frame for two images on /video/generations", async () => {
+    it("posts first_frame + last_frame for two seedance2 images on /videos", async () => {
         const references: ReferenceImage[] = [
             { id: "a", name: "a.png", type: "image/png", dataUrl: "data:image/png;base64,aaa" },
             { id: "b", name: "b.png", type: "image/png", dataUrl: "data:image/png;base64,bbb" },
         ];
 
-        await createVideoGenerationTask(seedanceRelayConfig(), "首尾帧", references, [], []);
+        const task = await createVideoGenerationTask(seedanceRelayConfig(), "首尾帧", references, [], []);
 
+        expect(task.createPath).toBe("/videos");
         expect(axios.post).toHaveBeenCalledTimes(1);
-        const body = vi.mocked(axios.post).mock.calls[0]?.[1] as Record<string, unknown>;
+        const [url, bodyRaw] = vi.mocked(axios.post).mock.calls[0] ?? [];
+        expect(String(url)).toContain("/videos");
+        const body = bodyRaw as Record<string, unknown>;
         const content = body.content as Array<Record<string, unknown>>;
         expect(content.filter((item) => item.type === "image_url")).toHaveLength(2);
         expect(content.map((item) => item.role).filter(Boolean)).toEqual(["first_frame", "last_frame"]);
+        expect(body.images).toEqual(["data:image/png;base64,aaa", "data:image/png;base64,bbb"]);
+        expect(body.first_frame).toBe("data:image/png;base64,aaa");
+        expect(body.last_frame).toBe("data:image/png;base64,bbb");
         expect(payloadKeepsAllSeedanceRelayReferences(body, 2)).toBe(true);
     });
 
@@ -259,15 +301,18 @@ describe("native Seedance relay payload", () => {
         const task = await createVideoGenerationTask(seedanceRelayConfig(), "视频参考", [], videoReferences, []);
 
         expect(task.provider).toBe("seedance");
-        expect(task.createPath).toBe("/video/generations");
+        expect(task.createPath).toBe("/videos");
         expect(axios.post).toHaveBeenCalledTimes(1);
         const [url, body] = vi.mocked(axios.post).mock.calls[0] ?? [];
-        expect(String(url)).toContain("/video/generations");
+        expect(String(url)).toContain("/videos");
+        expect(String(url)).not.toContain("/video/generations");
         const payload = body as Record<string, unknown>;
         const content = payload.content as Array<Record<string, unknown>>;
         expect(content.filter((item) => item.type === "video_url")).toHaveLength(1);
         expect(content.find((item) => item.type === "video_url")?.role).toBe("reference_video");
         expect(content.find((item) => item.type === "video_url")?.video_url).toEqual({ url: "https://example.com/a.mp4" });
+        expect(payload.videos).toEqual(["https://example.com/a.mp4"]);
+        expect(payload.reference_videos).toEqual(["https://example.com/a.mp4"]);
         expect(payload.metadata).toMatchObject({ content: payload.content });
         expect(payloadKeepsAllSeedanceRelayVideoReferences(payload, 1)).toBe(true);
     });
@@ -363,12 +408,13 @@ return "https://example.com/script-only.mp4";`,
 
         const task = await createVideoGenerationTask(config, "多图", references, [], []);
         expect(task.provider).toBe("seedance");
-        expect(task.createPath).toBe("/video/generations");
+        expect(task.createPath).toBe("/videos");
         expect(axios.post).toHaveBeenCalledTimes(1);
         const body = vi.mocked(axios.post).mock.calls[0]?.[1] as Record<string, unknown>;
         const content = body.content as Array<Record<string, unknown>>;
         expect(content.filter((item) => item.type === "image_url")).toHaveLength(3);
         expect(content.map((item) => item.role).filter(Boolean)).toEqual(["reference_image", "reference_image", "reference_image"]);
+        expect(body.images).toEqual(["data:image/png;base64,aaa", "data:image/png;base64,bbb", "data:image/png;base64,ccc"]);
         expect(payloadKeepsAllSeedanceRelayReferences(body, 3)).toBe(true);
     });
 
@@ -392,17 +438,57 @@ return "https://example.com/script-only.mp4";`,
         expect(payloadKeepsAllSeedanceRelayVideoReferences(body, 1)).toBe(true);
     });
 
-    it("still uses modelScripts for pure Seedance T2V (no media)", async () => {
-        const config: AiConfig = {
-            ...seedanceRelayConfig(),
-            modelScripts: {
-                "relay::seedance2": `return "https://example.com/script-t2v.mp4";`,
-            },
+    it("keeps a pure-text script bound to the selected channel id", async () => {
+        const veoChannel: ModelChannel = {
+            id: "veo-local",
+            name: "Veo",
+            baseUrl: "http://openai2api.com:3000",
+            apiKey: "veo-key",
+            apiFormat: "openai",
+            models: ["seedance2"],
         };
+        const paidChannel: ModelChannel = {
+            id: "paid",
+            name: "其它渠道",
+            baseUrl: "https://paid.example",
+            apiKey: "paid-key",
+            apiFormat: "openai",
+            models: ["seedance2"],
+        };
+        const config = withChannels([veoChannel, paidChannel], "veo-local::seedance2");
+        config.modelScripts = { "veo-local::seedance2": `return "https://example.com/veo-script.mp4";` };
+
         const task = await createVideoGenerationTask(config, "纯文生", [], [], []);
+
         expect(task.provider).toBe("script");
-        expect(axios.post).not.toHaveBeenCalled();
-        expect(task.readyResult?.url).toBe("https://example.com/script-t2v.mp4");
+        expect(task.readyResult?.url).toBe("https://example.com/veo-script.mp4");
+    });
+
+    it("does not inherit the Veo script when another channel is selected", async () => {
+        const veoChannel: ModelChannel = {
+            id: "veo-local",
+            name: "Veo",
+            baseUrl: "http://openai2api.com:3000",
+            apiKey: "veo-key",
+            apiFormat: "openai",
+            models: ["seedance2"],
+        };
+        const paidChannel: ModelChannel = {
+            id: "paid",
+            name: "其它渠道",
+            baseUrl: "https://paid.example",
+            apiKey: "paid-key",
+            apiFormat: "openai",
+            models: ["seedance2"],
+        };
+        const config = withChannels([veoChannel, paidChannel], "paid::seedance2");
+        config.modelScripts = { "veo-local::seedance2": `return "https://example.com/veo-script.mp4";` };
+        vi.mocked(axios.post).mockResolvedValueOnce({ data: { id: "paid-task" } });
+
+        const task = await createVideoGenerationTask(config, "纯文生", [], [], []);
+
+        expect(task.provider).toBe("seedance");
+        expect(vi.mocked(axios.post).mock.calls[0]?.[0]).toContain("paid.example");
     });
 });
 

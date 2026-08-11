@@ -24,7 +24,7 @@ describe("video-host-profile", () => {
     expect(isNewApiStyleVideoHost("https://www.codex2api.com/v1")).toBe(false);
   });
 
-  it("openai2api Grok paths never include /videos; Seedance relay is /video/generations", () => {
+  it("openai2api Grok paths never include /videos; default Seedance host relay remains /video/generations", () => {
     const base = "http://openai2api.com:3000";
     const profile = resolveVideoHostProfile(base);
     expect(profile.kind).toBe("openai2api");
@@ -41,6 +41,7 @@ describe("video-host-profile", () => {
     ]);
     expect(hostGrokPollPaths(base).every((path) => !path.startsWith("/videos"))).toBe(true);
     expect(hostGrokContentPaths(base)).toEqual(["/video/generations/{id}/content"]);
+    // 主机默认 Seedance relay；精确 seedance2 由 video.ts 按模型切到 /videos
     expect(hostSeedanceRelayCreatePath(base)).toBe("/video/generations");
   });
 

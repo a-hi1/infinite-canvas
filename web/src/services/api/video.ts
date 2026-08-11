@@ -26,7 +26,7 @@ import {
     resolveVideoHostProfile,
 } from "@/lib/video-host-profile";
 import { isLikelyCorsBlockedMediaHost } from "@/lib/remote-media-host";
-import { boolConfig, buildSeedancePromptText, isArkPlanBaseUrl, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
+import { boolConfig, buildSeedancePromptText, isArkPlanBaseUrl, isSeedanceOpenAiVideoModel, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceRelayDuration, normalizeSeedanceResolution, seedancePixelSize, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import {
     buildSoraVeoFormFieldCandidates,
     isInvalidVideoRequestBodyError,
@@ -279,12 +279,17 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
 }
 
 function buildVideoPluginParams(config: AiConfig) {
+    const seedance = isSeedanceVideoConfig(config);
+    const modelName = modelOptionName(config.model || config.videoModel || "");
+    const resolution = seedance ? normalizeSeedanceResolution(config.vquality, modelName) : normalizeVideoResolution(config.vquality);
+    const ratio = seedance ? normalizeSeedanceRatio(config.size) : config.size;
+    const size = seedance ? seedancePixelSize(resolution, ratio) || normalizeVideoSize(config.size) : normalizeVideoSize(config.size);
     return {
-        // Script payloads commonly map this to JSON `duration`; keep it numeric.
-        seconds: Number(normalizeVideoSeconds(config.videoSeconds)),
-        size: normalizeVideoSize(config.size),
-        resolution: normalizeVideoResolution(config.vquality),
-        ratio: config.size,
+        // Seedance relays/scripts do not accept Agent Plan's -1 smart-duration sentinel.
+        seconds: seedance ? normalizeSeedanceRelayDuration(config.videoSeconds) : Number(normalizeVideoSeconds(config.videoSeconds)),
+        size,
+        resolution,
+        ratio,
         generateAudio: boolConfig(config.videoGenerateAudio, true),
         watermark: boolConfig(config.videoWatermark, false),
     };
@@ -1904,7 +1909,7 @@ async function createSeedanceRelayTask(config: AiConfig, model: string, prompt: 
     // fall back to a text-only request when media is selected.
     if (videoReferences.length) assertSeedanceVideoReferences(videoReferences);
     if (audioReferences.length) assertSeedanceAudioReferences(audioReferences);
-    const createPath = seedanceCreatePath(config);
+    const createPath = seedanceCreatePath(config, model);
     const images = references.length ? await resolveSeedanceRelayImages(config, references) : undefined;
     const videos = videoReferences.length ? await resolveSeedanceRelayVideos(videoReferences) : undefined;
     const audios = audioReferences.length ? await resolveSeedanceRelayAudios(audioReferences) : undefined;
@@ -1935,14 +1940,18 @@ async function createSeedanceRelayTask(config: AiConfig, model: string, prompt: 
     }
 }
 
-function seedanceCreatePath(config: AiConfig) {
-    // Agent Plan 走火山 tasks；中转路径由主机 profile 决定（openai2api/New API → /video/generations）
-    return isArkPlanBaseUrl(config.baseUrl) ? "/contents/generations/tasks" : hostSeedanceRelayCreatePath(config.baseUrl);
+function seedanceCreatePath(config: AiConfig, model = "") {
+    // Agent Plan 走火山 tasks。
+    // 精确模型 seedance2：上游公开 endpoint type = openai-video → /videos。
+    // 其它 doubao-seedance-* 中转仍走主机 profile（openai2api/New API → /video/generations）。
+    if (isArkPlanBaseUrl(config.baseUrl)) return "/contents/generations/tasks";
+    if (isSeedanceOpenAiVideoModel(model || config.model || config.videoModel || "")) return "/videos";
+    return hostSeedanceRelayCreatePath(config.baseUrl);
 }
 
 /** Exposed for regression tests of native Seedance protocol routing. */
-export function seedanceCreatePathForTest(config: AiConfig) {
-    return seedanceCreatePath(config);
+export function seedanceCreatePathForTest(config: AiConfig, model = "") {
+    return seedanceCreatePath(config, model);
 }
 
 /**
@@ -2092,17 +2101,34 @@ async function resolveSeedanceRelayAudios(audioReferences: ReferenceAudio[]) {
  * preserves metadata and expands metadata.content into the provider request.
  */
 function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: string, images?: string[], videos?: string[], audios?: string[]): Record<string, unknown> {
-    const duration = normalizeSeedanceDuration(config.videoSeconds);
+    const duration = normalizeSeedanceRelayDuration(config.videoSeconds);
+    const resolution = normalizeSeedanceResolution(config.vquality, modelOptionName(model));
+    const ratio = normalizeSeedanceRatio(config.size);
+    const openAiVideo = isSeedanceOpenAiVideoModel(model);
+    const pixelSize = seedancePixelSize(resolution, ratio);
     // 对齐 openai2api 可用脚本 + Comfy：duration 数字（部分网关拒字符串）、seconds 字符串、durationSeconds 数字。
-    const base: Record<string, unknown> = {
-        model: modelOptionName(model),
-        duration,
-        seconds: String(duration),
-        durationSeconds: duration,
-        resolution: normalizeSeedanceResolution(config.vquality, modelOptionName(model)),
-        ratio: normalizeSeedanceRatio(config.size),
-        generate_audio: boolConfig(config.videoGenerateAudio, true),
-    };
+    // seedance2(openai-video) 纯文生优先 OpenAI Video 精简体：model/prompt/seconds/size。
+    const base: Record<string, unknown> = openAiVideo
+        ? {
+              model: modelOptionName(model),
+              seconds: duration,
+              ...(pixelSize ? { size: pixelSize } : {}),
+              // 兼容部分中转仍读 duration / resolution / ratio / generate_audio
+              duration,
+              durationSeconds: duration,
+              resolution,
+              ratio,
+              generate_audio: boolConfig(config.videoGenerateAudio, true),
+          }
+        : {
+              model: modelOptionName(model),
+              duration,
+              seconds: String(duration),
+              durationSeconds: duration,
+              resolution,
+              ratio,
+              generate_audio: boolConfig(config.videoGenerateAudio, true),
+          };
     const imageList = images?.length ? images : [];
     const videoList = videos?.length ? videos : [];
     const audioList = audios?.length ? audios : [];
@@ -2112,9 +2138,11 @@ function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: stri
         return { ...base, prompt };
     }
 
+    // 参考图 / 参考视频 / 参考音频：继续 role-labeled content[] + metadata.content，
+    // 禁止静默丢掉任何选中素材。seedance2 只换创建路径为 /videos，不降级为纯文生。
     const labeledPrompt = buildSeedanceRelayLabeledPrompt(prompt, imageList.length, videoList.length, audioList.length);
     const content = buildSeedanceRelayContent(labeledPrompt, imageList, videoList, audioList);
-    return {
+    const payload: Record<string, unknown> = {
         ...base,
         // Direct relays consume content; New API keeps metadata and expands it into
         // the Doubao provider request after its TaskSubmitReq drops unknown fields.
@@ -2127,6 +2155,24 @@ function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: stri
             generate_audio: base.generate_audio,
         },
     };
+    // OpenAI Video 图生常见字段：images 全量 URL/dataURL 列表（不替代 content[]）。
+    if (openAiVideo && imageList.length) {
+        payload.images = imageList;
+        if (imageList.length === 1) payload.input_reference = imageList[0];
+        if (imageList.length === 2) {
+            payload.first_frame = imageList[0];
+            payload.last_frame = imageList[1];
+        }
+    }
+    if (openAiVideo && videoList.length) {
+        payload.videos = videoList;
+        payload.reference_videos = videoList;
+    }
+    if (openAiVideo && audioList.length) {
+        payload.audios = audioList;
+        payload.reference_audios = audioList;
+    }
+    return payload;
 }
 
 /** Exposed for regression tests of the native API-key Seedance relay contract. */
@@ -2175,7 +2221,8 @@ export function payloadKeepsAllSeedanceRelayAudioReferences(payload: Record<stri
 }
 
 async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
-    if (task.createPath === "/video/generations") {
+    // openai-video(seedance2) → /videos；旧 Comfy relay → /video/generations；均复用 OpenAI 兼容轮询/content 下载。
+    if (task.createPath === "/video/generations" || task.createPath === "/videos" || task.createPath === "/videos/generations") {
         return pollOpenAIVideoTask(config, task, options);
     }
     try {

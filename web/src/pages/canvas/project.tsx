@@ -5,7 +5,7 @@ import { BookOpen, Bot, Download, Group, Home, ImageIcon, Images, List, Menu, Mu
 import { saveAs } from "file-saver";
 
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
-import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
+import { requestAudioGeneration, requestAudioTranscription, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { DOCS_URL } from "@/constant/env";
 import { defaultConfig, resolveModelRequestConfig, resolveModelScript, type AiConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -1931,6 +1931,52 @@ function InfiniteCanvasPage() {
         [openShareWorkspace],
     );
 
+    const transcribeAudioNode = useCallback(
+        async (node: CanvasNodeData) => {
+            if (node.type !== CanvasNodeType.Audio || !node.metadata?.content || !node.metadata.storageKey) {
+                message.warning("请先上传有效的本地音频");
+                return;
+            }
+            const model = effectiveConfig.transcriptionModel;
+            if (!model || !isAiConfigReady(effectiveConfig, model)) {
+                openConfigDialog(true);
+                return;
+            }
+            if (isOriginGenerationBusy(node.id)) {
+                confirmStopGeneration(node.id);
+                return;
+            }
+
+            const controller = startGenerationRequest(node.id, node.id, `transcribe-${node.id}`);
+            try {
+                const text = await requestAudioTranscription(effectiveConfig, node.metadata.storageKey, { signal: controller.signal });
+                const gap = 96;
+                const textSpec = NODE_DEFAULT_SIZE[CanvasNodeType.Text];
+                const centerY = node.position.y + node.height / 2;
+                const textNode = {
+                    ...createCanvasNode(
+                        CanvasNodeType.Text,
+                        { x: node.position.x + node.width + gap + textSpec.width / 2, y: centerY },
+                        { content: text, status: NODE_STATUS_SUCCESS, fontSize: 14, model },
+                    ),
+                    title: "音频转写",
+                };
+                setNodes((prev) => [...prev, textNode]);
+                setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: textNode.id }]);
+                setSelectedNodeIds(new Set([textNode.id]));
+                setSelectedConnectionId(null);
+                setDialogNodeId(textNode.id);
+                message.success("音频已转为文字");
+            } catch (error) {
+                if (isGenerationCanceled(error)) return;
+                message.error(error instanceof Error ? error.message : "语音转文字失败");
+            } finally {
+                finishGenerationRequest(node.id, controller);
+            }
+        },
+        [confirmStopGeneration, effectiveConfig, finishGenerationRequest, isAiConfigReady, isOriginGenerationBusy, message, openConfigDialog, startGenerationRequest],
+    );
+
     const saveNodeAsset = useCallback(
         async (node: CanvasNodeData) => {
             if (node.type === CanvasNodeType.Text) {
@@ -3424,6 +3470,7 @@ function InfiniteCanvasPage() {
                     onGenerateImage={generateImageFromTextNode}
                     onUpload={(node) => handleUploadRequest(node.id)}
                     onDownload={downloadNodeImage}
+                    onTranscribe={(node) => void transcribeAudioNode(node)}
                     onSaveAsset={(node) => void saveNodeAsset(node)}
                     onShareWorkspace={shareNodeToWorkspace}
                     onMaskEdit={(node) => setMaskEditNodeId(node.id)}

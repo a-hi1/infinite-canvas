@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { videoSettingsSummary } from "@/components/video-settings-panel";
 import { clampImageConfigToCapability, clampVideoConfigToCapability, resolveImageCapability, resolveVideoCapability } from "@/lib/model-capability";
 import type { AiConfig } from "@/stores/use-config-store";
 
@@ -74,6 +75,25 @@ describe("resolveVideoCapability", () => {
         expect(ultra?.disabled).toBe(true);
         const clamped = clampVideoConfigToCapability(baseConfig({ model: "default::seedance-1-0-pro-fast", videoModel: "default::seedance-1-0-pro-fast", vquality: "1080p" }));
         expect(clamped.vquality).toBe("720p");
+    });
+
+    it("only exposes Seedance smart duration for Agent Plan", () => {
+        const relay = baseConfig({ model: "default::seedance-1-0-pro", videoModel: "default::seedance-1-0-pro", videoSeconds: "-1" });
+        expect(resolveVideoCapability(relay).seconds.map((item) => item.value)).not.toContain("-1");
+        expect(clampVideoConfigToCapability(relay).videoSeconds).toBe("5");
+        expect(videoSettingsSummary(relay)).toContain("5s");
+        expect(videoSettingsSummary(relay)).not.toContain("智能");
+
+        const agentPlan = baseConfig({
+            baseUrl: "https://ark.cn-beijing.volces.com/api/plan/v3",
+            channels: [],
+            model: "seedance-1-0-pro",
+            videoModel: "seedance-1-0-pro",
+            videoSeconds: "-1",
+        });
+        expect(resolveVideoCapability(agentPlan).seconds.map((item) => item.value)).toContain("-1");
+        expect(clampVideoConfigToCapability(agentPlan).videoSeconds).toBe("-1");
+        expect(videoSettingsSummary(agentPlan)).toContain("智能");
     });
 
     it("locks Agnes to fixed size and 2/5s", () => {

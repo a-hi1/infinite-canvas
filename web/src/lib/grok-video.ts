@@ -1,15 +1,18 @@
+import { isGrokModelTask, resolveGrokModelProfile } from "@/lib/grok-model-profile";
 import { formatVideoModeGuide, GROK_ON_OPENAI2API_MODE_GUIDE, GROK_VIDEO_MODE_GUIDE, type VideoModeGuide } from "@/lib/video-mode-guide";
 import { modelOptionName, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceVideo } from "@/types/media";
 
 export function isGrokVideoConfig(config: AiConfig | Pick<AiConfig, "model" | "videoModel" | "baseUrl">) {
     const requestConfig = "channels" in config ? resolveModelRequestConfig(config, config.model || config.videoModel) : config;
-    return isGrokVideoModel(modelOptionName(requestConfig.model || requestConfig.videoModel)) || isXaiBaseUrl(requestConfig.baseUrl);
+    return isGrokVideoModel(modelOptionName(requestConfig.model || requestConfig.videoModel));
 }
 
 export function isGrokVideoModel(model: string) {
     const value = model.toLowerCase();
-    return value.includes("grok") && (value.includes("video") || value.includes("imagine"));
+    const profile = resolveGrokModelProfile(value);
+    if (profile) return isGrokModelTask(value, "video");
+    return value.includes("grok") && value.includes("video");
 }
 
 export function isXaiBaseUrl(baseUrl: string) {

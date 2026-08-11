@@ -18,6 +18,7 @@ import {
     notifyDirectorDeskCapturesImported,
     openDirectorDeskPopup,
     postDirectorDeskImportResult,
+    postDirectorDeskPlanResult,
     postDirectorDeskSession,
     type DirectorDeskCapture,
     type DirectorDeskImportResult,
@@ -25,8 +26,14 @@ import {
     type DirectorDeskTheme,
 } from "@/lib/director-desk";
 import { suggestAssetCategory } from "@/lib/asset-category";
+import { requestImageQuestion } from "@/services/api/image";
 import { uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
+import {
+    isSameOriginRelayBaseUrl,
+    resolveModelRequestConfig,
+    useEffectiveConfig,
+} from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 
 /**
@@ -37,6 +44,7 @@ export function DirectorDeskModal() {
     const { message } = App.useApp();
     const addAssets = useAssetStore((state) => state.addAssets);
     const colorTheme = useThemeStore((state) => state.theme);
+    const aiConfig = useEffectiveConfig();
     const iframeRef = useRef<HTMLIFrameElement>(null);
     const popupRef = useRef<Window | null>(null);
     const instanceIdRef = useRef(`director-desk-${Date.now()}`);
@@ -44,6 +52,7 @@ export function DirectorDeskModal() {
     const importLockRef = useRef(false);
     const lastImportSigRef = useRef("");
     const lastImportAtRef = useRef(0);
+    const planInflightRef = useRef(new Set<string>());
     const [open, setOpen] = useState(false);
     const [ready, setReady] = useState(false);
     const [importing, setImporting] = useState(false);
@@ -91,6 +100,207 @@ export function DirectorDeskModal() {
             result,
         );
     }, []);
+
+    const replyPlanResult = useCallback(
+        (result: {
+            requestId: string;
+            ok: boolean;
+            text?: string;
+            plan?: unknown;
+            message?: string;
+            error?: string;
+        }) => {
+            postDirectorDeskPlanResult(
+                [iframeRef.current?.contentWindow, popupRef.current],
+                result,
+            );
+        },
+        [],
+    );
+
+    const handlePlanRequest = useCallback(
+        async (payload: unknown) => {
+            const raw = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+            const requestId = String(raw.requestId || "").trim();
+            const prompt = String(raw.prompt || "").trim();
+            const systemPrompt = String(raw.systemPrompt || "").trim();
+            const kind = String(raw.kind || "scene").trim() === "pose-adjust" ? "pose-adjust" : "scene";
+            const images = Array.isArray(raw.images)
+                ? raw.images
+                      .map((item) => {
+                          if (!item || typeof item !== "object") return null;
+                          const dataUrl = String((item as { dataUrl?: unknown }).dataUrl || "").trim();
+                          if (!dataUrl.startsWith("data:image/")) return null;
+                          // 与子页一致：限制体积，避免超大 postMessage
+                          if (dataUrl.length > 2_500_000) return null;
+                          return dataUrl;
+                      })
+                      .filter((item): item is string => Boolean(item))
+                      .slice(0, 3)
+                : [];
+            if (!requestId) return;
+            if (planInflightRef.current.has(requestId)) return;
+            planInflightRef.current.add(requestId);
+
+            try {
+                if (!prompt && images.length === 0) {
+                    replyPlanResult({
+                        requestId,
+                        ok: false,
+                        error: kind === "pose-adjust" ? "调姿指令为空" : "描述与参考图均为空",
+                        message: kind === "pose-adjust" ? "请输入调姿指令" : "请输入描述或添加参考图",
+                    });
+                    return;
+                }
+
+                const textModel = (aiConfig.textModel || aiConfig.model || "").trim();
+                if (!textModel) {
+                    replyPlanResult({
+                        requestId,
+                        ok: false,
+                        error: "未配置文本模型",
+                        message:
+                            kind === "pose-adjust"
+                                ? "未配置文本模型，将使用导演台本地调姿规则"
+                                : images.length > 0
+                                  ? "未配置文本模型，无法识图；请在主站配置支持看图的文本模型"
+                                  : "未配置文本模型，将使用导演台本地规则解析",
+                    });
+                    return;
+                }
+
+                const requestConfig = resolveModelRequestConfig(
+                    {
+                        ...aiConfig,
+                        model: textModel,
+                        textModel,
+                    },
+                    textModel,
+                );
+                if (!requestConfig.baseUrl.trim()) {
+                    replyPlanResult({
+                        requestId,
+                        ok: false,
+                        error: "未配置 Base URL",
+                        message: "未配置文本模型渠道 Base URL",
+                    });
+                    return;
+                }
+                if (!requestConfig.apiKey.trim() && !isSameOriginRelayBaseUrl(requestConfig.baseUrl)) {
+                    replyPlanResult({
+                        requestId,
+                        ok: false,
+                        error: "未配置 API Key",
+                        message: "未配置文本模型 API Key",
+                    });
+                    return;
+                }
+
+                const instructionLines =
+                    kind === "pose-adjust"
+                        ? [
+                              "请根据调姿指令，为**当前已选中的单个角色**输出姿势调节 JSON。",
+                              "要求：只输出 JSON；pose 必须是 schema 枚举；controls 关节 key 必须合法；",
+                              "「再…一点」类用 mode=tweak 且 relative=true。",
+                              "",
+                              "用户指令：",
+                              prompt,
+                          ]
+                        : [
+                              images.length > 0
+                                  ? "请根据参考图片（以及可选文字约束）推断场景，输出场景规划 JSON。"
+                                  : "请根据下面的动作/镜头描述输出场景规划 JSON。",
+                              "要求：只输出 JSON；角色 pose/bodyType 必须用 schema 枚举值；",
+                              "多人时写清 position 与 yawDeg；镜头写 shot/angle。",
+                              images.length > 0
+                                  ? "识图时优先画面中的人数、体型、姿态、站位与镜头；文字仅作补充。"
+                                  : "",
+                              prompt ? "" : "用户未提供文字描述，请完全依据图片推断。",
+                              prompt ? "用户描述：" : "",
+                              prompt || "",
+                          ].filter(Boolean);
+
+                const userContent =
+                    images.length > 0
+                        ? [
+                              { type: "text" as const, text: instructionLines.join("\n") },
+                              ...images.map((url) => ({
+                                  type: "image_url" as const,
+                                  image_url: { url },
+                              })),
+                          ]
+                        : instructionLines.join("\n");
+
+                const answer = await requestImageQuestion(
+                    {
+                        ...requestConfig,
+                        model: textModel,
+                        textModel,
+                        systemPrompt:
+                            systemPrompt ||
+                            (kind === "pose-adjust"
+                                ? "你是 3D 导演台姿势调节助手。只输出一个 JSON 对象，不要 Markdown。"
+                                : "你是 3D 分镜导演台的场景规划器。只输出一个 JSON 对象，不要 Markdown。"),
+                    },
+                    [
+                        {
+                            role: "user",
+                            content: userContent,
+                        },
+                    ],
+                    () => {
+                        // 规划只需最终 JSON，不需要流式 UI
+                    },
+                );
+
+                const text = String(answer || "").trim();
+                if (!text || text === "没有返回内容") {
+                    replyPlanResult({
+                        requestId,
+                        ok: false,
+                        error: "模型无内容",
+                        message:
+                            kind === "pose-adjust"
+                                ? "文本模型没有返回可用调姿 JSON"
+                                : images.length > 0
+                                  ? "识图模型没有返回可用规划（请确认文本模型支持看图）"
+                                  : "文本模型没有返回可用规划",
+                    });
+                    return;
+                }
+
+                replyPlanResult({
+                    requestId,
+                    ok: true,
+                    text,
+                    message:
+                        kind === "pose-adjust"
+                            ? `已用文本模型 ${textModel} 生成调姿`
+                            : images.length > 0
+                              ? `已用文本模型 ${textModel} 识图生成规划`
+                              : `已用文本模型 ${textModel} 生成规划`,
+                });
+            } catch (error) {
+                const failMsg =
+                    error instanceof Error && error.message
+                        ? error.message
+                        : kind === "pose-adjust"
+                          ? "调姿模型失败"
+                          : images.length > 0
+                            ? "识图规划失败"
+                            : "文本模型规划失败";
+                replyPlanResult({
+                    requestId,
+                    ok: false,
+                    error: failMsg,
+                    message: failMsg,
+                });
+            } finally {
+                planInflightRef.current.delete(requestId);
+            }
+        },
+        [aiConfig, replyPlanResult],
+    );
 
     const importCaptures = useCallback(
         async (captures: DirectorDeskCapture[], source: "iframe" | "popup" | "broadcast" | "unknown") => {
@@ -293,9 +503,15 @@ export function DirectorDeskModal() {
                 const captures = normalizeDirectorDeskCaptures(event.data?.payload);
                 const source = sourceHint || (fromIframe ? "iframe" : fromPopup ? "popup" : "unknown");
                 void importCaptures(captures, source);
+                return;
+            }
+
+            if (type === DIRECTOR_DESK_MSG.planRequest) {
+                // 广播/iframe/popup 均可；去重靠 requestId
+                void handlePlanRequest(event.data?.payload);
             }
         },
-        [close, importCaptures, theme],
+        [close, handlePlanRequest, importCaptures, theme],
     );
 
     // 始终监听：新窗口在弹层关闭后仍可回传截图。
@@ -467,7 +683,7 @@ export function DirectorDeskModal() {
                 </div>
 
                 <div className="shrink-0 border-t border-stone-200/80 px-3 py-2 text-[11px] leading-5 text-stone-500 dark:border-stone-800 dark:text-stone-400">
-                    使用右侧<strong>相机面板</strong>先「机位截图」，再点截图卡片或底部的<strong>发送到画布</strong>——会写入本机「我的资产」
+                    使用右侧<strong>3D场景</strong>面板的「自动搭建」可用描述生成角色/机位；再用<strong>相机面板</strong>「机位截图」后点<strong>发送到画布</strong>写入「我的资产」
                     {canvasProjectIdRef.current ? "，并插入当前画布" : ""}
                     。点右上角<strong>新窗口</strong>打开同场景标签页；若无反应，请允许本站弹窗。
                 </div>

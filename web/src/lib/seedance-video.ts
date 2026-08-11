@@ -66,9 +66,28 @@ export function isSeedanceVideoModel(model: string) {
     return value.includes("seedance") || value.includes("doubao-seedance");
 }
 
+/**
+ * openai2api 公开目录中的精确模型 `seedance2`：endpoint type = openai-video，
+ * 创建路径应为 POST /v1/videos（不是旧 Comfy relay 的 /v1/video/generations）。
+ * 其它 doubao-seedance-* 仍走 seedance 分组 / openai 兼容 relay。
+ */
+export function isSeedanceOpenAiVideoModel(model: string) {
+    return modelOptionName(model).trim().toLowerCase() === "seedance2";
+}
+
 export function isSeedanceFastModel(model: string) {
     const value = model.toLowerCase();
     return isSeedanceVideoModel(value) && value.includes("fast");
+}
+
+/** Seedance 分辨率 + 比例 → OpenAI Video `size` 像素字符串（如 1280x720）。 */
+export function seedancePixelSize(resolution: string, ratio: string) {
+    const res = normalizeSeedanceResolution(resolution);
+    const aspect = normalizeSeedanceRatio(ratio);
+    const table = seedancePixels[res as keyof typeof seedancePixels];
+    if (!table) return undefined;
+    if (aspect === "adaptive") return table["16:9"];
+    return table[aspect as keyof typeof table] || table["16:9"];
 }
 
 export function isArkPlanBaseUrl(baseUrl: string) {
@@ -92,6 +111,11 @@ export function normalizeSeedanceDuration(value: string) {
     if (String(value).trim() === "-1") return -1;
     const seconds = Math.floor(Number(value) || 5);
     return Math.max(4, Math.min(15, seconds));
+}
+
+export function normalizeSeedanceRelayDuration(value: string) {
+    const duration = normalizeSeedanceDuration(value);
+    return duration === -1 ? 5 : duration;
 }
 
 export function normalizeSeedanceRatio(value: string) {

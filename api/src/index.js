@@ -464,10 +464,6 @@ async function handlePutAssetManifest(req, res, url) {
 async function handleUploadCanvasBlob(req, res) {
     const auth = requireUser(req, res);
     if (!auth) return;
-    const ip = clientIp(req);
-    if (!rateLimit(uploadHits, `${auth.user.id}:blob:${ip}`, 120, 60 * 60 * 1000)) {
-        return fail(res, 429, "上传过于频繁", CLOUD_ERROR_REASON.UPLOAD_RATE_LIMITED);
-    }
     const contentType = String(req.headers["content-type"] || "");
     if (!contentType.includes("multipart/form-data")) return fail(res, 400, "请使用 multipart 上传", CLOUD_ERROR_REASON.BAD_REQUEST);
 
@@ -490,6 +486,11 @@ async function handleUploadCanvasBlob(req, res) {
         } catch {
             // rewrite below
         }
+    }
+
+    const ip = clientIp(req);
+    if (!rateLimit(uploadHits, `${auth.user.id}:blob:${ip}`, 120, 60 * 60 * 1000)) {
+        return fail(res, 429, "上传过于频繁", CLOUD_ERROR_REASON.UPLOAD_RATE_LIMITED);
     }
 
     const sniffed = sniffMime(file.data) || file.mime || "application/octet-stream";

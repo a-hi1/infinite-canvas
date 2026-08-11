@@ -1,5 +1,5 @@
 import { AGNES_VIDEO_SIZE, isAgnesVideoConfig, normalizeAgnesDuration } from "@/lib/agnes-video";
-import { defaultConfig, modelMatchesCapability, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, modelMatchesAudioTask, modelMatchesCapability, type AiConfig } from "@/stores/use-config-store";
 import type { CanvasGenerationMode, CanvasNodeData } from "@/types/canvas";
 
 /**
@@ -10,8 +10,10 @@ import type { CanvasGenerationMode, CanvasNodeData } from "@/types/canvas";
 export function resolveCanvasModeModel(config: AiConfig, currentModel: string | undefined, mode: CanvasGenerationMode) {
     const defaultModel = mode === "image" ? config.imageModel : mode === "video" ? config.videoModel : mode === "audio" ? config.audioModel : config.textModel;
     const fallbackModel = mode === "image" ? defaultConfig.imageModel : mode === "video" ? defaultConfig.videoModel : mode === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
-    if (currentModel && modelMatchesCapability(currentModel, mode)) return currentModel;
-    if (defaultModel && modelMatchesCapability(defaultModel, mode)) return defaultModel;
+    const currentMatchesMode = currentModel && (mode === "audio" ? modelMatchesAudioTask(currentModel, "tts") : modelMatchesCapability(currentModel, mode));
+    const defaultMatchesMode = defaultModel && (mode === "audio" ? modelMatchesAudioTask(defaultModel, "tts") : modelMatchesCapability(defaultModel, mode));
+    if (currentMatchesMode) return currentModel;
+    if (defaultMatchesMode) return defaultModel;
     return fallbackModel || defaultModel || currentModel || config.model || defaultConfig.model;
 }
 

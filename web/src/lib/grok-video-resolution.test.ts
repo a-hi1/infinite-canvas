@@ -4,11 +4,27 @@ import {
     grokResolutionPixelHeight,
     grokResolutionShortfallMessage,
     inferVideoResolutionLabel,
+    isGrokVideoConfig,
+    isGrokVideoModel,
     normalizeGrokResolution,
     videoResolutionDisplay,
 } from "@/lib/grok-video";
 
-describe("inferVideoResolutionLabel / videoResolutionDisplay", () => {
+describe("Grok video model routing", () => {
+    it.each([
+        ["grok-imagine-video", true],
+        ["grok-imagine-video-1.5", true],
+        ["grok-imagine-image", false],
+        ["grok-imagine-edit", false],
+        ["grok-voice-stt", false],
+        ["grok", false],
+    ])("classifies %s as video=%s regardless of host", (model, expected) => {
+        expect(isGrokVideoModel(model)).toBe(expected);
+        expect(isGrokVideoConfig({ model, videoModel: model, baseUrl: "https://api.x.ai/v1" })).toBe(expected);
+    });
+});
+
+describe("video resolution display", () => {
     it("maps short side to p labels", () => {
         expect(inferVideoResolutionLabel(1920, 1080)).toBe("1080p");
         expect(inferVideoResolutionLabel(1080, 1920)).toBe("1080p");

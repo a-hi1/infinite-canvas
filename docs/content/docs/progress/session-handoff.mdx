@@ -166,7 +166,7 @@ docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.ym
 
 ### 云与底座
 
-- 云历史双轨；上云幂等 `client_local_id`；远程 URL 可走 `from-url` / `/ai-proxy/media`（白名单含 xAI + Seedance/火山/字节 CDN，见 `web/src/lib/remote-media-host.ts` 与 `api` `isAllowedMediaHost`）
+- 云历史双轨；上云幂等 `client_local_id`；画布/素材媒体 `POST /api/blobs` 对同账号同 `storageKey` 做客户端并发合并与当前会话成功缓存，服务端完整幂等命中不计新上传限额（失败仍可重试）；远程 URL 可走 `from-url` / `/ai-proxy/media`（白名单含 xAI + Seedance/火山/字节 CDN，见 `web/src/lib/remote-media-host.ts` 与 `api` `isAllowedMediaHost`）
 - **云账号邮箱唯一**：注册归一化 + 串行锁 + create 二次校验；登录按密码匹配同邮箱候选，换号吊销旧 session Cookie（见 pending-test）
 - P0.5c / S0 已出门
 - P1 底座 A–G 代码在仓（平台代生成默认关）
@@ -194,6 +194,7 @@ docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.ym
 - `compatProfile`：auto / openai / openai-slim / grok-image / relay-fragile
 - **视频自定义脚本参数**：`params.seconds` 是 number（例如 `4`），用于 Seedance `/v1/video/generations` 的 `duration`；不要退回字符串 `"4"`
 - **原生 API Key Seedance 中转（openai2api）**：`/v1/video/generations`；带任意参考媒体时请求同时发送 `content[]` 与完全镜像的 `metadata.content`，供 New API Doubao 适配器展开；媒体项带 role：图片 `image_url`（单图 `reference_image`；**仅双图** `first_frame`/`last_frame`；**3+ 图全部 `reference_image`**——上游禁止 `last_frame` 与 `reference_image` 混用）、视频 `video_url` + `reference_video`、音频 `audio_url` + `reference_audio`。**不要**同时混发顶层 `image`/`video`/`audio` 或无 role 的参考数组，否则中转可能只消费首图分支。纯文生 modelScripts 仍可用；带任意参考媒体自动走内置完整 payload，任一素材读取失败不发请求、不退回文生。画布配置节点 `@` 只点名部分素材时仍附带全部已连接图/视/音。模型名示例：`doubao-seedance-2-0-260128` / `doubao-seedance-2-0-fast-260128`。火山 Agent Plan 仍 `/contents/generations/tasks`
+- **Seedance 中转时长边界**：火山 Agent Plan 可用 `duration=-1` 智能时长；OpenAI2API/New API 中转的通用 `seconds` 校验不接受 `-1`，因此中转 UI 只提供 4/5/6/8/10/12/15 秒，旧 `-1` 配置在内置请求与纯文生 modelScript 参数中归一为 5 秒。不要把 Agent Plan 的智能 sentinel 原样复制进中转 `seconds`。
 - **Seedance 参考视频本地校验**：只查边长 300–6000、宽高比 0.4–2.5、时长 2–15s/总 15s、50MB；**不要**用输出档像素总量（640×640～2206×946）拦参考视频
 - **GPT 生图 openai2api 兼容**：`compatProfile=auto` 会把 `openai2api.com` 识别为 `relay-fragile`；文生图去掉易被拒的 `output_format` 并允许瘦身重试；多参考 edits 旁路必须全量发送 `images[]`，禁止只保留首图，且多参考失败时不允许用纯文生结果冒充成功
 - **Grok 图生图**：JSON `POST /images/edits`；有参考图**不再**自动跳 `*-edit`；多参考必须完整 multi-image payload，**禁止静默只发第一张**
@@ -204,6 +205,8 @@ docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.ym
 - Seedance/Agnes 保留；平台视频仍无参考素材服务端路径
 - 参考图本地上限 6（平台积分图生图仍最多 4）
 - 能力卡：`web/src/lib/model-capability.ts` 只暴露真实可选值
+- **Grok 全模态本地画像已接入：** `web/src/lib/grok-model-profile.ts` 精确覆盖中转暴露的 14 个模型，文本/`grok-web-search` 继续复用现有 Responses 通路；生图、图片编辑、视频、TTS、STT、泛语音按任务隔离。未知自定义模型仍走旧启发式，不改变 `ModelChannel.models: string[]`。
+- **Grok/TTS/STT 回归状态：** 生图 `auto` 仍发 `aspect_ratio`/`resolution`；图片编辑无参考图前置拒绝；多参考不丢图。普通 OpenAI 兼容渠道继续使用 `/audio/speech` 与 `/audio/transcriptions`；`web/src/lib/audio-host-profile.ts` 对 codex2api/xAI 主机上的精确 `grok-voice-tts` / `grok-voice-stt` 改走原生 `/tts`、`/stt`，请求分别为 `{text, language, voice_id}` 与 multipart `file + model=grok-stt + language=auto`。画布音频可生成 Text 子节点。音色选择按实际 TTS transport 隔离：原生 Grok 只显示 Eve/Ara/Rex/Sal/Leo，MiniMax 与 OpenAI 兼容模型各自只显示所属音色；切换模型会同步归一化历史音色，避免 UI 与请求值不一致。14 模型画像、音频、Grok 图/视频、Seedance 等 10 个测试文件共 131 项通过；音色专项 4 个测试文件 35 项、`tsc --noEmit` 与生产构建通过。**非付费路由核验：** 不带凭证请求 `https://www.codex2api.com/v1/tts` 与 `/v1/stt` 均返回 Sub2API 结构化 `401 API_KEY_REQUIRED`，而非旧 `/v1/audio/*` 的路由级 404，确认部署端点存在但未执行上游生成。带凭证 TTS/STT 成功态仍待用户人工点验；`grok-web-search` 联网行为与 `grok-voice-latest` 实时协议仍需中转契约。
 
 ### 自用 UX（多数仍在 pending-test）
 
@@ -214,6 +217,7 @@ docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.ym
 - **版本弹窗双源**：本机 CHANGELOG 常显；上游 basketikun 折叠可展开，检查更新不覆盖本机列表
 - **视频结果真实清晰度**：低于所选时标「实 720p · 选 1080p」，不虚标
 - **3D 导演台 modal iframe / 新窗口（可回退切片）**：同域 `/director-desk/` 静态资源 + 顶栏/画布底栏入口；弹层与新窗口共享 `instanceId` 场景；截图经 postMessage + BroadcastChannel 回流「我的资产」，画布页额外插入图片节点；`VITE_DIRECTOR_DESK_ENABLED` / localStorage 可关；**不**硬嵌画布节点、不改生成主路径
+- **3D 导演台自动搭建 P0 + AI识图 + 指令调姿**：场景面板描述 → 规则解析（可离线）+ 可选宿主 BYOK 文本模型 JSON；可选参考图经 `plan-request.images` 走同一 textModel 多模态识图，映射现有角色/姿态/机位预设并 `rebuild` 应用（可撤销）；选中角色后自然语言「指令调姿」（`kind=pose-adjust` / 本地规则）拧关节或换预设；协议 `plan-request` / `plan-result`
 - 部署体验：`/assets` 刷新、资产导入顺序、nginx 不误跳 :3000
 - 其它以代码与 pending-test 为准
 

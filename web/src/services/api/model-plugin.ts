@@ -48,8 +48,45 @@ function pluginHeaders(extra?: Record<string, string>, hasJsonBody = false): Rec
 }
 
 function pluginUrl(config: AiConfig, path: string) {
-    if (/^https?:/i.test(path)) return path;
-    return buildApiUrl(config.baseUrl, path.startsWith("/") ? path : `/${path}`);
+    if (/^https?:/i.test(path)) {
+        const baseUrl = config.baseUrl.trim().replace(/\/+$/, "");
+        const duplicatedV1 = `${baseUrl}/v1`;
+        if (/\/v1$/i.test(baseUrl) && path.startsWith(`${duplicatedV1}/`)) {
+            return `${baseUrl}${path.slice(duplicatedV1.length)}`;
+        }
+        return path;
+    }
+    const normalizedPath = (path.startsWith("/") ? path : `/${path}`).replace(/^\/v1(?=\/|$)/i, "");
+    return buildApiUrl(config.baseUrl, normalizedPath || "/");
+}
+
+function pluginUpstreamMessage(data: unknown): string {
+    if (typeof data === "string") return data.trim();
+    if (!data || typeof data !== "object" || Array.isArray(data)) return "";
+    const record = data as Record<string, unknown>;
+    const nested = record.error;
+    if (typeof nested === "string" && nested.trim()) return nested.trim();
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+        const message = (nested as Record<string, unknown>).message;
+        if (typeof message === "string" && message.trim()) return message.trim();
+    }
+    for (const key of ["message", "msg", "detail"]) {
+        const value = record[key];
+        if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return "";
+}
+
+function pluginErrorMessage(error: unknown) {
+    if (!axios.isAxiosError(error)) return error instanceof Error ? error.message : String(error);
+    const status = error.response?.status;
+    const upstream = pluginUpstreamMessage(error.response?.data) || error.message;
+    const statusText = status ? ` (status=${status})` : "";
+    const groupMatch = upstream.match(/no available channel for model\s+([^\s]+)\s+under group\s+([^\s(]+)/i);
+    if (groupMatch?.[1]?.toLowerCase() === "seedance2" && groupMatch[2]?.toLowerCase() === "default") {
+        return `${upstream}${statusText}。请求已到达中转站，但当前 API Key 被路由到 default 分组；公开目录中的 seedance2 属于 veo-sora 分组。请使用获准访问 veo-sora 的 Key，并确认该组有启用且健康的 seedance2 渠道。本地渠道名称不会改变上游分组`;
+    }
+    return `${upstream}${statusText}`;
 }
 
 function createPluginHttp(config: AiConfig, options?: RequestOptions): PluginHttp {
@@ -202,7 +239,7 @@ export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<
         if (timeout.signal.aborted && !args.signal?.aborted) throw new Error("模型调用脚本执行超时，请检查脚本中的轮询/等待逻辑");
         if (error instanceof DOMException && error.name === "AbortError") throw error;
         if (axios.isCancel(error)) throw error;
-        const message = error instanceof Error ? error.message : String(error);
+        const message = pluginErrorMessage(error);
         throw new Error(`模型调用脚本执行失败：${message}`);
     } finally {
         clearTimeout(timer);
@@ -298,17 +335,75 @@ return (data.candidates || [])
     video: [
         {
             label: "OpenAI 规范",
-            script: `// 视频（脚本内部自行轮询）。可用：prompt、images(dataURL[])、params{seconds:number,size,resolution,ratio}
+            script: `// OpenAI Video / seedance2（脚本内部自行轮询）。可用：prompt、images(dataURL[])、params{seconds,size,resolution,ratio,generateAudio,watermark}
+// 纯文生：POST /videos；有参考图时附带 images（不丢图）。参考视频/音频请走内置 Seedance 路由，不要依赖本模板。
 const headers = { "Content-Type": "application/json", Authorization: \`Bearer \${apiKey}\` };
-const task = await request({
-  method: "post",
-  url: \`\${baseUrl}/v1/videos\`,
-  headers,
-  data: { model, prompt, seconds: params.seconds },
-});
+const layers = (value) => {
+  const items = [];
+  let node = value;
+  for (let depth = 0; depth < 6 && node && typeof node === "object" && !Array.isArray(node); depth += 1) {
+    items.push(node);
+    node = node.data || node.result || node.task || node.response || null;
+  }
+  return items;
+};
+const firstValue = (items, keys) => {
+  for (const item of items) {
+    for (const key of keys) {
+      const value = item[key];
+      if (value !== undefined && value !== null && value !== "") return value;
+    }
+  }
+  return undefined;
+};
+const errorText = (items) => {
+  const error = firstValue(items, ["error"]);
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && error.message) return String(error.message);
+  const message = firstValue(items, ["message", "msg", "detail"]);
+  return message ? String(message) : "";
+};
+const body = {
+  model,
+  prompt,
+  seconds: Number(params.seconds),
+  ...(params.size ? { size: params.size } : {}),
+  ...(params.resolution ? { resolution: params.resolution } : {}),
+  ...(params.ratio ? { ratio: params.ratio } : {}),
+  ...(typeof params.generateAudio === "boolean" ? { generate_audio: params.generateAudio } : {}),
+  ...(typeof params.watermark === "boolean" ? { watermark: params.watermark } : {}),
+};
+if (Array.isArray(images) && images.length) {
+  body.images = images;
+  if (images.length === 1) body.input_reference = images[0];
+  if (images.length === 2) {
+    body.first_frame = images[0];
+    body.last_frame = images[1];
+  }
+}
+const task = await request({ method: "post", url: "/videos", headers, data: body });
+const taskLayers = layers(task);
+const taskId = firstValue(taskLayers, ["id", "request_id", "task_id", "video_id"]);
+if (!taskId) throw new Error(errorText(taskLayers) || "视频接口没有返回任务 ID");
 return await poll(
-  () => request({ method: "get", url: \`\${baseUrl}/v1/videos/\${task.id}\`, headers }),
-  (state) => state.status === "completed" ? { url: state.video_url || state.url } : null,
+  () => request({ method: "get", url: \`/videos/\${encodeURIComponent(String(taskId))}\`, headers }),
+  async (state) => {
+    const stateLayers = layers(state);
+    const status = String(firstValue(stateLayers, ["status", "state", "task_status"]) || "").toLowerCase();
+    if (["failed", "error", "cancelled", "canceled", "expired"].includes(status)) throw new Error(errorText(stateLayers) || "视频任务进入失败状态：" + status);
+    if (!["completed", "succeeded", "success", "done", "finished", "ready"].includes(status)) return null;
+    const url = firstValue(stateLayers, ["video_url", "url", "result_url", "output_url", "download_url"]);
+    if (typeof url === "string" && url) return { url };
+    // 完成无 URL 时回退 OpenAI content 下载，返回 Blob
+    const blob = await request({
+      method: "get",
+      url: \`/videos/\${encodeURIComponent(String(taskId))}/content\`,
+      headers: { Authorization: \`Bearer \${apiKey}\` },
+      responseType: "blob",
+    });
+    if (blob instanceof Blob) return blob;
+    throw new Error("视频任务已完成，但接口没有返回视频地址或 content");
+  },
   { intervalMs: 2500, timeoutMs: 300000 },
 );`,
         },

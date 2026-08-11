@@ -14,6 +14,14 @@ export const openAiAudioVoiceOptions = [
     { value: "cedar", label: "Cedar" },
 ];
 
+export const xaiAudioVoiceOptions = [
+    { value: "Eve", label: "xAI Eve" },
+    { value: "Ara", label: "xAI Ara" },
+    { value: "Rex", label: "xAI Rex" },
+    { value: "Sal", label: "xAI Sal" },
+    { value: "Leo", label: "xAI Leo" },
+];
+
 export const minimaxAudioVoiceOptions = [
     { value: "male-qn-qingse", label: "MiniMax 青涩男声" },
     { value: "male-qn-jingying", label: "MiniMax 精英男声" },
@@ -26,7 +34,31 @@ export const minimaxAudioVoiceOptions = [
     { value: "English_expressive_narrator", label: "MiniMax English Narrator" },
 ];
 
-export const audioVoiceOptions = [...openAiAudioVoiceOptions, ...minimaxAudioVoiceOptions];
+export const audioVoiceOptions = [...openAiAudioVoiceOptions, ...xaiAudioVoiceOptions, ...minimaxAudioVoiceOptions];
+
+export type AudioVoiceProvider = "openai" | "xai" | "minimax";
+
+export function audioVoiceOptionsForProvider(provider: AudioVoiceProvider) {
+    if (provider === "xai") return xaiAudioVoiceOptions;
+    if (provider === "minimax") return minimaxAudioVoiceOptions;
+    return openAiAudioVoiceOptions;
+}
+
+export function normalizeAudioVoiceForProvider(provider: AudioVoiceProvider, value: string) {
+    const options = audioVoiceOptionsForProvider(provider);
+    const normalized = value.trim().toLowerCase();
+    const matched = options.find((item) => item.value.toLowerCase() === normalized)?.value;
+    if (matched) return matched;
+    if (provider === "xai") return "Ara";
+    if (provider === "minimax") return "male-qn-qingse";
+    return "alloy";
+}
+
+export function isMiniMaxAudioModel(baseUrl: string, model: string) {
+    const normalizedBaseUrl = baseUrl.trim().toLowerCase();
+    const normalizedModel = model.trim().toLowerCase();
+    return normalizedBaseUrl.includes("minimax") || normalizedBaseUrl.includes("minimaxi") || normalizedModel.startsWith("speech-");
+}
 
 export const audioFormatOptions = [
     { value: "mp3", label: "MP3" },
@@ -42,11 +74,11 @@ export function normalizeAudioVoiceValue(value: string) {
 }
 
 export function normalizeOpenAiAudioVoiceValue(value: string) {
-    return openAiAudioVoiceOptions.some((item) => item.value === value) ? value : "alloy";
+    return normalizeAudioVoiceForProvider("openai", value);
 }
 
 export function normalizeMiniMaxAudioVoiceValue(value: string) {
-    return minimaxAudioVoiceOptions.some((item) => item.value === value) ? value : "male-qn-qingse";
+    return normalizeAudioVoiceForProvider("minimax", value);
 }
 
 export function normalizeAudioFormatValue(value: string) {

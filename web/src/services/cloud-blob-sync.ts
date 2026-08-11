@@ -3,9 +3,44 @@
 import { downloadCloudBlobByKey, isCloudApiError, uploadCloudBlob } from "@/services/cloud-api";
 import { getMediaBlob, setMediaBlob } from "@/services/file-storage";
 import { getImageBlob, setImageBlob } from "@/services/image-storage";
+import { useAuthStore } from "@/stores/use-auth-store";
 
 export const CLOUD_BLOB_CONCURRENCY = 3;
 export const CLOUD_STORAGE_KEY_RE = /^(image|video|video-asset|audio|file|video-reference|audio-reference):[A-Za-z0-9_-]+$/;
+
+const uploadedBlobKeys = new Set<string>();
+const blobUploadsInFlight = new Map<string, Promise<boolean>>();
+
+function scopedBlobKey(storageKey: string) {
+    const userId = useAuthStore.getState().user?.id || "anonymous";
+    return `${userId}:${storageKey}`;
+}
+
+async function uploadCloudBlobOnce(storageKey: string) {
+    const scopedKey = scopedBlobKey(storageKey);
+    if (uploadedBlobKeys.has(scopedKey)) return "cached" as const;
+
+    const current = blobUploadsInFlight.get(scopedKey);
+    if (current) {
+        const uploaded = await current;
+        return uploaded ? ("shared" as const) : ("missing" as const);
+    }
+
+    const upload = (async () => {
+        const blob = await getLocalCloudBlob(storageKey);
+        if (!blob || blob.size <= 0) return false;
+        await uploadCloudBlob({ clientKey: storageKey, blob, filename: storageKey.replace(":", "-") });
+        uploadedBlobKeys.add(scopedKey);
+        return true;
+    })();
+    blobUploadsInFlight.set(scopedKey, upload);
+    try {
+        const uploaded = await upload;
+        return uploaded ? ("uploaded" as const) : ("missing" as const);
+    } finally {
+        blobUploadsInFlight.delete(scopedKey);
+    }
+}
 
 export function collectCloudStorageKeys(value: unknown, keys = new Set<string>()) {
     if (typeof value === "string") {
@@ -52,13 +87,9 @@ export async function uploadReferencedCloudBlobs(value: unknown) {
     let skipped = 0;
     await runCloudBlobPool(keys, CLOUD_BLOB_CONCURRENCY, async (key) => {
         try {
-            const blob = await getLocalCloudBlob(key);
-            if (!blob || blob.size <= 0) {
-                skipped += 1;
-                return;
-            }
-            await uploadCloudBlob({ clientKey: key, blob, filename: key.replace(":", "-") });
-            uploaded += 1;
+            const result = await uploadCloudBlobOnce(key);
+            if (result === "uploaded") uploaded += 1;
+            else skipped += 1;
         } catch (error) {
             console.warn("cloud blob upload failed", key, error);
             skipped += 1;

@@ -92,7 +92,8 @@ export function resolveVideoHostKind(baseUrl: string): VideoHostKind {
 
 /**
  * openai2api.com（公网 New API 多模型站）本机适配表。
- * Seedance：/video/generations + Comfy 字段（与同事脚本一致）。
+ * Seedance 主机默认：/video/generations（doubao-seedance-*）。
+ * 精确模型 seedance2 的 openai-video 路径由 video.ts 按模型切到 /videos，不写死在本 profile。
  * Grok：只 /video/generations。实测 /videos/generations → Invalid URL 404；/videos → platform 48。
  */
 const OPENAI2API_PROFILE: VideoHostProfile = {

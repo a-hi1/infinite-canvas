@@ -5,6 +5,7 @@ import { ArrowUp, LoaderCircle, Maximize2, Minimize2, Square, WandSparkles } fro
 import { ModelPicker } from "@/components/model-picker";
 import { requestCreditCost } from "@/constant/credits";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { resolveAudioVoiceProfile } from "@/lib/audio-voice-profile";
 import { mergeCanvasNodeAiConfig } from "@/lib/canvas/canvas-node-ai-config";
 import { optimizeGenerationPrompt, type PromptOptimizeMode } from "@/lib/prompt-optimize";
 import { useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
@@ -283,8 +284,9 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                             className="!h-8 max-w-[190px]"
                             config={config}
                             value={config.model}
-                            onChange={(model) => onConfigChange(node.id, { model })}
+                            onChange={(model) => onConfigChange(node.id, { model, audioVoice: resolveAudioVoiceProfile({ ...config, model }, model).voice })}
                             capability="audio"
+                            audioTask="tts"
                             onMissingConfig={() => openConfigDialog(true)}
                         />
                         <CanvasAudioSettingsPopover config={config} buttonClassName="!h-8 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />

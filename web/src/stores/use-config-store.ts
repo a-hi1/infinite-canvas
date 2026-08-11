@@ -3,6 +3,8 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
+import { resolveGrokModelProfile } from "@/lib/grok-model-profile";
+
 export type ApiCallFormat = "openai" | "gemini";
 export type ReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
 
@@ -42,6 +44,7 @@ export type AiConfig = {
     videoModel: string;
     textModel: string;
     audioModel: string;
+    transcriptionModel: string;
     audioVoice: string;
     audioFormat: string;
     audioSpeed: string;
@@ -82,6 +85,7 @@ export type WebdavSyncConfig = {
 
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 export type ModelCapability = "image" | "video" | "text" | "audio";
+export type AudioModelTask = "tts" | "stt";
 const CHANNEL_MODEL_SEPARATOR = "::";
 export const AI_PROXY_BASE_URL = "/ai-proxy";
 /** Same-origin LAN OpenAI-compatible relay (nginx/vite → private IP). Avoids browser CORS. */
@@ -120,6 +124,7 @@ export const defaultConfig: AiConfig = {
     videoModel: `${DEFAULT_CHANNEL_ID}::grok-imagine-video`,
     textModel: `${DEFAULT_CHANNEL_ID}::gpt-5.5`,
     audioModel: `${DEFAULT_CHANNEL_ID}::gpt-4o-mini-tts`,
+    transcriptionModel: "",
     audioVoice: "alloy",
     audioFormat: "mp3",
     audioSpeed: "1",
@@ -185,6 +190,8 @@ function isTextModelName(model: string) {
 
 export function modelMatchesCapability(model: string, capability?: ModelCapability) {
     if (!capability) return true;
+    const grokProfile = resolveGrokModelProfile(model);
+    if (grokProfile) return grokProfile.capability === capability;
     if (capability === "image") return isImageModelName(model);
     if (capability === "video") return isVideoModelName(model);
     if (capability === "audio") return isAudioModelName(model);
@@ -193,6 +200,18 @@ export function modelMatchesCapability(model: string, capability?: ModelCapabili
 
 export function filterModelsByCapability(models: string[], capability?: ModelCapability) {
     return capability ? models.filter((model) => modelMatchesCapability(model, capability)) : models;
+}
+
+export function modelMatchesAudioTask(model: string, task: AudioModelTask) {
+    const profile = resolveGrokModelProfile(model);
+    if (profile?.capability === "audio") return profile.task === task;
+    const value = modelOptionName(model).toLowerCase();
+    if (task === "stt") return value.includes("stt") || value.includes("transcri") || value.includes("whisper");
+    return isAudioModelName(model) && !value.includes("stt") && !value.includes("transcri") && !value.includes("whisper");
+}
+
+export function selectableModelsByAudioTask(config: AiConfig, task: AudioModelTask) {
+    return selectableModelsByCapability(config, "audio").filter((model) => modelMatchesAudioTask(model, task));
 }
 
 /**
@@ -219,6 +238,8 @@ export function deriveCapabilityModelLists(channels: ModelChannel[], current?: P
     const videoModels = filterModelsByCapability(models, "video");
     const textModels = filterModelsByCapability(models, "text");
     const audioModels = filterModelsByCapability(models, "audio");
+    const ttsModels = audioModels.filter((model) => modelMatchesAudioTask(model, "tts"));
+    const transcriptionModels = audioModels.filter((model) => modelMatchesAudioTask(model, "stt"));
     const pickDefault = (value: string | undefined, options: string[], fallback = "") => {
         const normalized = normalizeModelOptionValue(value, channels);
         if (normalized && options.includes(normalized)) return normalized;
@@ -233,7 +254,8 @@ export function deriveCapabilityModelLists(channels: ModelChannel[], current?: P
         imageModel: pickDefault(current?.imageModel || current?.model, imageModels),
         videoModel: pickDefault(current?.videoModel, videoModels, defaultConfig.videoModel),
         textModel: pickDefault(current?.textModel || current?.model, textModels),
-        audioModel: pickDefault(current?.audioModel, audioModels, defaultConfig.audioModel),
+        audioModel: pickDefault(current?.audioModel, ttsModels, defaultConfig.audioModel),
+        transcriptionModel: pickDefault(current?.transcriptionModel, transcriptionModels),
     };
 }
 
@@ -388,7 +410,7 @@ export function knownModelScriptKeys(config: AiConfig) {
             bare.add(name);
         }
     }
-    for (const value of [...(config.models || []), config.model, config.imageModel, config.videoModel, config.textModel, config.audioModel, ...(config.imageModels || []), ...(config.videoModels || []), ...(config.textModels || []), ...(config.audioModels || [])]) {
+    for (const value of [...(config.models || []), config.model, config.imageModel, config.videoModel, config.textModel, config.audioModel, config.transcriptionModel, ...(config.imageModels || []), ...(config.videoModels || []), ...(config.textModels || []), ...(config.audioModels || [])]) {
         const key = (value || "").trim();
         if (!key) continue;
         exact.add(key);
@@ -619,6 +641,7 @@ function normalizeChannels(config: AiConfig) {
                     config.videoModel,
                     config.textModel,
                     config.audioModel,
+                    config.transcriptionModel,
                     ...DEFAULT_RELAY_MODELS,
                 ]),
             }),

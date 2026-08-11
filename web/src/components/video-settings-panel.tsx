@@ -1,4 +1,4 @@
-import { type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Switch } from "antd";
 
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
@@ -15,7 +15,7 @@ import {
     normalizeVeoSeconds,
     normalizeVeoSize,
 } from "@/lib/openai-compatible-video";
-import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedancePixelLabel, seedanceRatioOptions } from "@/lib/seedance-video";
+import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, normalizeSeedanceResolution, seedancePixelLabel, seedanceRatioOptions } from "@/lib/seedance-video";
 import { resolveVideoCapability, type PillOption } from "@/lib/model-capability";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
 
@@ -123,10 +123,11 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                             </OptionPill>
                         ))}
                         {cap.customSeconds ? (
-                            <NumberInput
+                            <DurationInput
                                 value={seconds}
                                 min={cap.customSeconds.min}
                                 max={cap.customSeconds.max}
+                                normalize={cap.normalize.seconds}
                                 theme={theme}
                                 onChange={(value) => onConfigChange("videoSeconds", value)}
                             />
@@ -150,7 +151,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     );
 }
 
-export function videoSettingsSummary(config: Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "baseUrl">) {
+export function videoSettingsSummary(config: AiConfig) {
     if (isAgnesVideoConfig(config)) return `Agnes · ${AGNES_VIDEO_SIZE} · ${config.videoSeconds === "5" ? 5 : 2}s`;
     if (isGrokVideoConfig(config)) return `Grok · ${normalizeGrokResolution(config.vquality)} · ${normalizeGrokAspectRatio(config.size)} · ${normalizeGrokDuration(config.videoSeconds)}s`;
     if (isSoraVideoConfig(config)) {
@@ -160,7 +161,8 @@ export function videoSettingsSummary(config: Pick<AiConfig, "model" | "videoMode
     if (isVeoVideoConfig(config)) return `Veo · ${normalizeVeoSize(config.size)} · ${normalizeVeoSeconds(config.videoSeconds)}s`;
     if (isSeedanceVideoConfig(config)) {
         const model = modelOptionName(config.model || config.videoModel || "");
-        return `${normalizeSeedanceResolution(config.vquality, model)} · ${normalizeSeedanceRatio(config.size)} · ${videoSecondsLabel(String(normalizeSeedanceDuration(config.videoSeconds)))}`;
+        const seconds = resolveVideoCapability(config).normalize.seconds(config.videoSeconds);
+        return `${normalizeSeedanceResolution(config.vquality, model)} · ${normalizeSeedanceRatio(config.size)} · ${videoSecondsLabel(seconds)}`;
     }
     return `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
 }
@@ -242,8 +244,60 @@ function DimensionInput({ prefix, value, disabled, theme, onChange }: { prefix: 
     );
 }
 
-function NumberInput({ value, min, max, theme, onChange }: { value: string; min: number; max: number; theme: CanvasTheme; onChange: (value: string) => void }) {
-    return <input type="number" min={min} max={max} className="h-9 w-16 rounded-full border bg-transparent px-2 text-center text-sm outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" style={{ borderColor: theme.node.stroke, color: theme.node.text, WebkitTextFillColor: theme.node.text }} value={value} onChange={(event) => onChange(event.target.value)} onMouseDown={(event) => event.stopPropagation()} />;
+function DurationInput({ value, min, max, normalize, theme, onChange }: { value: string; min: number; max: number; normalize: (value: string) => string; theme: CanvasTheme; onChange: (value: string) => void }) {
+    const [draft, setDraft] = useState(value);
+    const focused = useRef(false);
+    const cancelCommit = useRef(false);
+
+    useEffect(() => {
+        if (!focused.current) setDraft(value);
+    }, [value]);
+
+    const commit = () => {
+        focused.current = false;
+        if (cancelCommit.current) {
+            cancelCommit.current = false;
+            setDraft(value);
+            return;
+        }
+        const normalized = normalize(draft);
+        setDraft(normalized);
+        onChange(normalized);
+    };
+
+    return (
+        <input
+            type="text"
+            inputMode="numeric"
+            pattern="-?[0-9]*"
+            aria-label={`时长（${min}到${max}秒）`}
+            title={`输入 ${min} 到 ${max} 秒`}
+            className="h-9 w-16 rounded-full border bg-transparent px-2 text-center text-sm outline-none [appearance:textfield]"
+            style={{ borderColor: theme.node.stroke, color: theme.node.text, WebkitTextFillColor: theme.node.text }}
+            value={draft}
+            onFocus={() => {
+                focused.current = true;
+            }}
+            onChange={(event) => setDraft(event.target.value.replace(/[^0-9-]/g, ""))}
+            onBlur={commit}
+            onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                    event.preventDefault();
+                    event.currentTarget.blur();
+                } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    cancelCommit.current = true;
+                    setDraft(value);
+                    event.currentTarget.blur();
+                }
+            }}
+            onWheel={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+        />
+    );
 }
 
 function SizePreview({ width, height, color }: { width: number; height: number; color: string }) {

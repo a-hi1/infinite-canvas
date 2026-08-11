@@ -63,7 +63,34 @@ function openai2apiImageConfig(): AiConfig {
     };
 }
 
-describe("openai2api GPT image routing", () => {
+function grokAutoImageConfig(): AiConfig {
+    const channel: ModelChannel = {
+        id: "official",
+        name: "xAI",
+        baseUrl: "https://api.x.ai/v1",
+        apiKey: "test-only",
+        apiFormat: "openai",
+        models: ["grok-imagine-image"],
+    };
+    return { ...defaultConfig, channels: [channel], baseUrl: channel.baseUrl, apiKey: channel.apiKey, models: ["official::grok-imagine-image"], model: "official::grok-imagine-image", imageModel: "official::grok-imagine-image", quality: "auto", size: "auto", count: "1" };
+}
+
+describe("exact Grok image generation fields", () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        vi.stubGlobal("window", globalThis);
+        vi.mocked(axios.post).mockResolvedValue({ data: { data: [{ b64_json: "a".repeat(80) }] } });
+    });
+
+    it("uses aspect_ratio and resolution even for official auto config", async () => {
+        await requestGeneration(grokAutoImageConfig(), "draw this");
+        const body = vi.mocked(axios.post).mock.calls[0]?.[1] as Record<string, unknown>;
+        expect(body).toMatchObject({ model: "grok-imagine-image", aspect_ratio: "1:1", resolution: "1k" });
+        expect(body).not.toHaveProperty("size");
+    });
+});
+
+describe("openai2api image request routing", () => {
     beforeEach(() => {
         vi.clearAllMocks();
         vi.stubGlobal("window", globalThis);

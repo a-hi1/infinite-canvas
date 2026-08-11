@@ -2,6 +2,13 @@
 
 ## Unreleased
 
++ [修复] 精确模型 `seedance2` 走 OpenAI Video：`POST /v1/videos` + 轮询 `/videos/{id}`，完成无 URL 时可回退 content 下载；纯文生 `model/prompt/seconds(number)/size(像素)`；有参考图/视频/音频时仍完整发送 `content[]` + `metadata.content`（不静默丢素材），并附带 `images`/`videos`/`audios` 兼容字段。其它 `doubao-seedance-*` 仍走 `/video/generations`，Agent Plan 不变；渠道显示名（如「Veo」）不改变上游分组，`under group default` 需中转授权 `veo-sora`。
++ [修复] Seedance 中转时长：OpenAI2API/New API 不接受智能 `-1`，中转只提供固定秒数并把旧 `-1` 归一为 5；时长框可直接输入，滚轮不改值。Agent Plan 仍保留智能时长。
++ [修复] 画布/素材 `POST /api/blobs` 同账号同 `storageKey` 客户端并发合并与会话成功缓存；服务端完整幂等命中不计新上传限额，降低重复同步 429。
++ [修复] Grok 14 模型全模态本地适配：精确区分文本/搜索/生图/图片编辑/视频/TTS/STT/泛语音，避免 `imagine` 子串或 xAI 主机误判模态；codex2api 与 xAI 的精确 `grok-voice-tts` / `grok-voice-stt` 改走原生 `/v1/tts`、`/v1/stt` 协议，其他 OpenAI 兼容渠道仍走 `/audio/speech`、`/audio/transcriptions`。画布音频可转写为 Text 子节点；未知实时 `grok-voice-latest` 不盲试、不冒充 TTS/STT。
++ [修复] 音色选择按当前 TTS 模型所属协议隔离：原生 Grok 只显示 xAI 音色，MiniMax 只显示 MiniMax 音色，OpenAI 兼容渠道与模型脚本只显示 OpenAI 音色；切换模型时自动归一化不兼容的历史音色，并确保界面所选值与实际请求一致。
++ [新增] 3D 导演台自动搭建：描述/参考图规则可离线 + 可选宿主 BYOK 文本/多模态识图；选中角色后自然语言指令调姿；不改生成主路径。
+
 + [优化] 画布一键排版更美观：层序 barycenter 减交叉、后继按前驱垂直对齐、列居中、列/行间距加大；连线曲率软化封顶（更直、不「甩弯」）。仍可撤销；组/batch 为单元；有选中只排选中。
 + [新增] 多选成组：选中 ≥2 个可成组节点后，多选栏 / 右键「成组」生成贴合框并写入 `groupId`（拖组仍带动成员）；「取消成组」拆框保位置。空组按钮不显示；不改生成/连线语义。
 + [新增] 画布体验切片（借鉴上游 0.15，不整仓 merge）：① 提示词面板「放大编辑」Modal，与浮层共用同一 prompt 状态实时同步，关闭不清草稿；② 底栏 **移动 / 选择** 双模式（默认仍移动=空白拖平移），Space 临时反转，Ctrl/Meta 空白仍可强制框选；③ 元素列表定位缩放上限 **100%**（滚轮仍可放大到 5×）；④ 失败/多图结果：hover 强制显示重试，新增「副本」入口（脱批为独立节点），删除仍维护 batch 主图；⑤ **一键排版**（底栏 / 多选栏 / 右键）— 有选中只排选中，否则全画布；组与 batch 按单元，链路左→右，可撤销。**不改** 生成 API / Grok / Seedance / 云双轨 / 并发生成模型。

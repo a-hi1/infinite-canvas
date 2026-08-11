@@ -9,7 +9,8 @@ import { fetchChannelModels } from "@/services/api/image";
 import { exportAppConfig, importAppConfig } from "@/services/config-file";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
-import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
+import { audioFormatOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
+import { resolveAudioVoiceProfile } from "@/lib/audio-voice-profile";
 import {
     AI_PROXY_BASE_URL,
     CHANNEL_COMPAT_OPTIONS,
@@ -33,8 +34,9 @@ import {
 
 type ModelGroup = {
     capability: ModelCapability;
-    modelKey: "imageModel" | "videoModel" | "textModel" | "audioModel";
+    modelKey: "imageModel" | "videoModel" | "textModel" | "audioModel" | "transcriptionModel";
     defaultLabel: string;
+    audioTask?: "tts" | "stt";
 };
 
 type WebdavDomainProgress = {
@@ -49,7 +51,8 @@ const modelGroups: ModelGroup[] = [
     { capability: "image", modelKey: "imageModel", defaultLabel: "默认生图模型" },
     { capability: "video", modelKey: "videoModel", defaultLabel: "默认视频模型" },
     { capability: "text", modelKey: "textModel", defaultLabel: "默认文本模型" },
-    { capability: "audio", modelKey: "audioModel", defaultLabel: "默认音频模型" },
+    { capability: "audio", modelKey: "audioModel", defaultLabel: "默认语音生成模型", audioTask: "tts" },
+    { capability: "audio", modelKey: "transcriptionModel", defaultLabel: "默认语音转文字模型", audioTask: "stt" },
 ];
 
 const webdavDomainKeys: AppSyncDomainKey[] = ["canvas", "assets", "image-workbench", "video-workbench"];
@@ -81,6 +84,7 @@ export function AppConfigModal() {
     const [webdavSyncStatus, setWebdavSyncStatus] = useState("");
     const [webdavDomainProgress, setWebdavDomainProgress] = useState(createWebdavDomainProgress);
     const config = useConfigStore((state) => state.config);
+    const defaultAudioVoiceProfile = resolveAudioVoiceProfile({ ...config, model: config.audioModel }, config.audioModel);
     const webdav = useConfigStore((state) => state.webdav);
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const updateWebdavConfig = useConfigStore((state) => state.updateWebdavConfig);
@@ -189,7 +193,13 @@ export function AppConfigModal() {
         try {
             const entries = await Promise.all(runnable.map(async (channel) => [channel.id, uniqueModels(await fetchChannelModels(channel))] as const));
             const modelMap = new Map(entries);
-            updateChannels(config.channels.map((channel) => (modelMap.has(channel.id) ? { ...channel, models: modelMap.get(channel.id) || [] } : channel)));
+            updateChannels(
+                config.channels.map((channel) =>
+                    modelMap.has(channel.id)
+                        ? { ...channel, models: uniqueModels([...(channel.models || []), ...(modelMap.get(channel.id) || [])]) }
+                        : channel,
+                ),
+            );
             message.success("模型列表已更新；各工作台下拉会按渠道模型自动同步");
         } catch (error) {
             message.error(error instanceof Error ? error.message : "读取模型失败");
@@ -364,7 +374,10 @@ export function AppConfigModal() {
                                 <div className="mb-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                                     {modelGroups.map((group) => (
                                         <Form.Item key={group.modelKey} label={group.defaultLabel} className="mb-0">
-                                            <ModelPicker config={config} value={config[group.modelKey]} onChange={(model) => updateConfig(group.modelKey, model)} capability={group.capability} fullWidth />
+                                            <ModelPicker config={config} value={config[group.modelKey]} onChange={(model) => {
+                                                updateConfig(group.modelKey, model);
+                                                if (group.modelKey === "audioModel") updateConfig("audioVoice", resolveAudioVoiceProfile({ ...config, model, audioModel: model }, model).voice);
+                                            }} capability={group.capability} audioTask={group.audioTask} fullWidth />
                                         </Form.Item>
                                     ))}
                                 </div>
@@ -382,8 +395,8 @@ export function AppConfigModal() {
                                             onBlur={(event) => updateConfig("canvasImageCount", normalizeImageCount(event.target.value))}
                                         />
                                     </Form.Item>
-                                    <Form.Item label="默认音频声音" className="mb-0">
-                                        <Select value={config.audioVoice} options={audioVoiceOptions} onChange={(value) => updateConfig("audioVoice", value)} />
+                                    <Form.Item label={`默认音频音色 · ${defaultAudioVoiceProfile.providerLabel}`} className="mb-0">
+                                        <Select value={defaultAudioVoiceProfile.voice} options={defaultAudioVoiceProfile.options} onChange={(value) => updateConfig("audioVoice", value)} />
                                     </Form.Item>
                                     <Form.Item label="默认音频格式" className="mb-0">
                                         <Select value={config.audioFormat} options={audioFormatOptions} onChange={(value) => updateConfig("audioFormat", value)} />

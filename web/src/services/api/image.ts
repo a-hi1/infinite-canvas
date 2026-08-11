@@ -15,6 +15,7 @@ import {
 } from "@/stores/use-config-store";
 import { nanoid } from "nanoid";
 import { compressImageDataUrl, dataUrlToFile } from "@/lib/image-utils";
+import { isGrokModelTask } from "@/lib/grok-model-profile";
 import { BYOK_IMAGE_REFERENCE_LIMIT, SCRIPT_IMAGE_REFERENCE_LIMIT } from "@/lib/image-reference-limits";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { enhanceImageUpstreamError } from "@/lib/image-request-mode";
@@ -906,13 +907,17 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
             throw new Error(readAxiosError(error, "请求失败", "generation"));
         }
     }
+    if (isGrokModelTask(requestConfig.model, "image-edit")) {
+        throw new Error("当前选择的是 Grok 图片编辑模型，请先添加至少一张参考图");
+    }
     const quality = normalizeQuality(config.quality);
     const requestSize = resolveRequestSize(quality, config.size);
     const background = normalizeBackground(config.background);
     const channel = resolveModelChannel(config, config.model || config.imageModel);
     const strategy = getImageCompatStrategy(requestConfig.baseUrl, channel.compatProfile);
     const fullPrompt = withSystemPrompt(requestConfig, prompt);
-    const grokOpts = strategy.sizeMode === "grok-aspect" ? resolveLanGrokImageOptions(config.quality, config.size) : null;
+    const usesGrokImageFields = strategy.sizeMode === "grok-aspect" || isGrokModelTask(requestConfig.model, "image-generation");
+    const grokOpts = usesGrokImageFields ? resolveLanGrokImageOptions(config.quality, config.size) : null;
     // 脆弱中转（codex2api）：一次只生成 1 张，避免 n>1 或连打重试把连接掐断
     const requestCount = strategy.profile === "relay-fragile" ? 1 : n;
 
@@ -922,7 +927,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
         n: requestCount,
         response_format: "b64_json",
     };
-    if (strategy.sizeMode === "grok-aspect" && grokOpts) {
+    if (usesGrokImageFields && grokOpts) {
         if (grokOpts.aspect_ratio) primaryBody.aspect_ratio = grokOpts.aspect_ratio;
         if (grokOpts.resolution) primaryBody.resolution = grokOpts.resolution;
     } else if (strategy.sizeMode === "openai-size") {

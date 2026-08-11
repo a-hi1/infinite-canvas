@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { seedanceRelayWorkbenchImageLabel, seedanceVideoReferenceError } from "./seedance-video";
+import {
+    isSeedanceOpenAiVideoModel,
+    seedancePixelSize,
+    seedanceRelayWorkbenchImageLabel,
+    seedanceVideoReferenceError,
+} from "./seedance-video";
 import type { ReferenceVideo } from "@/types/media";
 
 function video(partial: Partial<ReferenceVideo> & Pick<ReferenceVideo, "id">): ReferenceVideo {
@@ -45,5 +50,20 @@ describe("seedanceRelayWorkbenchImageLabel", () => {
         expect(seedanceRelayWorkbenchImageLabel(0, 3)).toBe("图片1·主参考");
         expect(seedanceRelayWorkbenchImageLabel(1, 3)).toBe("图片2·补充");
         expect(seedanceRelayWorkbenchImageLabel(2, 3)).toBe("图片3·补充");
+    });
+});
+
+describe("seedance2 OpenAI Video helpers", () => {
+    it("only treats exact seedance2 as openai-video", () => {
+        expect(isSeedanceOpenAiVideoModel("seedance2")).toBe(true);
+        expect(isSeedanceOpenAiVideoModel("relay::seedance2")).toBe(true);
+        expect(isSeedanceOpenAiVideoModel("doubao-seedance-2-0-260128")).toBe(false);
+        expect(isSeedanceOpenAiVideoModel("seedance2-fast")).toBe(false);
+    });
+
+    it("maps resolution and ratio to OpenAI Video pixel size", () => {
+        expect(seedancePixelSize("1080p", "16:9")).toBe("1920x1080");
+        expect(seedancePixelSize("720p", "9:16")).toBe("720x1280");
+        expect(seedancePixelSize("480p", "adaptive")).toBe("864x496");
     });
 });
