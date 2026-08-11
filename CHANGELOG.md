@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-+ [修复] 精确模型 `seedance2` 走 OpenAI Video：`POST /v1/videos` + 轮询 `/videos/{id}`，完成无 URL 时可回退 content 下载；纯文生 `model/prompt/seconds(number)/size(像素)`；有参考图/视频/音频时仍完整发送 `content[]` + `metadata.content`（不静默丢素材），并附带 `images`/`videos`/`audios` 兼容字段。其它 `doubao-seedance-*` 仍走 `/video/generations`，Agent Plan 不变；渠道显示名（如「Veo」）不改变上游分组，`under group default` 需中转授权 `veo-sora`。
++ [修复] 精确短名 `seedance2` / `seedance2.5` 走 OpenAI Video：`POST /v1/videos` + 轮询 `/videos/{id}`，完成无 URL 时可回退 content 下载；纯文生 `model/prompt/seconds(number)/size(像素)`；有参考图/视频/音频时仍完整发送 `content[]` + `metadata.content`（不静默丢素材），并附带 `images`/`videos`/`audios` 兼容字段。其它 `doubao-seedance-*` 仍走 `/video/generations`，Agent Plan 不变；渠道显示名（如「Veo」）不改变上游分组，`under group default` 需中转授权对应分组。`seedance2.5` 按同路径试发，以 Network 真实响应为准。
 + [修复] Seedance 中转时长：OpenAI2API/New API 不接受智能 `-1`，中转只提供固定秒数并把旧 `-1` 归一为 5；时长框可直接输入，滚轮不改值。Agent Plan 仍保留智能时长。
 + [修复] 画布/素材 `POST /api/blobs` 同账号同 `storageKey` 客户端并发合并与会话成功缓存；服务端完整幂等命中不计新上传限额，降低重复同步 429。
 + [修复] Grok 14 模型全模态本地适配：精确区分文本/搜索/生图/图片编辑/视频/TTS/STT/泛语音，避免 `imagine` 子串或 xAI 主机误判模态；codex2api 与 xAI 的精确 `grok-voice-tts` / `grok-voice-stt` 改走原生 `/v1/tts`、`/v1/stt` 协议，其他 OpenAI 兼容渠道仍走 `/audio/speech`、`/audio/transcriptions`。画布音频可转写为 Text 子节点；未知实时 `grok-voice-latest` 不盲试、不冒充 TTS/STT。

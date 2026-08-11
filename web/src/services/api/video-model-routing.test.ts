@@ -107,18 +107,22 @@ describe("native Seedance relay payload", () => {
         vi.mocked(axios.post).mockResolvedValue({ data: { id: "task-seedance-relay" } });
     });
 
-    it("routes exact seedance2 on openai2api to OpenAI Video /videos", () => {
+    it("routes exact seedance2 / seedance2.5 on openai2api to OpenAI Video /videos", () => {
         expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "http://openai2api.com:3000" }, "seedance2")).toBe("/videos");
         expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "http://openai2api.com:3000" }, "relay::seedance2")).toBe("/videos");
+        expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "http://openai2api.com:3000" }, "seedance2.5")).toBe("/videos");
+        expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "http://openai2api.com:3000" }, "relay::seedance2.5")).toBe("/videos");
     });
 
-    it("keeps non-seedance2 Seedance models on host relay /video/generations", () => {
+    it("keeps non-openai-video Seedance models on host relay /video/generations", () => {
         expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "http://openai2api.com:3000" }, "doubao-seedance-2-0-260128")).toBe("/video/generations");
         expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "http://openai2api.com:3000" })).toBe("/video/generations");
+        expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "http://openai2api.com:3000" }, "seedance2-fast")).toBe("/video/generations");
     });
 
     it("keeps Agent Plan on contents/generations/tasks", () => {
         expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "https://ark.cn-beijing.volces.com/api/plan/v3" }, "seedance2")).toBe("/contents/generations/tasks");
+        expect(seedanceCreatePathForTest({ ...defaultConfig, baseUrl: "https://ark.cn-beijing.volces.com/api/plan/v3" }, "seedance2.5")).toBe("/contents/generations/tasks");
     });
 
     it("uses OpenAI Video body contract for pure-text seedance2", () => {
@@ -137,6 +141,19 @@ describe("native Seedance relay payload", () => {
         expect(payload.duration).toBe(4);
         expect(payload.durationSeconds).toBe(4);
         expect(payloadKeepsAllSeedanceRelayReferences(payload, 0)).toBe(true);
+    });
+
+    it("uses OpenAI Video body contract for pure-text seedance2.5", () => {
+        const payload = seedanceRelayPayloadForTest(
+            { ...defaultConfig, videoSeconds: "5", vquality: "720", size: "9:16", videoGenerateAudio: "true" },
+            "seedance2.5",
+            "coastal clip",
+        );
+        expect(payload.model).toBe("seedance2.5");
+        expect(payload.seconds).toBe(5);
+        expect(typeof payload.seconds).toBe("number");
+        expect(payload.size).toBe("720x1280");
+        expect(payload).not.toHaveProperty("content");
     });
 
     it("keeps duration numeric for seedance2 OpenAI Video seconds", () => {

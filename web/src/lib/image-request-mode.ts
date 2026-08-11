@@ -243,10 +243,10 @@ export function enhanceImageUpstreamError(upstream: string, context?: "generatio
     }
   }
   if (/no available channel|无可用渠道|无渠道|channel not found|未配置渠道/i.test(lower)) {
-    hints.push("这是 New API 网关侧问题：到管理后台「渠道」里给当前 Grok 图片模型绑定可用上游，并确认令牌所属分组能访问该模型");
+    hints.push("这是 New API 网关侧问题：到管理后台「渠道」里给当前所选图片模型绑定可用上游，并确认令牌所属分组能访问该模型");
   }
-  if (/service unavailable|503|502|504|upstream.*(down|unavailable|failed)|overloaded/i.test(lower)) {
-    hints.push("多为中转上游不可用，不是本站画布/工作台逻辑错误。请在 New API 日志里看该 request id 的具体失败原因，并检查上游 Grok Key/额度");
+  if (/service unavailable|503|502|504|upstream.*(down|unavailable|failed)|overloaded|do request failed/i.test(lower)) {
+    hints.push("多为中转上游不可用，不是本站画布/工作台逻辑错误。请在 New API 日志里按 request id 查具体失败原因，并检查该模型对应上游 Key/额度（当前若是 GPT 就查 GPT 上游，不是 Grok Key）");
   }
   if (/rate limit|too many|429/i.test(lower)) {
     hints.push("疑似限流，请降低张数或稍后重试");

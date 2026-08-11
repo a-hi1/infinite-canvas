@@ -54,11 +54,14 @@ describe("seedanceRelayWorkbenchImageLabel", () => {
 });
 
 describe("seedance2 OpenAI Video helpers", () => {
-    it("only treats exact seedance2 as openai-video", () => {
+    it("only treats exact seedance2 / seedance2.5 as openai-video", () => {
         expect(isSeedanceOpenAiVideoModel("seedance2")).toBe(true);
         expect(isSeedanceOpenAiVideoModel("relay::seedance2")).toBe(true);
+        expect(isSeedanceOpenAiVideoModel("seedance2.5")).toBe(true);
+        expect(isSeedanceOpenAiVideoModel("channel::seedance2.5")).toBe(true);
         expect(isSeedanceOpenAiVideoModel("doubao-seedance-2-0-260128")).toBe(false);
         expect(isSeedanceOpenAiVideoModel("seedance2-fast")).toBe(false);
+        expect(isSeedanceOpenAiVideoModel("seedance2.5-fast")).toBe(false);
     });
 
     it("maps resolution and ratio to OpenAI Video pixel size", () => {

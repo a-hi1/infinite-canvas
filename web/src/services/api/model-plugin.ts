@@ -83,8 +83,9 @@ function pluginErrorMessage(error: unknown) {
     const upstream = pluginUpstreamMessage(error.response?.data) || error.message;
     const statusText = status ? ` (status=${status})` : "";
     const groupMatch = upstream.match(/no available channel for model\s+([^\s]+)\s+under group\s+([^\s(]+)/i);
-    if (groupMatch?.[1]?.toLowerCase() === "seedance2" && groupMatch[2]?.toLowerCase() === "default") {
-        return `${upstream}${statusText}。请求已到达中转站，但当前 API Key 被路由到 default 分组；公开目录中的 seedance2 属于 veo-sora 分组。请使用获准访问 veo-sora 的 Key，并确认该组有启用且健康的 seedance2 渠道。本地渠道名称不会改变上游分组`;
+    const rejectedModel = groupMatch?.[1]?.toLowerCase() || "";
+    if ((rejectedModel === "seedance2" || rejectedModel === "seedance2.5") && groupMatch?.[2]?.toLowerCase() === "default") {
+        return `${upstream}${statusText}。请求已到达中转站，但当前 API Key 被路由到 default 分组；seedance2 / seedance2.5 通常属于 veo-sora 等专用分组。请使用获准访问该组的 Key，并确认渠道健康。本地渠道名称不会改变上游分组`;
     }
     return `${upstream}${statusText}`;
 }

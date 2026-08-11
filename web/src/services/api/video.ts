@@ -1942,7 +1942,7 @@ async function createSeedanceRelayTask(config: AiConfig, model: string, prompt: 
 
 function seedanceCreatePath(config: AiConfig, model = "") {
     // Agent Plan 走火山 tasks。
-    // 精确模型 seedance2：上游公开 endpoint type = openai-video → /videos。
+    // 精确短名 seedance2 / seedance2.5：OpenAI Video → /videos。
     // 其它 doubao-seedance-* 中转仍走主机 profile（openai2api/New API → /video/generations）。
     if (isArkPlanBaseUrl(config.baseUrl)) return "/contents/generations/tasks";
     if (isSeedanceOpenAiVideoModel(model || config.model || config.videoModel || "")) return "/videos";

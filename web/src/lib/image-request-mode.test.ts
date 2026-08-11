@@ -218,5 +218,19 @@ describe("enhanceImageUpstreamError", () => {
 
         expect(text).toMatch(/New API|渠道/);
         expect(text).toMatch(/绑定|分组|令牌/);
+        expect(text).not.toMatch(/Grok Key/);
+    });
+
+    it("does not blame Grok keys when a GPT/upstream relay fails", () => {
+        const text = enhanceImageUpstreamError(
+            "upstream error: do request failed (request id: 202608110803407356291108268d9d6QBTH0UY1)",
+            "generation",
+            "生图失败",
+        );
+
+        expect(text).toContain("中转上游不可用");
+        expect(text).toContain("request id");
+        expect(text).toMatch(/该模型对应上游 Key|GPT 上游/);
+        expect(text).not.toMatch(/检查上游 Grok Key/);
     });
 });

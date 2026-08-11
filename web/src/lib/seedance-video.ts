@@ -67,12 +67,14 @@ export function isSeedanceVideoModel(model: string) {
 }
 
 /**
- * openai2api 公开目录中的精确模型 `seedance2`：endpoint type = openai-video，
- * 创建路径应为 POST /v1/videos（不是旧 Comfy relay 的 /v1/video/generations）。
- * 其它 doubao-seedance-* 仍走 seedance 分组 / openai 兼容 relay。
+ * openai2api 上走 OpenAI Video（POST /v1/videos）的精确 Seedance 短名：
+ * - `seedance2`：公开目录标 openai-video / veo-sora
+ * - `seedance2.5`：上游当前在用短名；按同路径试发（未单独目录核验，失败看 Network 状态码）
+ * 不含 `seedance2-fast`、不含 `doubao-seedance-*`（那些仍走 /video/generations 或 Agent Plan）。
  */
 export function isSeedanceOpenAiVideoModel(model: string) {
-    return modelOptionName(model).trim().toLowerCase() === "seedance2";
+    const name = modelOptionName(model).trim().toLowerCase();
+    return name === "seedance2" || name === "seedance2.5";
 }
 
 export function isSeedanceFastModel(model: string) {
