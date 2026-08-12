@@ -5,6 +5,14 @@
 import { AGNES_VIDEO_SIZE, agnesDurationOptions, isAgnesVideoConfig } from "@/lib/agnes-video";
 import { isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
 import {
+    isKlingVideoConfig,
+    klingModeFromQuality,
+    KLING_VIDEO_SECONDS,
+    KLING_VIDEO_SIZE_OPTIONS,
+    normalizeKlingDuration,
+    normalizeKlingSize,
+} from "@/lib/kling-video";
+import {
     isSora2ProModel,
     isSoraOrVeoVideoConfig,
     isSoraVideoConfig,
@@ -59,7 +67,7 @@ export type PillOption = {
 };
 
 export type VideoCapabilityProfile = {
-    provider: "grok" | "seedance" | "agnes" | "sora" | "veo" | "generic";
+    provider: "grok" | "seedance" | "agnes" | "sora" | "veo" | "kling" | "generic";
     modelLabel: string;
     ratios: PillOption[];
     seconds: PillOption[];
@@ -260,6 +268,41 @@ export function resolveVideoCapability(config: AiConfig): VideoCapabilityProfile
                     { label: "不支持", value: "图+视频混用 · 多条参考视频" },
                 ],
                 note: "规格原样进首个请求；失败才降档。结果偏低会提示，不虚标。",
+            },
+        };
+    }
+
+    if (isKlingVideoConfig(config)) {
+        return {
+            provider: "kling",
+            modelLabel: label,
+            ratios: KLING_VIDEO_SIZE_OPTIONS.map((item) => ({
+                value: item.value,
+                label: item.label,
+                hint: item.aspectRatio,
+            })),
+            seconds: KLING_VIDEO_SECONDS.map((value) => ({ value: String(value), label: `${value}s` })),
+            resolutions: [
+                { value: "720", label: "标准 std" },
+                { value: "1080", label: "高品质 pro" },
+            ],
+            customSeconds: { min: 5, max: 10 },
+            normalize: {
+                size: (value) => normalizeKlingSize(value),
+                seconds: (value) => String(normalizeKlingDuration(value)),
+                // UI 清晰度 → mode：high/1080 → pro，其它 → std（创建时 klingModeFromQuality）
+                resolution: (value) => (klingModeFromQuality(value) === "pro" ? "1080" : "720"),
+            },
+            card: {
+                title: label,
+                fields: [
+                    { label: "工作模式", value: "文生 · 图生（首帧 + 可选尾帧）" },
+                    { label: "输入规格", value: "参考图 ≤2 张；不支持参考视频/音频" },
+                    { label: "输出规格", value: "5s / 10s · 16:9 / 9:16 / 1:1 · std/pro" },
+                    { label: "返回格式", value: "New API JSON POST /v1/video/generations + 轮询" },
+                    { label: "不支持", value: "OpenAI /videos multipart · 多参考视频/音频" },
+                ],
+                note: "openai2api 上禁止落到 /v1/videos（会 405）。清晰度 high≈pro。",
             },
         };
     }

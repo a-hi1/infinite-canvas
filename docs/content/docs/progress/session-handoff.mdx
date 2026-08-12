@@ -50,8 +50,8 @@ git rev-list --left-right --count a-hi1/main...HEAD 2>/dev/null || true
 
 ### 参考 tip（写/改本文时的锚点，接手以本机为准）
 
-- 已推 `a-hi1/main` tip 曾为：`846d2ea` — `fix(deploy): SPA /assets refresh, asset import order, Windows entrypoint`
-- 本机可能有**未提交**工作空间 `folder` 字段全栈改动 + 双端口 compose；**未 push 前不要当服务器/公司机已有**
+- 已推 `a-hi1/main` tip 曾为：`4cde8d2` — `fix(video): send seedance2 OpenAI Video seconds as string`
+- 本批待推（若尚未出现在 `git log`）：可灵 Kling 原生口 + 统一口回退、Grok content 鉴权下载重写、Seedance 轮询约 25 分钟；**未 push 前不要当服务器/公司机已有**
 - 接手时以你本机 `git log -1` / `git status` 为准，**不要死记**上文 tip
 
 ## 项目定位
@@ -199,10 +199,12 @@ docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.ym
 - **GPT 生图 openai2api 兼容**：`compatProfile=auto` 会把 `openai2api.com` 识别为 `relay-fragile`；文生图去掉易被拒的 `output_format` 并允许瘦身重试；多参考 edits 旁路必须全量发送 `images[]`，禁止只保留首图，且多参考失败时不允许用纯文生结果冒充成功
 - **Grok 图生图**：JSON `POST /images/edits`；有参考图**不再**自动跳 `*-edit`；多参考必须完整 multi-image payload，**禁止静默只发第一张**
 - **视频主机级自动适配**：`web/src/lib/video-host-profile.ts` 按 Base URL 收口 Grok 创建路径 / 是否允许 `/videos` 兜底 / Seedance 中转路径 / 多图压图；扩展新中转优先改 profile，避免散改 `video.ts`
-- **Grok 视频路径（按主机 profile）**：用户当前选择永远优先；禁止硬塞不存在的模型插队；多参考勿退化首图。**codex2api/xAI** → `/videos/generations`；**内网 New API / 公网 openai2api** → **仅** `/video/generations`，创建、轮询、完成态内容下载均走 singular 路径（openai2api **不再**试 `/videos/generations`，实测 Invalid URL 404），**禁止** Grok 打 `/videos`（platform 48）。openai2api/New API 多参考首包优先完整 `images[]`（其 TaskSubmitReq 明确保留该字段），不以可能被忽略的 `reference_images` 抢先；选 1080p 时先发 1080p，只有创建失败才降档。旧会话若缓存了 `/videos` 成功路径，New API 风格下会忽略。**公网 Grok 多图：** 本机发完整多图字段；出片依赖渠道类型 + 上游 multi-ref；失败可改 Seedance
-- **Grok 完成态 URL**：官方形状 `video.url`；`status=done` 时 url 可能空串/晚写——优先读嵌套 `video.url`，完成无地址再等约 3 分钟并试 content 下载，禁止过早当失败。**相对路径**（如 `/v1/videos/{id}/content`）按渠道 Base 解析并鉴权下载，不得当「无 URL」失败
-- Sora/Veo：多路径 create/poll；图生禁止无参考文生回退
-- Seedance/Agnes 保留；平台视频仍无参考素材服务端路径
+- **可灵 / Kling（openai2api / New API）**：模型名含 `kling` 时**优先** JSON `POST` 主机根 `/kling/v1/videos/text2video|image2video`（**禁止**拼成 `/v1/kling/...`；`buildApiUrl` 对 `/kling/*` 不 prepend `/v1`），New API 中间件会改写进统一任务口；失败回退 `POST /v1/video/generations`（TaskSubmitReq + 精简 metadata；**禁止** `image`/`images`/`input_reference` 三份 data URI 重复撑爆 body）。**禁止**落到 OpenAI `/videos` multipart。图生最多 2 张（首帧 + 可选尾帧，参考图会压缩）；时长 5/10s；清晰度 high≈pro；不支持参考视频/音频。轮询 `createPath=/video/generations` + 原生 kling 查询兜底。若 Network 已是正确原生口仍 405：后台模型须绑 **Kling 渠道类型**（ChannelType=50，不是 OpenAI/Sora），否则统一口会被 Sora adaptor 转到上游 `/v1/videos` 再 405。入口：`web/src/lib/kling-video.ts` + `createKlingTask`/`buildKlingNativePayload`/`buildKlingRelayPayload` + `buildApiUrl`
+- **Grok 视频路径（按主机 profile）**：用户当前选择永远优先；禁止硬塞不存在的模型插队；多参考勿退化首图。**codex2api/xAI** → `/videos/generations`；**内网 New API / 公网 openai2api** → **创建/轮询仅** `/video/generations`（openai2api **不再**试 `/videos/generations`，实测 Invalid URL 404），**禁止** Grok **创建**打 `/videos`（platform 48）。**完成态 content** 与创建分离：New API 成片代理是 `GET /v1/videos/{id}/content`（需 Bearer）；profile 的 `grokContentPaths` 优先该路径。openai2api/New API 多参考首包优先完整 `images[]`；选 1080p 时先发 1080p，只有创建失败才降档。**公网 Grok 多图：** 本机发完整多图字段；出片依赖渠道类型 + 上游 multi-ref；失败可改 Seedance
+- **Grok 完成态 URL**：官方形状 `video.url`；`status=done` 时 url 可能空串/晚写——优先读嵌套 `video.url`，完成无地址再等约 3 分钟并试 content 下载，禁止过早当失败。**相对路径**（如 `/v1/videos/{id}/content`）按渠道 Base 解析并鉴权下载。**绝对 content URL** 若由 New API `ServerAddress` 拼出且丢端口/错主机，按渠道 Base 重写后再带 Key 下载（修复「需鉴权…Network Error」）；公网 `vidgen` CDN 仍不带中转 Key
+- Sora/Veo：多路径 create/poll；图生禁止无参考文生回退；轮询预算约 15 分钟
+- **Seedance 轮询预算：** `provider=seedance`（含 seedance2/2.5 与 doubao 中转）约 **25 分钟**（300×5s）；中转图生常 8～15 分钟，旧 10 分钟预算易客户端先超时而上游已成功。Grok/Agnes 仍约 10 分钟。超时文案可提示历史继续查
+- Seedance/Agnes 路径保留；平台视频仍无参考素材服务端路径
 - 参考图本地上限 6（平台积分图生图仍最多 4）
 - 能力卡：`web/src/lib/model-capability.ts` 只暴露真实可选值
 - **Grok 全模态本地画像已接入：** `web/src/lib/grok-model-profile.ts` 精确覆盖中转暴露的 14 个模型，文本/`grok-web-search` 继续复用现有 Responses 通路；生图、图片编辑、视频、TTS、STT、泛语音按任务隔离。未知自定义模型仍走旧启发式，不改变 `ModelChannel.models: string[]`。
@@ -234,7 +236,7 @@ docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.ym
 
 - 先理解与建议，**等用户确认再改代码**；未确认不提交、不推送
 - **服务器不用助手部署**；只给命令（公司机同样，除非明确授权且只动 `ic3011`）
-- 不破坏已实现能力：Grok 多参考、Sora/Veo/Seedance/Agnes、工作台并发/停止、云双轨、画布并发、工作空间既有能力、本地优先
+- 不破坏已实现能力：Grok 多参考、Sora/Veo/Seedance/Agnes/Kling、工作台并发/停止、云双轨、画布并发、工作空间既有能力、本地优先
 - 动 ai-proxy / 部署 / 端口 / 安全代理时特别谨慎，并同步相关 Markdown
 - 未登录 BYOK 必须可用；云失败不阻断本地
 - 图生图/多参考：禁止静默只发第一张；禁止擅自把 Grok 模型改回自动 `*-edit`

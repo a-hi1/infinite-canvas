@@ -8,6 +8,12 @@ import { type CanvasTheme } from "@/lib/canvas-theme";
 import { isGrokVideoConfig, normalizeGrokAspectRatio, normalizeGrokDuration, normalizeGrokResolution } from "@/lib/grok-video";
 import { isAgnesVideoConfig } from "@/lib/agnes-video";
 import {
+    isKlingVideoConfig,
+    klingModeFromQuality,
+    normalizeKlingDuration,
+    normalizeKlingSize,
+} from "@/lib/kling-video";
+import {
     isSoraVideoConfig,
     isVeoVideoConfig,
     normalizeSoraSeconds,
@@ -154,6 +160,10 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
 export function videoSettingsSummary(config: AiConfig) {
     if (isAgnesVideoConfig(config)) return `Agnes · ${AGNES_VIDEO_SIZE} · ${config.videoSeconds === "5" ? 5 : 2}s`;
     if (isGrokVideoConfig(config)) return `Grok · ${normalizeGrokResolution(config.vquality)} · ${normalizeGrokAspectRatio(config.size)} · ${normalizeGrokDuration(config.videoSeconds)}s`;
+    if (isKlingVideoConfig(config)) {
+        const mode = klingModeFromQuality(config.vquality);
+        return `可灵 · ${mode} · ${normalizeKlingSize(config.size)} · ${normalizeKlingDuration(config.videoSeconds)}s`;
+    }
     if (isSoraVideoConfig(config)) {
         const modelName = modelOptionName(config.model || config.videoModel || "");
         return `Sora · ${normalizeSoraSize(config.size, modelName)} · ${normalizeSoraSeconds(config.videoSeconds)}s`;

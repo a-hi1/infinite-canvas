@@ -23,7 +23,9 @@ function cryptoRandomId() {
 }
 
 const endpointRules = [
-    /^\/v1\/video\/generations$/,
+    /^\/v1\/video\/generations(?:\/[^/]+)?$/,
+    // New API Kling 原生口（中间件会改写为 /v1/video/generations）
+    /^\/kling\/v1\/videos\/(?:text2video|image2video)(?:\/[^/]+)?$/,
     /^\/v1\/images\/generations$/,
     /^\/v1\/images\/edits$/,
     /^\/v1\/responses$/,
@@ -236,7 +238,16 @@ function buildTargetUrl(path, search) {
     const target = new URL(upstreamBaseUrl);
     const basePath = target.pathname.replace(/\/+$/, "");
     const requestPath = path.startsWith("/") ? path : `/${path}`;
-    if ((requestPath === "/videos" || requestPath === "/agnesapi") && basePath.toLowerCase().endsWith("/v1")) {
+    const lowerRequest = requestPath.toLowerCase();
+    // 主机根路径（/videos、/agnesapi、/kling/...）不要挂在上游 base 的 /v1 下，否则会变成 /v1/kling/...
+    const hostRootPath =
+        lowerRequest === "/videos" ||
+        lowerRequest === "/agnesapi" ||
+        lowerRequest.startsWith("/agnesapi?") ||
+        lowerRequest.startsWith("/kling/") ||
+        lowerRequest === "/media" ||
+        lowerRequest.startsWith("/media?");
+    if (hostRootPath && basePath.toLowerCase().endsWith("/v1")) {
         target.pathname = `${basePath.slice(0, -3) || ""}${requestPath}`;
     } else {
         target.pathname = basePath && requestPath.toLowerCase().startsWith(`${basePath.toLowerCase()}/`) ? requestPath : joinPath(basePath, requestPath);

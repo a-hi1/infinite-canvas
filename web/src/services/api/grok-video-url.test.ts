@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { readGrokVideoUrl, resolveGrokRelativeMediaUrl, unwrapGrokVideoResponse } from "@/services/api/video";
+import { readGrokVideoUrl, resolveGrokRelativeMediaUrl, rewriteChannelVideoContentUrl, unwrapGrokVideoResponse } from "@/services/api/video";
 
 describe("readGrokVideoUrl", () => {
     it("reads official done shape video.url", () => {
@@ -136,5 +136,46 @@ describe("resolveGrokRelativeMediaUrl", () => {
     it("maps same-origin /ai-proxy base to proxy prefix + path", () => {
         const resolved = resolveGrokRelativeMediaUrl("/v1/videos/task-1/content", "/ai-proxy");
         expect(resolved.includes("/ai-proxy/v1/videos/task-1/content")).toBe(true);
+    });
+
+    it("resolves openai2api relative content against :3000 base", () => {
+        expect(resolveGrokRelativeMediaUrl("/v1/videos/task-oa/content", "http://openai2api.com:3000")).toBe(
+            "http://openai2api.com:3000/v1/videos/task-oa/content",
+        );
+    });
+});
+
+describe("rewriteChannelVideoContentUrl", () => {
+    it("rewrites New API ServerAddress content URL missing channel port", () => {
+        const rewritten = rewriteChannelVideoContentUrl("http://openai2api.com/v1/videos/task-1/content", {
+            baseUrl: "http://openai2api.com:3000",
+            apiKey: "test-only",
+        } as never);
+        expect(rewritten).toBe("http://openai2api.com:3000/v1/videos/task-1/content");
+    });
+
+    it("rewrites relative content path against openai2api channel base", () => {
+        const rewritten = rewriteChannelVideoContentUrl("/v1/videos/task-2/content", {
+            baseUrl: "http://openai2api.com:3000/v1",
+            apiKey: "test-only",
+        } as never);
+        expect(rewritten).toBe("http://openai2api.com:3000/v1/videos/task-2/content");
+    });
+
+    it("does not rewrite public vidgen CDN", () => {
+        expect(
+            rewriteChannelVideoContentUrl("https://vidgen.x.ai/video/abc.mp4", {
+                baseUrl: "http://openai2api.com:3000",
+                apiKey: "test-only",
+            } as never),
+        ).toBe("");
+    });
+
+    it("rewrites absolute content on wrong ServerAddress host to channel origin", () => {
+        const rewritten = rewriteChannelVideoContentUrl("https://wrong-host.example/v1/videos/task-3/content", {
+            baseUrl: "http://openai2api.com:3000",
+            apiKey: "test-only",
+        } as never);
+        expect(rewritten).toBe("http://openai2api.com:3000/v1/videos/task-3/content");
     });
 });

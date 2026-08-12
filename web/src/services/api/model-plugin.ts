@@ -8,12 +8,13 @@ type RequestOptions = { signal?: AbortSignal };
 export { MODEL_SCRIPT_MAX_CHARS };
 
 /** Soft limits for local-only user scripts — not a sandbox, just blast-radius control. */
-const MODEL_SCRIPT_RUN_TIMEOUT_MS = 10 * 60 * 1000;
+// Seedance/OpenAI Video 中转图生常 8～15+ 分钟；脚本整段与 poll 上限对齐 ~25 分钟（内置路径另见 videoPollBudget）。
+const MODEL_SCRIPT_RUN_TIMEOUT_MS = 25 * 60 * 1000;
 const MODEL_SCRIPT_MAX_SLEEP_MS = 30_000;
 const MODEL_SCRIPT_MIN_POLL_INTERVAL_MS = 500;
 const MODEL_SCRIPT_MAX_POLL_INTERVAL_MS = 30_000;
 const MODEL_SCRIPT_DEFAULT_POLL_TIMEOUT_MS = 5 * 60 * 1000;
-const MODEL_SCRIPT_MAX_POLL_TIMEOUT_MS = 10 * 60 * 1000;
+const MODEL_SCRIPT_MAX_POLL_TIMEOUT_MS = 25 * 60 * 1000;
 
 export type PluginHttpOptions = {
     headers?: Record<string, string>;
@@ -406,7 +407,8 @@ return await poll(
     if (blob instanceof Blob) return blob;
     throw new Error("视频任务已完成，但接口没有返回视频地址或 content");
   },
-  { intervalMs: 2500, timeoutMs: 300000 },
+  // ~25 分钟：seedance2/中转图生视频常超过旧 5～10 分钟 poll 上限
+  { intervalMs: 5000, timeoutMs: 1_500_000 },
 );`,
         },
         {

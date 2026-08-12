@@ -96,3 +96,16 @@ export const GENERIC_OPENAI_VIDEO_MODE_GUIDE: VideoModeGuide = {
     tags: ["参考图"],
     bullets: ["参考视频/音频请改用 Seedance 或火山 Agent Plan"],
 };
+
+/** 可灵 / Kling（openai2api / New API 统一任务口）。 */
+export const KLING_VIDEO_MODE_GUIDE: VideoModeGuide = {
+    title: "可灵 · Kling",
+    summary: "JSON POST /v1/video/generations；禁止 OpenAI /videos multipart（会 405）。",
+    tags: ["文生", "首帧+尾帧", "5s/10s", "std/pro"],
+    bullets: [
+        "创建走 /v1/video/generations，轮询同路径，完成可下 content",
+        "图生最多 2 张：第 1 张首帧、第 2 张可选尾帧",
+        "时长 5 或 10 秒；清晰度 high≈pro、其它≈std",
+        "不支持参考视频/音频；后台需绑 Kling 渠道类型与 kling 分组",
+    ],
+};

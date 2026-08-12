@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   describeGrokMultiImagePublicCapability,
+  detectVideoModelFamily,
   hostGrokContentPaths,
   hostGrokCreatePaths,
   hostGrokPollPaths,
@@ -40,7 +41,9 @@ describe("video-host-profile", () => {
       "/video/generations?id={id}",
     ]);
     expect(hostGrokPollPaths(base).every((path) => !path.startsWith("/videos"))).toBe(true);
-    expect(hostGrokContentPaths(base)).toEqual(["/video/generations/{id}/content"]);
+    // 创建/轮询不用 /videos；成片 content 代理是 New API 的 /videos/{id}/content
+    expect(hostGrokContentPaths(base)[0]).toBe("/videos/{id}/content");
+    expect(hostGrokContentPaths(base)).toContain("/video/generations/{id}/content");
     // 主机默认 Seedance relay；精确 seedance2 由 video.ts 按模型切到 /videos
     expect(hostSeedanceRelayCreatePath(base)).toBe("/video/generations");
   });
@@ -63,5 +66,13 @@ describe("video-host-profile", () => {
 
   it("private New API Grok is single /video/generations", () => {
     expect(hostGrokCreatePaths("http://192.168.1.20:3000", "home::grok-imagine-video")).toEqual(["/video/generations"]);
+  });
+
+  it("detects Kling family from model names", () => {
+    expect(detectVideoModelFamily("Kling-3.0-turbo")).toBe("kling");
+    expect(detectVideoModelFamily("可灵::kling-v3")).toBe("kling");
+    expect(detectVideoModelFamily("kling-video-o1")).toBe("kling");
+    expect(detectVideoModelFamily("grok-imagine-video")).toBe("grok");
+    expect(detectVideoModelFamily("seedance2")).toBe("seedance");
   });
 });

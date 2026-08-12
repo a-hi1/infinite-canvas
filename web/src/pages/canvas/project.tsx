@@ -15,6 +15,7 @@ import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { agnesVideoRequestError, isAgnesVideoConfig } from "@/lib/agnes-video";
 import { grokResolutionShortfallMessage, isGrokVideoConfig } from "@/lib/grok-video";
+import { isKlingVideoConfig, KLING_REFERENCE_LIMITS } from "@/lib/kling-video";
 import { isSeedanceVideoConfig, seedanceVideoReferenceError, seedanceVideoReferenceHint } from "@/lib/seedance-video";
 import { suggestAssetCategory } from "@/lib/asset-category";
 import { assetTitleFromPrompt } from "@/lib/asset-display";
@@ -4010,11 +4011,23 @@ function canvasVideoReferencePreflight(
     const images = context.referenceImages || [];
     const videos = context.referenceVideos || [];
     const audios = context.referenceAudios || [];
-    if (!videos.length && !audios.length) return "";
+    if (!images.length && !videos.length && !audios.length) return "";
 
     const requestConfig = resolveModelRequestConfig(config, config.model || config.videoModel || "");
     const seedanceMode = isSeedanceVideoConfig(requestConfig);
     const script = resolveModelScript(config, config.model || config.videoModel || "");
+
+    if (isKlingVideoConfig(requestConfig)) {
+        if (videos.length || audios.length) {
+            return "可灵（Kling）暂不支持参考视频或参考音频，请移除后重试，或改用 Seedance / Grok edits";
+        }
+        if (images.length > KLING_REFERENCE_LIMITS.images) {
+            return `可灵图生最多 ${KLING_REFERENCE_LIMITS.images} 张参考图（首帧 + 可选尾帧），请移除多余参考`;
+        }
+        return "";
+    }
+
+    if (!videos.length && !audios.length) return "";
 
     if (isGrokVideoConfig(requestConfig)) {
         if (audios.length) return "Grok 视频编辑暂不支持参考音频，请移除音频节点后重试";

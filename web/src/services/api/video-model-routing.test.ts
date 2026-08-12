@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
     buildGrokEditPayloadCandidates,
     buildGrokPayloadCandidates,
+    buildKlingNativePayload,
+    buildKlingRelayPayload,
     createVideoGenerationTask,
     grokCreatePathCandidates,
     grokEditPathCandidates,
@@ -1320,23 +1322,230 @@ describe("Sora/Veo poll unwrap + budget (timeout fix)", () => {
         expect(video.result_url || video.video_url || video.url).toContain("cdn.example.com");
     });
 
-    it("gives Sora/Veo ~15min budget and keeps Grok shorter cadence", () => {
+    it("gives Sora/Veo ~15min budget, Seedance ~25min, and keeps Grok shorter cadence", () => {
         const sora = videoPollBudget({ provider: "openai", model: "sora-2", requestModel: "sora-2" });
         expect(sora.isSoraVeo).toBe(true);
         expect(sora.maxAttempts).toBe(300);
         expect(sora.delayMs).toBe(3000);
+        expect(sora.longRunningHint).toBe(true);
 
         const veo = videoPollBudget({ provider: "openai", model: "channel::veo-3.1", requestModel: "veo-3.1" });
         expect(veo.isSoraVeo).toBe(true);
         expect(veo.maxAttempts).toBeGreaterThanOrEqual(200);
 
+        const seedance = videoPollBudget({ provider: "seedance", model: "seedance2.5", requestModel: "seedance2.5" });
+        expect(seedance.isSoraVeo).toBe(false);
+        expect(seedance.delayMs).toBe(5000);
+        // 300×5s ≈ 25 分钟，覆盖中转图生视频 8～15+ 分钟排队
+        expect(seedance.maxAttempts).toBe(300);
+        expect(seedance.longRunningHint).toBe(true);
+        expect(seedance.timeoutLabel).toBe("Seedance ");
+
+        const seedanceRelay = videoPollBudget({ provider: "seedance", model: "doubao-seedance-2-0-260128" });
+        expect(seedanceRelay.maxAttempts).toBe(300);
+
         const grok = videoPollBudget({ provider: "grok", model: "grok-imagine-video" });
         expect(grok.isSoraVeo).toBe(false);
         expect(grok.maxAttempts).toBe(120);
         expect(grok.delayMs).toBe(5000);
+        expect(grok.longRunningHint).toBe(false);
+
+        const agnes = videoPollBudget({ provider: "agnes", model: "agnes-video" });
+        expect(agnes.maxAttempts).toBe(120);
+        expect(agnes.longRunningHint).toBe(false);
 
         const generic = videoPollBudget({ provider: "openai", model: "some-other-video" });
         expect(generic.isSoraVeo).toBe(false);
         expect(generic.maxAttempts).toBe(120);
+        expect(generic.longRunningHint).toBe(false);
+    });
+});
+
+describe("Kling / 可灵 relay", () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        vi.stubGlobal("window", globalThis);
+        vi.mocked(axios.post).mockResolvedValue({ data: { id: "task-kling-1" } });
+    });
+
+    function klingConfig(overrides: Partial<AiConfig> = {}): AiConfig {
+        const channel: ModelChannel = {
+            id: "kling",
+            name: "可灵",
+            baseUrl: "http://openai2api.com:3000",
+            apiKey: "test-only",
+            apiFormat: "openai",
+            compatProfile: "auto",
+            models: ["Kling-3.0-turbo", "kling-v3", "Kling-v3-omni", "kling-video-o1"],
+        };
+        return {
+            ...defaultConfig,
+            channels: [channel],
+            baseUrl: channel.baseUrl,
+            apiKey: channel.apiKey,
+            models: channel.models.map((model) => `kling::${model}`),
+            videoModels: channel.models.map((model) => `kling::${model}`),
+            model: "kling::Kling-3.0-turbo",
+            videoModel: "kling::Kling-3.0-turbo",
+            videoSeconds: "5",
+            vquality: "720",
+            size: "16:9",
+            ...overrides,
+        };
+    }
+
+    it("buildKlingNativePayload uses official text2video/image2video fields", () => {
+        const text = buildKlingNativePayload({
+            model: "Kling-3.0-turbo",
+            prompt: "渔港晨雾",
+            duration: 5,
+            mode: "std",
+            aspectRatio: "16:9",
+        });
+        expect(text).toMatchObject({
+            model: "Kling-3.0-turbo",
+            model_name: "Kling-3.0-turbo",
+            prompt: "渔港晨雾",
+            duration: "5",
+            mode: "std",
+            aspect_ratio: "16:9",
+        });
+        expect(text).not.toHaveProperty("image");
+        expect(text).not.toHaveProperty("metadata");
+
+        const i2v = buildKlingNativePayload({
+            model: "kling-v3",
+            prompt: "首尾帧",
+            duration: 10,
+            mode: "pro",
+            aspectRatio: "9:16",
+            images: ["data:image/png;base64,aaa", "data:image/png;base64,bbb"],
+        });
+        expect(i2v.image).toBe("data:image/png;base64,aaa");
+        expect(i2v.image_tail).toBe("data:image/png;base64,bbb");
+        expect(i2v).not.toHaveProperty("images");
+        expect(i2v).not.toHaveProperty("input_reference");
+    });
+
+    it("buildKlingRelayPayload uses JSON TaskSubmitReq contract (not multipart /videos)", () => {
+        const payload = buildKlingRelayPayload({
+            model: "Kling-3.0-turbo",
+            prompt: "渔港晨雾",
+            duration: 5,
+            size: "1280x720",
+            mode: "std",
+            aspectRatio: "16:9",
+        });
+        expect(payload.model).toBe("Kling-3.0-turbo");
+        expect(payload.prompt).toBe("渔港晨雾");
+        expect(payload.duration).toBe(5);
+        expect(payload.seconds).toBe("5");
+        expect(typeof payload.seconds).toBe("string");
+        expect(payload.size).toBe("1280x720");
+        expect(payload.mode).toBe("std");
+        expect(payload.metadata).toMatchObject({ mode: "std", aspect_ratio: "16:9", model_name: "Kling-3.0-turbo" });
+        expect(payload).not.toHaveProperty("image");
+        expect(payload).not.toHaveProperty("images");
+    });
+
+    it("buildKlingRelayPayload maps first image + optional image_tail without triple data URI", () => {
+        const payload = buildKlingRelayPayload({
+            model: "kling-v3",
+            prompt: "首尾帧",
+            duration: 10,
+            size: "720x1280",
+            mode: "pro",
+            aspectRatio: "9:16",
+            images: ["data:image/png;base64,aaa", "data:image/png;base64,bbb"],
+        });
+        expect(payload.image).toBe("data:image/png;base64,aaa");
+        expect(payload.images).toEqual(["data:image/png;base64,aaa", "data:image/png;base64,bbb"]);
+        // 禁止 image + images + input_reference 三份重复（曾导致 ~14MB 体）
+        expect(payload).not.toHaveProperty("input_reference");
+        expect(payload.metadata).toMatchObject({
+            mode: "pro",
+            aspect_ratio: "9:16",
+            image_tail: "data:image/png;base64,bbb",
+        });
+
+        const single = buildKlingRelayPayload({
+            model: "kling-v3",
+            prompt: "单图",
+            duration: 5,
+            size: "1280x720",
+            mode: "std",
+            aspectRatio: "16:9",
+            images: ["data:image/png;base64,only"],
+        });
+        expect(single.image).toBe("data:image/png;base64,only");
+        expect(single).not.toHaveProperty("images");
+        expect(single).not.toHaveProperty("input_reference");
+    });
+
+    it("createVideoGenerationTask POSTs JSON Kling native path first", async () => {
+        const task = await createVideoGenerationTask(klingConfig({ vquality: "high", videoSeconds: "8", size: "9:16" }), "港湾夜色", [], [], []);
+        expect(task.provider).toBe("openai");
+        expect(task.createPath).toBe("/video/generations");
+        expect(task.id).toBe("task-kling-1");
+        expect(axios.post).toHaveBeenCalledTimes(1);
+        const [url, body, options] = vi.mocked(axios.post).mock.calls[0];
+        // 必须主机根 /kling/...，禁止历史 bug /v1/kling/...
+        expect(String(url)).toBe("http://openai2api.com:3000/kling/v1/videos/text2video");
+        expect(String(url)).not.toContain("/v1/kling/");
+        expect(String(url)).not.toMatch(/\/videos$/);
+        expect(String(url)).not.toMatch(/\/v1\/videos$/);
+        expect(body).toMatchObject({
+            model: "Kling-3.0-turbo",
+            model_name: "Kling-3.0-turbo",
+            prompt: "港湾夜色",
+            duration: "10",
+            mode: "pro",
+            aspect_ratio: "9:16",
+        });
+        expect(body).not.toHaveProperty("metadata");
+        expect(options?.headers?.["Content-Type"] || options?.headers?.["content-type"]).toMatch(/application\/json/i);
+    });
+
+    it("createVideoGenerationTask falls back to /video/generations when native path 405", async () => {
+        const native405 = Object.assign(new Error("Request failed with status code 405"), {
+            isAxiosError: true,
+            response: { status: 405, data: "<html>405 Not Allowed</html>", headers: { "x-new-api-version": "v1.0.0-rc.21" } },
+            config: {},
+            toJSON: () => ({}),
+        });
+        vi.mocked(axios.isAxiosError).mockImplementation((error: unknown) => Boolean(error && typeof error === "object" && (error as { isAxiosError?: boolean }).isAxiosError));
+        vi.mocked(axios.post)
+            .mockRejectedValueOnce(native405)
+            .mockResolvedValueOnce({ data: { id: "task-kling-fallback", status: "queued" } });
+
+        const task = await createVideoGenerationTask(klingConfig(), "回退统一口", [], [], []);
+        expect(task.id).toBe("task-kling-fallback");
+        expect(task.createPath).toBe("/video/generations");
+        expect(axios.post).toHaveBeenCalledTimes(2);
+        expect(String(vi.mocked(axios.post).mock.calls[0][0])).toBe("http://openai2api.com:3000/kling/v1/videos/text2video");
+        expect(String(vi.mocked(axios.post).mock.calls[0][0])).not.toContain("/v1/kling/");
+        expect(String(vi.mocked(axios.post).mock.calls[1][0])).toBe("http://openai2api.com:3000/v1/video/generations");
+        const fallbackBody = vi.mocked(axios.post).mock.calls[1][1] as Record<string, unknown>;
+        expect(fallbackBody).toMatchObject({
+            model: "Kling-3.0-turbo",
+            prompt: "回退统一口",
+            duration: 5,
+            seconds: "5",
+            mode: "std",
+        });
+        expect(fallbackBody.metadata).toMatchObject({ mode: "std", aspect_ratio: "16:9" });
+        vi.mocked(axios.isAxiosError).mockReturnValue(false);
+    });
+
+    it("createVideoGenerationTask still uses host-root native path when channel base ends with /v1", async () => {
+        await createVideoGenerationTask(klingConfig({ baseUrl: "http://openai2api.com:3000/v1" }), "base带v1", [], [], []);
+        expect(String(vi.mocked(axios.post).mock.calls[0][0])).toBe("http://openai2api.com:3000/kling/v1/videos/text2video");
+        expect(String(vi.mocked(axios.post).mock.calls[0][0])).not.toContain("/v1/kling/");
+    });
+
+    it("rejects Kling reference video/audio before create", async () => {
+        const videoReferences: ReferenceVideo[] = [{ id: "v1", url: "blob:video", name: "clip.mp4", type: "video/mp4", durationMs: 5000 }];
+        await expect(createVideoGenerationTask(klingConfig(), "有参考视频", [], videoReferences, [])).rejects.toThrow(/暂不支持参考视频或参考音频/);
+        expect(axios.post).not.toHaveBeenCalled();
     });
 });

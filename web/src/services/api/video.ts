@@ -26,6 +26,15 @@ import {
     resolveVideoHostProfile,
 } from "@/lib/video-host-profile";
 import { isLikelyCorsBlockedMediaHost } from "@/lib/remote-media-host";
+import {
+    isKlingVideoConfig,
+    isKlingVideoModel,
+    klingAspectRatioFromSize,
+    klingModeFromQuality,
+    KLING_REFERENCE_LIMITS,
+    normalizeKlingDuration,
+    normalizeKlingSize,
+} from "@/lib/kling-video";
 import { boolConfig, buildSeedancePromptText, isArkPlanBaseUrl, isSeedanceOpenAiVideoModel, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceRelayDuration, normalizeSeedanceResolution, seedancePixelSize, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
 import {
     buildSoraVeoFormFieldCandidates,
@@ -132,22 +141,30 @@ function aiHeaders(config: AiConfig, contentType?: string) {
     };
 }
 
-/** 轮询预算：Sora/Veo 中转常 5～15 分钟；Grok/Seedance/Agnes 保持原节奏 */
+/** 轮询预算：Sora/Veo ~15 分钟；Seedance 图生/文生中转常 8～15+ 分钟（实测 ~9 分钟贴边旧 10 分钟预算）；Grok/Agnes 保持原节奏 */
 export function videoPollBudget(task: Pick<VideoGenerationTask, "provider" | "model" | "requestModel">): {
     delayMs: number;
     maxAttempts: number;
     isSoraVeo: boolean;
+    /** Seedance 等慢任务：超时文案提示可到历史继续查 */
+    longRunningHint: boolean;
     timeoutLabel: string;
 } {
     const isSoraVeo = task.provider === "openai" && isSoraOrVeoVideoModel(task.requestModel || task.model);
-    if (task.provider === "seedance" || task.provider === "agnes" || task.provider === "grok") {
-        return { delayMs: 5000, maxAttempts: 120, isSoraVeo: false, timeoutLabel: task.provider === "seedance" ? "Seedance " : task.provider === "agnes" ? "Agnes " : "" };
+    // Seedance（含 seedance2/2.5 OpenAI Video 与 doubao relay / Agent Plan）：单独加长。
+    // 旧 120×5s≈10 分钟；中转图生视频常见 8～12 分钟，任务在上游已成功但客户端先超时。
+    // 300×5s≈25 分钟，不改 Grok/Agnes。
+    if (task.provider === "seedance") {
+        return { delayMs: 5000, maxAttempts: 300, isSoraVeo: false, longRunningHint: true, timeoutLabel: "Seedance " };
+    }
+    if (task.provider === "agnes" || task.provider === "grok") {
+        return { delayMs: 5000, maxAttempts: 120, isSoraVeo: false, longRunningHint: false, timeoutLabel: task.provider === "agnes" ? "Agnes " : "" };
     }
     if (isSoraVeo) {
         // 300 × 3s ≈ 15 分钟（参考脚本 300s 偏紧，中转排队常更久）
-        return { delayMs: 3000, maxAttempts: 300, isSoraVeo: true, timeoutLabel: "Sora/Veo " };
+        return { delayMs: 3000, maxAttempts: 300, isSoraVeo: true, longRunningHint: true, timeoutLabel: "Sora/Veo " };
     }
-    return { delayMs: 2500, maxAttempts: 120, isSoraVeo: false, timeoutLabel: "" };
+    return { delayMs: 2500, maxAttempts: 120, isSoraVeo: false, longRunningHint: false, timeoutLabel: "" };
 }
 
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], videoReferences: ReferenceVideo[] = [], audioReferences: ReferenceAudio[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {
@@ -160,7 +177,7 @@ export async function requestVideoGeneration(config: AiConfig, prompt: string, r
         if (state.status === "failed") throw new Error(state.error);
         if (attempt === budget.maxAttempts - 1) {
             throw new Error(
-                `${budget.timeoutLabel}视频生成超时，请稍后重试` + (budget.isSoraVeo ? "（中转排队较慢时可到历史记录里继续查询）" : ""),
+                `${budget.timeoutLabel}视频生成超时，请稍后重试` + (budget.longRunningHint ? "（中转排队较慢时可到历史记录里继续查询；上游任务可能仍在跑或已成功）" : ""),
             );
         }
         await delay(budget.delayMs, options?.signal);
@@ -241,6 +258,13 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     }
     if (isSeedanceVideoConfig(requestConfig)) {
         return createSeedanceTask(requestConfig, selectedModel, prompt, references, videoReferences, audioReferences, options);
+    }
+    // 可灵 / Kling：优先 JSON /kling/v1/videos/*，回退 /video/generations（禁止落到 OpenAI /videos multipart → 405）。
+    if (isKlingVideoConfig(requestConfig)) {
+        if (videoReferences.length || audioReferences.length) {
+            throw new Error("可灵（Kling）暂不支持参考视频或参考音频，请移除后重试，或改用 Seedance / Grok edits");
+        }
+        return createKlingTask(requestConfig, selectedModel, prompt, references, options);
     }
     // Grok 单条参考视频 = edits（POST /videos/edits），与多图 generation 隔离；须在通用 throw 之前。
     if (isGrokVideoConfig(requestConfig) && videoReferences.length) {
@@ -433,8 +457,241 @@ function looksLikeLanVideoService(parsed: URL) {
     );
 }
 
+/**
+ * 可灵 / Kling（openai2api / New API）。
+ * 创建优先：JSON POST /kling/v1/videos/text2video|image2video（New API KlingRequestConvert 会改写为统一任务口）。
+ * 回退：JSON POST /v1/video/generations（TaskSubmitReq + 精简 metadata，禁止 image 三份重复）。
+ * 图生：首帧 image；可选第 2 张 image_tail。禁止 POST /videos multipart（Nginx 405）。
+ * 轮询：createPath 记为 /video/generations（公开 task id 的 OpenAI 兼容形态）+ 原生 kling 路径兜底。
+ */
+async function createKlingTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    if (references.length > KLING_REFERENCE_LIMITS.images) {
+        throw new Error(`可灵图生最多 ${KLING_REFERENCE_LIMITS.images} 张参考图（首帧 + 可选尾帧），请移除多余参考`);
+    }
+    const modelName = modelOptionName(model);
+    const duration = normalizeKlingDuration(config.videoSeconds);
+    const size = normalizeKlingSize(config.size);
+    const mode = klingModeFromQuality(config.vquality);
+    const aspectRatio = klingAspectRatioFromSize(size);
+    // 轮询统一走 OpenAI 兼容公开 task id（New API DoResponse 返回 ov.ID）
+    const pollCreatePath = "/video/generations";
+
+    let images: string[] = [];
+    if (references.length) {
+        images = await Promise.all(
+            references.slice(0, KLING_REFERENCE_LIMITS.images).map(async (image) => {
+                const url = await resolveKlingReferenceImageUrl(image, references.length);
+                if (!url) throw new Error("参考图读取失败，请换本地上传图或公网可读 URL");
+                return url;
+            }),
+        );
+        if (images.some((item) => !item)) {
+            throw new Error("参考图读取失败，请换本地上传图或公网可读 URL");
+        }
+    }
+
+    const hasImage = images.length > 0;
+    const nativePath = hasImage ? "/kling/v1/videos/image2video" : "/kling/v1/videos/text2video";
+    const nativePayload = buildKlingNativePayload({
+        model: modelName,
+        prompt,
+        duration,
+        mode,
+        aspectRatio,
+        images,
+    });
+    const unifiedPayload = buildKlingRelayPayload({
+        model: modelName,
+        prompt,
+        duration,
+        size,
+        mode,
+        aspectRatio,
+        images,
+    });
+
+    const attempts: Array<{ path: string; payload: Record<string, unknown> }> = [
+        { path: nativePath, payload: nativePayload },
+        { path: "/video/generations", payload: unifiedPayload },
+    ];
+
+    let lastError: unknown;
+    const triedPaths: string[] = [];
+    for (const attempt of attempts) {
+        triedPaths.push(attempt.path);
+        try {
+            const created = unwrapVideoResponse(
+                (
+                    await axios.post<ApiVideoResponse>(aiApiUrl(config, attempt.path), attempt.payload, {
+                        headers: aiHeaders(config, "application/json"),
+                        signal: options?.signal,
+                        timeout: 180000,
+                    })
+                ).data,
+            );
+            if (!created.id) throw new Error("可灵视频接口没有返回任务 ID");
+            const readyUrl = openAiCompatibleVideoUrl(created);
+            if (readyUrl) {
+                return {
+                    id: created.id,
+                    provider: "openai",
+                    model,
+                    requestModel: modelName,
+                    createPath: pollCreatePath,
+                    readyResult: await videoResultFromUrl(readyUrl, options, config),
+                };
+            }
+            return { id: created.id, provider: "openai", model, requestModel: modelName, createPath: pollCreatePath };
+        } catch (error) {
+            lastError = error;
+            if (options?.signal?.aborted) break;
+            // 原生路径缺失/方法不允许时再试统一口；其它业务错误（余额/参数）直接抛
+            if (attempt.path.startsWith("/kling/") && isKlingCreatePathFallbackError(error)) {
+                continue;
+            }
+            break;
+        }
+    }
+
+    throw new Error(
+        enhanceKlingCreateError(readAxiosError(lastError, "可灵视频任务创建失败"), modelName, hasImage, triedPaths),
+    );
+}
+
+/** 可灵参考图：中转体积极敏感，单图约 ≤220KB，双图合计更紧。 */
+async function resolveKlingReferenceImageUrl(image: ReferenceImage, imageCount = 1) {
+    const multi = imageCount > 1;
+    const maxEdge = multi ? 768 : 960;
+    const quality = multi ? 0.7 : 0.76;
+    const maxBytes = multi ? 120 * 1024 : 220 * 1024;
+
+    const binary = await resolveReferenceBinaryDataUrl(image);
+    if (binary) return compressImageDataUrl(binary, maxEdge, quality, maxBytes);
+
+    const directUrl = (image.url || image.dataUrl || "").trim();
+    if (directUrl.startsWith("data:")) return compressImageDataUrl(directUrl, maxEdge, quality, maxBytes);
+    if (isPublicMediaUrl(directUrl)) return directUrl;
+
+    const fallback = await imageToDataUrl(image);
+    if (fallback?.startsWith("data:")) return compressImageDataUrl(fallback, maxEdge, quality, maxBytes);
+    if (fallback && isPublicMediaUrl(fallback)) return fallback;
+    throw new Error("参考图读取失败，请换本地上传图或公网可读 URL");
+}
+
+function isKlingCreatePathFallbackError(error: unknown) {
+    if (axios.isAxiosError(error)) {
+        const status = error.response?.status || 0;
+        if ([404, 405, 501, 502].includes(status)) return true;
+    }
+    const text = readAxiosError(error, "");
+    return /405|404|method not allowed|not allowed|not found|invalid url|no route|page not found|not implemented/i.test(text);
+}
+
+/** New API 原生可灵口：整包进 metadata，字段与官方 text2video/image2video 对齐。 */
+export function buildKlingNativePayload(input: {
+    model: string;
+    prompt: string;
+    duration: number;
+    mode: string;
+    aspectRatio: string;
+    images?: string[];
+}): Record<string, unknown> {
+    const images = input.images?.filter(Boolean) || [];
+    const first = images[0] || "";
+    const tail = images[1] || "";
+    const payload: Record<string, unknown> = {
+        model: input.model,
+        model_name: input.model,
+        prompt: input.prompt,
+        // 官方/adaptor 侧 duration 为字符串
+        duration: String(input.duration),
+        mode: input.mode || "std",
+        aspect_ratio: input.aspectRatio || "16:9",
+    };
+    if (first) payload.image = first;
+    if (tail) payload.image_tail = tail;
+    return payload;
+}
+
+/** Exposed for regression tests of the Kling / 可灵 relay contract. */
+export function buildKlingRelayPayload(input: {
+    model: string;
+    prompt: string;
+    duration: number;
+    size: string;
+    mode: string;
+    aspectRatio: string;
+    images?: string[];
+}): Record<string, unknown> {
+    const images = input.images?.filter(Boolean) || [];
+    const first = images[0] || "";
+    const tail = images[1] || "";
+    // 统一口 TaskSubmitReq：顶层只放一份 image（禁止 image + images + input_reference 三份 data URI 撑爆 body）。
+    // Kling adaptor 读 Image/Mode/Duration，再 UnmarshalMetadata 覆盖 mode/aspect_ratio/image_tail。
+    const metadata: Record<string, unknown> = {
+        mode: input.mode || "std",
+        aspect_ratio: input.aspectRatio || "16:9",
+        model_name: input.model,
+    };
+    if (tail) metadata.image_tail = tail;
+    const payload: Record<string, unknown> = {
+        model: input.model,
+        prompt: input.prompt,
+        duration: input.duration,
+        seconds: String(input.duration),
+        size: input.size,
+        mode: input.mode || "std",
+        metadata,
+    };
+    if (first) {
+        payload.image = first;
+        // 仅当有尾帧时附带精简 images（adaptor 主要吃 image + metadata.image_tail）
+        if (tail) payload.images = [first, tail];
+    }
+    return payload;
+}
+
+function enhanceKlingCreateError(upstream: string, model: string, hasReferences: boolean, triedPaths: string[] = []) {
+    const text = (upstream || "可灵视频任务创建失败").trim();
+    const hints: string[] = [];
+    if (triedPaths.length) {
+        hints.push(`已尝试路径：${triedPaths.join(" → ")}`);
+    }
+    if (/405|method not allowed|not allowed/i.test(text)) {
+        hints.push(
+            "本站创建顺序：JSON POST 主机根 /kling/v1/videos/text2video|image2video（禁止拼成 /v1/kling/...），失败再回退 /v1/video/generations；禁止 /videos multipart",
+        );
+        hints.push(
+            "若 Network 里原生口已是 …/kling/v1/videos/* 仍 405：请到中转后台把该模型绑到「Kling / 可灵」渠道类型（ChannelType=50），不要绑 OpenAI/Sora——后者会把统一任务口转发成上游 POST /v1/videos 再 405",
+        );
+        hints.push("上游 Base 需能访问可灵官方 text2video / image2video；令牌分组需包含 kling");
+        if (hasReferences) {
+            hints.push("图生参考图已压缩；若仍 405，可先试纯文生排查是否渠道类型问题");
+        }
+    }
+    if (/no available channel|无可用渠道|invalid api platform|distributor|channel not found/i.test(text)) {
+        hints.push("中转后台需为可灵模型绑定 Kling 渠道类型（非 OpenAI/Sora），并确保令牌分组（如 kling）可访问");
+    }
+    if (/invalid request body|invalid_request|unmarshal|duration|seconds/i.test(text)) {
+        hints.push("原生口发送 model/model_name/prompt/duration(字符串)/mode/aspect_ratio；图生另带 image 与可选 image_tail");
+        hints.push("时长请用 5 或 10 秒；清晰度 high≈pro、其它≈std");
+    }
+    if (/413|too large|request entity|payload too large|body size/i.test(text)) {
+        hints.push("请求体过大：请换更小参考图，或先文生；本站已对可灵参考图压缩");
+    }
+    if (hasReferences) {
+        hints.push("图生最多 2 张：第 1 张首帧、第 2 张可选尾帧；请优先本地可读图");
+    }
+    if (!hints.length) return text.includes(model) ? text : `${text}（模型 ${model}）`;
+    return `${text}。${hints.join("；")}`;
+}
+
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     const modelName = modelOptionName(model);
+    // 兜底：若路由漏判可灵，禁止落到 /videos multipart（openai2api 上 405）
+    if (isKlingVideoConfig({ ...config, model, videoModel: model })) {
+        return createKlingTask(config, model, prompt, references, options);
+    }
     // Sora / Veo（New API 等）：禁止 resolution_name / preset，秒数与尺寸夹到上游枚举；invalid body 时换精简候选。
     // 其它 OpenAI 兼容模型保持原 multipart（含 resolution_name + preset），避免影响已有渠道。
     if (isSoraOrVeoVideoModel(modelName)) {
@@ -1049,6 +1306,14 @@ function openAiVideoPollPaths(task: VideoGenerationTask): string[] {
         preferred.push(`/videos/generations/${id}`, `/videos/generations?request_id=${id}`, `/videos/generations?id=${id}`, `/videos/generations?task_id=${id}`);
     } else if (task.createPath === "/videos") {
         preferred.push(`/videos/${id}`, `/videos?request_id=${id}`, `/videos?id=${id}`);
+    }
+    // 可灵原生创建口：New API 仍返回公开 OpenAI 形态 task id，同时保留原生查询兜底
+    if (isKlingVideoModel(task.requestModel || task.model || "")) {
+        preferred.push(
+            `/kling/v1/videos/image2video/${id}`,
+            `/kling/v1/videos/text2video/${id}`,
+            `/video/generations/${id}`,
+        );
     }
     // 官方 OpenAI Videos + 通用兜底（含创建路径与轮询路径不一致的中转）
     preferred.push(
@@ -3076,7 +3341,8 @@ async function resolveSeedanceAudioUrl(audio: ReferenceAudio) {
 
 async function videoResultFromUrl(url: string, options?: RequestOptions, config?: AiConfig, waitUntilReady = false): Promise<VideoGenerationResult> {
     // 落盘优先走代理/内网中继；内网 content 必须带 Key 拉成 blob，不能只回 127.0.0.1 给 <video>。
-    const originalUrl = unwrapMediaProxyUrl(url) || url;
+    // New API 常把 ServerAddress 拼成绝对 content URL（可能丢端口/主机与渠道 Base 不一致）——先按渠道重写。
+    const originalUrl = rewriteChannelVideoContentUrl(unwrapMediaProxyUrl(url) || url, config) || unwrapMediaProxyUrl(url) || url;
     if (waitUntilReady) {
         try {
             const probeUrl = rewritePrivateVideoUrlToLanRelay(originalUrl, config) || originalUrl;
@@ -3106,30 +3372,39 @@ async function videoResultFromUrl(url: string, options?: RequestOptions, config?
         throw new Error("无法从内网视频地址下载文件（需 /lan-ai + API Key）。请检查内网中继与 Key");
     }
     // 中转 content 相对路径解析后的地址：需要 Bearer，不能当公开 CDN 塞进 <video src>
-    if (isChannelHostedVideoUrl(originalUrl, config)) {
+    if (isChannelHostedVideoUrl(originalUrl, config) || isChannelContentPath(originalUrl)) {
         const detail = lastError instanceof Error && lastError.message ? lastError.message : "下载失败";
-        throw new Error(`中转返回了需鉴权的视频地址，但拉取失败（${detail}）。请确认 API Key 与中转 content 接口可用`);
+        throw new Error(
+            `中转返回了需鉴权的视频地址，但拉取失败（${detail}）。` +
+                "New API 成片代理为 GET /v1/videos/{task_id}/content（需 Authorization: Bearer API Key）。" +
+                "请确认：① 渠道 Base URL 含正确主机与端口（如 http://openai2api.com:3000）② API Key 与创建任务同一令牌 ③ 任务已成功后再拉 content",
+        );
     }
     // 公网：仍返回原始远端 URL，避免把必 502 的 /ai-proxy/media 写进播放器
     return { url: originalUrl, mimeType: "video/mp4" };
 }
 
 async function downloadVideoBlob(url: string, options?: RequestOptions, config?: AiConfig) {
+    const resolvedUrl = rewriteChannelVideoContentUrl(url, config) || url;
     // 同源 /lan-ai、/ai-proxy/media：可带鉴权。跨域 CDN 不要乱加 Authorization。
-    if (url.startsWith("/") || url.includes("/ai-proxy/media") || url.includes("/lan-ai")) {
+    if (resolvedUrl.startsWith("/") || resolvedUrl.includes("/ai-proxy/media") || resolvedUrl.includes("/lan-ai")) {
         const headers: Record<string, string> = {};
-        const isLan = url.includes("/lan-ai") || url.startsWith(LAN_AI_BASE_URL);
+        const isLan = resolvedUrl.includes("/lan-ai") || resolvedUrl.startsWith(LAN_AI_BASE_URL);
         if (isLan && config?.apiKey?.trim()) {
             headers.Authorization = `Bearer ${config.apiKey.trim()}`;
         }
         // 同源 /ai-proxy 下的相对 content 路径也需 Key
-        if (!isLan && isAiProxyBaseUrl(config?.baseUrl || "") && config?.apiKey?.trim() && isChannelHostedVideoUrl(url, config)) {
+        if (!isLan && isAiProxyBaseUrl(config?.baseUrl || "") && config?.apiKey?.trim() && isChannelHostedVideoUrl(resolvedUrl, config)) {
             headers.Authorization = `Bearer ${config.apiKey.trim()}`;
         }
-        const response = await fetch(url, {
+        // 相对 content 路径（非 media 代理）在同源页面下也可能出现：带渠道 Key
+        if (!headers.Authorization && config?.apiKey?.trim() && isChannelContentPath(resolvedUrl)) {
+            headers.Authorization = `Bearer ${config.apiKey.trim()}`;
+        }
+        const response = await fetch(resolvedUrl, {
             signal: options?.signal,
             headers,
-            credentials: url.includes("token=") ? "include" : "same-origin",
+            credentials: resolvedUrl.includes("token=") ? "include" : "same-origin",
         });
         if (!response.ok) throw new Error(`下载视频失败（${response.status}）`);
         const blob = await response.blob();
@@ -3138,29 +3413,46 @@ async function downloadVideoBlob(url: string, options?: RequestOptions, config?:
         return blob;
     }
     // 已知 CORS 封锁主机：浏览器 JS 永远读不到，避免无意义的 axios 报错刷屏
-    if (isBrowserCorsBlockedVideoHost(url)) {
+    if (isBrowserCorsBlockedVideoHost(resolvedUrl)) {
         throw new Error("远程视频禁止浏览器直读（CORS）");
     }
     // 私网绝对地址：不要让浏览器直连 127.0.0.1（页面在 3011 时必失败）
-    if (isPrivateOrLoopbackHost(safeHostname(url))) {
-        const lan = rewritePrivateVideoUrlToLanRelay(url, config);
+    if (isPrivateOrLoopbackHost(safeHostname(resolvedUrl))) {
+        const lan = rewritePrivateVideoUrlToLanRelay(resolvedUrl, config);
         if (!lan) throw new Error("内网视频地址无法在浏览器直连");
         return downloadVideoBlob(lan, options, config);
     }
-    // 中转 content 路径（相对 video.url 解析后）需要 Bearer；公网 CDN 不带 Key
+    // 中转 content 路径（相对 video.url 解析后 / New API ServerAddress 绝对 URL）需要 Bearer；公网 CDN 不带 Key
     const headers: Record<string, string> = {};
-    if (config?.apiKey?.trim() && isChannelHostedVideoUrl(url, config)) {
+    if (config?.apiKey?.trim() && (isChannelHostedVideoUrl(resolvedUrl, config) || isChannelContentPath(resolvedUrl))) {
         headers.Authorization = `Bearer ${config.apiKey.trim()}`;
     }
-    const response = await axios.get<Blob>(url, {
-        responseType: "blob",
-        timeout: 120000,
-        signal: options?.signal,
-        headers: Object.keys(headers).length ? headers : undefined,
-    });
-    await assertVideoBlob(response.data);
-    if (!response.data.size) throw new Error("视频内容为空");
-    return response.data;
+    try {
+        const response = await axios.get<Blob>(resolvedUrl, {
+            responseType: "blob",
+            timeout: 120000,
+            signal: options?.signal,
+            headers: Object.keys(headers).length ? headers : undefined,
+        });
+        await assertVideoBlob(response.data);
+        if (!response.data.size) throw new Error("视频内容为空");
+        return response.data;
+    } catch (error) {
+        // 把 Network Error / 无 response 收成可读文案，便于区分 CORS/端口/Key
+        if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+        if (axios.isAxiosError(error)) {
+            if (!error.response) {
+                const code = String(error.code || "").toUpperCase();
+                throw new Error(
+                    code === "ECONNABORTED" || /timeout/i.test(error.message || "")
+                        ? "下载视频超时"
+                        : `Network Error（无法连接 content 地址，请核对渠道 Base 主机/端口与 API Key）`,
+                );
+            }
+            throw new Error(`下载视频失败（${error.response.status}）`);
+        }
+        throw error;
+    }
 }
 
 /** 下载地址是否落在当前 AI 渠道主机上（相对 video.url 解析结果 / content 路径） */
@@ -3186,10 +3478,73 @@ function isChannelHostedVideoUrl(url: string, config?: AiConfig) {
             return target.pathname.startsWith(AI_PROXY_BASE_URL) || target.pathname.startsWith(LAN_AI_BASE_URL);
         }
         const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(rawBase) ? rawBase : `https://${rawBase}`;
-        const baseHost = new URL(withScheme).hostname.toLowerCase();
-        return target.hostname.toLowerCase() === baseHost;
+        const base = new URL(withScheme);
+        const baseHost = base.hostname.toLowerCase();
+        const targetHost = target.hostname.toLowerCase();
+        // 主机相同（端口可不同：New API ServerAddress 常丢 :3000）
+        if (targetHost === baseHost) return true;
+        // content 路径但主机不同：仍当渠道托管（会再 rewrite 到渠道 Base）
+        if (isChannelContentPath(target.pathname + target.search) || isChannelContentPath(target.pathname)) {
+            // 排除公网 CDN
+            if (isBrowserCorsBlockedVideoHost(url) || /vidgen\.|imgen\.|cdn\.x\.ai|byteimg|volces|volcengine/i.test(targetHost)) {
+                return false;
+            }
+            return true;
+        }
+        return false;
     } catch {
         return false;
+    }
+}
+
+/**
+ * New API `BuildProxyURL` 用系统 ServerAddress 拼绝对 content URL，常丢端口或与渠道 Base 不一致
+ *（如渠道 `http://openai2api.com:3000`，url 却是 `http://openai2api.com/v1/videos/{id}/content`）。
+ * 浏览器直连会 Network Error；重写到当前渠道 origin + path，再带 Bearer 下载。
+ * 公网 CDN / 非 content 路径不改。
+ */
+export function rewriteChannelVideoContentUrl(url: string, config?: AiConfig): string {
+    if (!url || !config?.baseUrl?.trim()) return "";
+    const raw = url.trim();
+    if (!raw) return "";
+
+    // 相对 content → 按渠道 Base 解析
+    if (!/^https?:\/\//i.test(raw) && (raw.startsWith("/") || isChannelContentPath(raw))) {
+        if (!isChannelContentPath(raw) && !isSameOriginRelayBaseUrl(config.baseUrl)) return "";
+        return resolveGrokRelativeMediaUrl(raw.startsWith("/") ? raw : `/${raw}`, config.baseUrl) || "";
+    }
+
+    let parsed: URL;
+    try {
+        parsed = new URL(raw);
+    } catch {
+        return "";
+    }
+    const pathWithQuery = `${parsed.pathname || "/"}${parsed.search || ""}`;
+    if (!isChannelContentPath(pathWithQuery) && !isChannelContentPath(parsed.pathname)) return "";
+    if (isBrowserCorsBlockedVideoHost(raw) || /vidgen\.|imgen\.|cdn\.x\.ai|byteimg|volces|volcengine/i.test(parsed.hostname)) {
+        return "";
+    }
+
+    const rawBase = config.baseUrl.trim();
+    if (isSameOriginRelayBaseUrl(rawBase)) {
+        const prefix = isAiProxyBaseUrl(rawBase) ? AI_PROXY_BASE_URL : isLanAiBaseUrl(rawBase) ? LAN_AI_BASE_URL : "";
+        if (!prefix) return "";
+        const joined = `${prefix}${pathWithQuery.startsWith("/") ? pathWithQuery : `/${pathWithQuery}`}`;
+        return joined;
+    }
+
+    try {
+        const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(rawBase) ? rawBase : `https://${rawBase}`;
+        const base = new URL(withScheme);
+        // 路径已含 /v1/... 时用 origin 根拼接，避免 /v1/v1
+        const origin = base.origin;
+        const rewritten = new URL(pathWithQuery.startsWith("/") ? pathWithQuery : `/${pathWithQuery}`, origin).toString();
+        // 仅当主机或端口与原 URL 不同、或 scheme 不同时才重写；相同则返回空让调用方用原 URL
+        if (rewritten.replace(/\/+$/, "") === raw.replace(/\/+$/, "")) return "";
+        return rewritten;
+    } catch {
+        return "";
     }
 }
 
@@ -3205,18 +3560,27 @@ async function assertRemoteVideoReady(url: string, options?: RequestOptions) {
 
 function videoDownloadCandidates(url: string, config?: AiConfig) {
     const list: string[] = [];
-    const lanUrl = rewritePrivateVideoUrlToLanRelay(url, config);
-    // 0) 内网/环回视频地址：优先同源 /lan-ai（需 LAN_AI_UPSTREAM）
-    if (lanUrl) list.push(lanUrl);
-    // 1) 当前渠道若是 ai-proxy，优先带 token 的媒体代理
+    // 0) New API content 绝对 URL：先按渠道 Base 重写（修正 ServerAddress 丢端口/主机）
+    const channelContent = rewriteChannelVideoContentUrl(url, config);
+    if (channelContent && !list.includes(channelContent)) list.push(channelContent);
+
+    const lanUrl = rewritePrivateVideoUrlToLanRelay(channelContent || url, config);
+    // 1) 内网/环回视频地址：优先同源 /lan-ai（需 LAN_AI_UPSTREAM）
+    if (lanUrl && !list.includes(lanUrl)) list.push(lanUrl);
+    // 2) 当前渠道若是 ai-proxy，优先带 token 的媒体代理
     const channelProxy = mediaProxyUrl(url, config);
-    if (channelProxy) list.push(channelProxy);
-    // 2) 对 xAI 等 CORS 封锁 CDN：即使生成走中转站，也尝试同源 /ai-proxy/media 取字节（静默失败）
+    if (channelProxy && !list.includes(channelProxy)) list.push(channelProxy);
+    // 3) 对 xAI 等 CORS 封锁 CDN：即使生成走中转站，也尝试同源 /ai-proxy/media 取字节（静默失败）
     //    这样本地可落盘 storageKey，云端上云才能成功。
     const sameOriginProxy = sameOriginMediaProxyUrl(url);
     if (sameOriginProxy && !list.includes(sameOriginProxy)) list.push(sameOriginProxy);
-    // 3) 非封锁主机才尝试浏览器直连（含中转相对路径解析后的渠道 content 地址）
+    // 4) 非封锁主机才尝试浏览器直连（含中转相对路径解析后的渠道 content 地址）
     if (isPublicMediaUrl(url) && !isBrowserCorsBlockedVideoHost(url) && !list.includes(url)) list.push(url);
+    // 5) 相对 content 路径：解析到渠道 Base 后再试（channelContent 已覆盖；兜底）
+    if (!list.length && isChannelContentPath(url) && config) {
+        const resolved = resolveGrokRelativeMediaUrl(url.startsWith("/") ? url : `/${url}`, config.baseUrl);
+        if (resolved) list.push(resolved);
+    }
     if (!list.length && isPublicMediaUrl(url)) list.push(url);
     return list;
 }

@@ -25,6 +25,7 @@ import {
     shouldIgnoreClipboardPasteTarget,
 } from "@/lib/clipboard-images";
 import { grokEditVideoReferenceError, GROK_EDIT_REFERENCE_LIMITS, grokResolutionShortfallMessage, isGrokVideoConfig, normalizeGrokResolution, resolveGrokVideoModeGuide, videoResolutionDisplay } from "@/lib/grok-video";
+import { isKlingVideoConfig, KLING_REFERENCE_LIMITS } from "@/lib/kling-video";
 import { useLiveElapsedMs } from "@/hooks/use-live-elapsed-ms";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import {
@@ -50,6 +51,7 @@ import {
 } from "@/lib/seedance-video";
 import {
     GENERIC_OPENAI_VIDEO_MODE_GUIDE,
+    KLING_VIDEO_MODE_GUIDE,
     SEEDANCE_AGENT_PLAN_MODE_GUIDE,
     SEEDANCE_VIDEO_MODE_GUIDE,
     type VideoModeGuide,
@@ -215,11 +217,13 @@ export default function VideoPage() {
     const seedanceAgentPlanMode = seedanceMode && isArkPlanBaseUrl(videoRequestConfig.baseUrl);
     const seedanceRelayMode = seedanceMode && !seedanceAgentPlanMode;
     const grokMode = isGrokVideoConfig(videoRequestConfig);
+    const klingMode = isKlingVideoConfig(videoRequestConfig);
     const soraMode = isSoraVideoConfig(videoRequestConfig);
     const veoMode = isVeoVideoConfig(videoRequestConfig);
     const soraVeoMode = isSoraOrVeoVideoConfig(videoRequestConfig);
     const soraVeoImageMax = soraVeoMode ? soraVeoReferenceImageLimit(model) : SEEDANCE_REFERENCE_LIMITS.images;
     const soraVeoImageMaxBytes = soraVeoMode ? soraVeoReferenceImageMaxBytes(model) : SEEDANCE_REFERENCE_LIMITS.imageMaxBytes;
+    const imageReferenceMax = klingMode ? KLING_REFERENCE_LIMITS.images : soraVeoMode ? soraVeoImageMax : SEEDANCE_REFERENCE_LIMITS.images;
     const videoProviderLabel = agnesMode
         ? "Agnes Video"
         : seedanceAgentPlanMode
@@ -228,11 +232,13 @@ export default function VideoPage() {
             ? "Seedance · OpenAI 中转"
             : grokMode
               ? "Grok Imagine"
-              : soraMode
-                ? "Sora /videos"
-                : veoMode
-                  ? "Veo /videos"
-                  : "OpenAI /videos";
+              : klingMode
+                ? "可灵 / Kling"
+                : soraMode
+                  ? "Sora /videos"
+                  : veoMode
+                    ? "Veo /videos"
+                    : "OpenAI /videos";
     const videoUsesCustomScript = Boolean(resolveModelScript(effectiveConfig, model));
     const videoReadinessWarning = getVideoReadinessWarning(videoRequestConfig, model);
     const referenceModeGuide: VideoModeGuide = agnesMode
@@ -243,9 +249,11 @@ export default function VideoPage() {
             ? SEEDANCE_VIDEO_MODE_GUIDE
             : grokMode
               ? resolveGrokVideoModeGuide(videoRequestConfig.baseUrl)
-              : soraVeoMode
-                ? soraVeoModeGuide
-                : GENERIC_OPENAI_VIDEO_MODE_GUIDE;
+              : klingMode
+                ? KLING_VIDEO_MODE_GUIDE
+                : soraVeoMode
+                  ? soraVeoModeGuide
+                  : GENERIC_OPENAI_VIDEO_MODE_GUIDE;
     const canGenerate = Boolean(prompt.trim());
 
     useEffect(() => {
@@ -262,19 +270,25 @@ export default function VideoPage() {
         const selectedFiles = Array.from(files || []);
         const unsupported = selectedFiles.filter((file) => !file.type.startsWith("image/") && !file.type.startsWith("video/") && !isSupportedAudioFile(file));
         if (unsupported.length) message.warning("已忽略不支持的参考素材，请使用图片、mp4/mov 视频或 mp3/wav 音频");
-        const imageMax = soraVeoMode ? soraVeoImageMax : SEEDANCE_REFERENCE_LIMITS.images;
+        const imageMax = imageReferenceMax;
         const imageMaxBytes = soraVeoMode ? soraVeoImageMaxBytes : SEEDANCE_REFERENCE_LIMITS.imageMaxBytes;
-        const videoMax = grokMode ? GROK_EDIT_REFERENCE_LIMITS.videos : SEEDANCE_REFERENCE_LIMITS.videos;
+        const videoMax = klingMode ? 0 : grokMode ? GROK_EDIT_REFERENCE_LIMITS.videos : SEEDANCE_REFERENCE_LIMITS.videos;
         const videoMaxBytes = grokMode ? GROK_EDIT_REFERENCE_LIMITS.videoMaxBytes : SEEDANCE_REFERENCE_LIMITS.videoMaxBytes;
-        const audioMax = SEEDANCE_REFERENCE_LIMITS.audios;
+        const audioMax = klingMode ? 0 : SEEDANCE_REFERENCE_LIMITS.audios;
         const imageFiles = selectedFiles.filter((file) => file.type.startsWith("image/") && file.size <= imageMaxBytes).slice(0, Math.max(0, imageMax - references.length));
         const videoFiles = selectedFiles.filter((file) => file.type.startsWith("video/") && file.size <= videoMaxBytes).slice(0, Math.max(0, videoMax - videoReferences.length));
         const audioFiles = selectedFiles.filter((file) => isSupportedAudioFile(file) && file.size <= SEEDANCE_REFERENCE_LIMITS.audioMaxBytes).slice(0, audioMax - audioReferences.length);
         if (selectedFiles.some((file) => file.type.startsWith("image/") && file.size > imageMaxBytes)) {
             message.warning(soraVeoMode ? "已忽略超过 20MB 的参考图（Sora/Veo 上限）" : "已忽略超过 30MB 的参考图");
         }
+        if (klingMode && selectedFiles.some((file) => file.type.startsWith("image/")) && references.length >= imageMax) {
+            message.warning(`可灵图生最多 ${imageMax} 张参考图（首帧 + 可选尾帧）`);
+        }
         if (soraVeoMode && selectedFiles.some((file) => file.type.startsWith("image/")) && references.length >= imageMax) {
             message.warning(veoMode ? `Veo 图生视频最多 ${imageMax} 张参考图` : "Sora 图生视频只使用 1 张首帧参考图");
+        }
+        if (klingMode && selectedFiles.some((file) => file.type.startsWith("video/") || isSupportedAudioFile(file))) {
+            message.warning("可灵暂不支持参考视频/音频，已忽略");
         }
         if (selectedFiles.some((file) => file.type.startsWith("video/") && file.size > videoMaxBytes)) {
             message.warning(grokMode ? "已忽略超过 100MB 的参考视频（Grok edits 上限）" : "已忽略超过 50MB 的参考视频");
@@ -600,7 +614,16 @@ export default function VideoPage() {
             message.error(agnesReferenceError);
             return null;
         }
-        if (grokMode && videoReferences.length) {
+        if (klingMode) {
+            if (videoReferences.length || audioReferences.length) {
+                message.error("可灵（Kling）暂不支持参考视频或参考音频，请移除后重试，或改用 Seedance / Grok edits");
+                return null;
+            }
+            if (references.length > KLING_REFERENCE_LIMITS.images) {
+                message.error(`可灵图生最多 ${KLING_REFERENCE_LIMITS.images} 张参考图（首帧 + 可选尾帧），请移除多余参考`);
+                return null;
+            }
+        } else if (grokMode && videoReferences.length) {
             if (audioReferences.length) {
                 message.error("Grok 视频编辑暂不支持参考音频，请移除音频后重试");
                 return null;
@@ -850,7 +873,7 @@ export default function VideoPage() {
                 if (state.status === "failed") throw new Error(state.error);
                 if (attempt === budget.maxAttempts - 1) {
                     throw new Error(
-                        `${budget.timeoutLabel}视频生成超时，请稍后重试` + (budget.isSoraVeo ? "（中转排队较慢时可到历史记录里继续查询）" : ""),
+                        `${budget.timeoutLabel}视频生成超时，请稍后重试` + (budget.longRunningHint ? "（中转排队较慢时可到历史记录里继续查询；上游任务可能仍在跑或已成功）" : ""),
                     );
                 }
                 await delay(budget.delayMs, controller.signal);
@@ -1060,7 +1083,15 @@ export default function VideoPage() {
                                                 </div>
                                             )}
                                             <span className="pointer-events-none absolute left-1 top-1 z-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">
-                                                {seedanceRelayMode ? seedanceRelayWorkbenchImageLabel(index, references.length) : seedanceReferenceLabel("image", index)}
+                                                {klingMode
+                                                    ? references.length === 2
+                                                        ? index === 0
+                                                            ? "首帧"
+                                                            : "尾帧"
+                                                        : seedanceReferenceLabel("image", index)
+                                                    : seedanceRelayMode
+                                                      ? seedanceRelayWorkbenchImageLabel(index, references.length)
+                                                      : seedanceReferenceLabel("image", index)}
                                             </span>
                                             <ReferenceOrderButtons index={index} total={references.length} onMove={(offset) => setReferences((value) => moveListItem(value, index, offset))} />
                                             <button type="button" className="absolute right-1 top-1 z-2 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label="移除参考图">
@@ -1072,13 +1103,15 @@ export default function VideoPage() {
                                         <div className="flex min-w-full items-center justify-center text-sm text-stone-500">
                                             {referenceDragTarget === "image"
                                                 ? "松开即可上传参考资产"
-                                                : soraVeoMode
-                                                  ? veoMode
-                                                      ? `暂无参考图，可拖入 / Ctrl+V；Veo 图生最多 ${soraVeoImageMax} 张`
-                                                      : "暂无参考图，可拖入 / Ctrl+V；Sora 图生仅 1 张首帧"
-                                                  : seedanceRelayMode
-                                                    ? "暂无参考图；2 张=首/尾帧，3+ 张=主参考+补充，最多 9 张"
-                                                    : "暂无参考图，可拖入 / 上传 / Ctrl+V 粘贴，最多 9 张"}
+                                                : klingMode
+                                                  ? `暂无参考图，可拖入 / Ctrl+V；可灵图生最多 ${KLING_REFERENCE_LIMITS.images} 张（首帧 + 可选尾帧）`
+                                                  : soraVeoMode
+                                                    ? veoMode
+                                                        ? `暂无参考图，可拖入 / Ctrl+V；Veo 图生最多 ${soraVeoImageMax} 张`
+                                                        : "暂无参考图，可拖入 / Ctrl+V；Sora 图生仅 1 张首帧"
+                                                    : seedanceRelayMode
+                                                      ? "暂无参考图；2 张=首/尾帧，3+ 张=主参考+补充，最多 9 张"
+                                                      : "暂无参考图，可拖入 / 上传 / Ctrl+V 粘贴，最多 9 张"}
                                         </div>
                                     ) : null}
                                 </div>
@@ -1121,7 +1154,9 @@ export default function VideoPage() {
                                         <div className="flex min-w-full items-center justify-center text-sm text-stone-500">
                                             {referenceDragTarget === "video"
                                                 ? "松开即可上传参考资产"
-                                                : `暂无参考视频，可拖入文件，最多 ${grokMode ? 1 : SEEDANCE_REFERENCE_LIMITS.videos} 个${grokMode ? "（Grok edits）" : seedanceRelayMode ? "（OpenAI 中转）" : ""}`}
+                                                : klingMode
+                                                  ? "可灵暂不支持参考视频，请改用参考图（首帧/尾帧）或切换 Seedance / Grok"
+                                                  : `暂无参考视频，可拖入文件，最多 ${grokMode ? 1 : SEEDANCE_REFERENCE_LIMITS.videos} 个${grokMode ? "（Grok edits）" : seedanceRelayMode ? "（OpenAI 中转）" : ""}`}
                                         </div>
                                     ) : null}
                                 </div>
@@ -1160,7 +1195,11 @@ export default function VideoPage() {
                                     ))}
                                     {!audioReferences.length ? (
                                         <div className="flex min-w-full items-center justify-center text-center text-sm text-stone-500">
-                                            {referenceDragTarget === "audio" ? "松开即可上传参考资产" : "暂无参考音频，可拖入文件，最多 3 个，mp3/wav，单个 15MB 内"}
+                                            {referenceDragTarget === "audio"
+                                                ? "松开即可上传参考资产"
+                                                : klingMode
+                                                  ? "可灵暂不支持参考音频，请改用参考图（首帧/尾帧）或切换 Seedance"
+                                                  : "暂无参考音频，可拖入文件，最多 3 个，mp3/wav，单个 15MB 内"}
                                         </div>
                                     ) : null}
                                 </div>

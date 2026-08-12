@@ -113,6 +113,27 @@ describe("resolveVideoCapability", () => {
         expect(cap.provider).toBe("veo");
         expect(cap.seconds.map((item) => item.value)).toEqual(["4", "6", "8"]);
     });
+
+    it("exposes Kling 5/10s, std/pro, and size options", () => {
+        const cap = resolveVideoCapability(baseConfig({ model: "可灵::Kling-3.0-turbo", videoModel: "可灵::Kling-3.0-turbo" }));
+        expect(cap.provider).toBe("kling");
+        expect(cap.seconds.map((item) => item.value)).toEqual(["5", "10"]);
+        expect(cap.resolutions.map((item) => item.value)).toEqual(["720", "1080"]);
+        expect(cap.ratios.map((item) => item.value)).toEqual(["1280x720", "720x1280", "1024x1024"]);
+        const clamped = clampVideoConfigToCapability(
+            baseConfig({
+                model: "可灵::kling-v3",
+                videoModel: "可灵::kling-v3",
+                videoSeconds: "8",
+                size: "9:16",
+                vquality: "high",
+            }),
+        );
+        expect(clamped.videoSeconds).toBe("10");
+        expect(clamped.size).toBe("720x1280");
+        expect(clamped.vquality).toBe("1080");
+        expect(videoSettingsSummary(baseConfig({ model: "可灵::kling-v3", videoModel: "可灵::kling-v3", videoSeconds: "5", size: "1280x720", vquality: "720" }))).toMatch(/可灵 · std/);
+    });
 });
 
 describe("resolveImageCapability", () => {

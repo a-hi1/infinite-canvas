@@ -2,6 +2,10 @@
 
 ## Unreleased
 
++ [修复] 可灵原生口被拼成 `/v1/kling/...`：`buildApiUrl` 对 `/kling/*` 等主机根路径不再强制 prepend `/v1`（base 已带 `/v1` 时会剥掉），文生 Network 应为 `…/kling/v1/videos/text2video`；此前原生口永远 404/405 只剩统一口回退，请求体 ~177B 的 `POST /v1/video/generations` 在渠道类型为 OpenAI/Sora 时仍会 405。`ai-proxy` 上游拼接同步避免 `/v1/kling`。
++ [修复] 可灵图生/文生仍 405：创建优先 JSON `POST /kling/v1/videos/text2video|image2video`，失败再回退 `/v1/video/generations`；统一口不再把同一张参考图重复塞进 `image`+`images`+`input_reference`（曾导致 ~14MB body）；参考图按中转预算压缩；405 错误文案标明需后台绑定 Kling 渠道类型。`ai-proxy` 白名单补 `/kling/v1/videos/*` 与 `/v1/video/generations/{id}`。
++ [新增] 可灵 / Kling 视频完整适配（openai2api / New API）：模型名含 `kling` 时走 JSON 可灵原生口 + 统一任务口回退，**禁止**落到 OpenAI `/videos` multipart。支持文生与图生（≤2 张：首帧 + 可选尾帧）、时长 5/10s、std/pro（清晰度 high≈pro）、16:9/9:16/1:1；不支持参考视频/音频。工作台/画布预检与设置卡已对齐；轮询复用 OpenAI 兼容路径 `createPath=/video/generations`。不改 Grok/Seedance/Sora/Veo/Agnes。
++ [修复] openai2api/New API Grok 成片下载：创建/轮询仍只走 `/video/generations`（禁止 `/videos` platform 48）；完成态 content 优先 `GET /v1/videos/{id}/content`（New API 成片代理，需 Bearer）。若中转用 `ServerAddress` 拼出丢端口/错主机的绝对 content URL，按渠道 Base 重写后再鉴权下载，修复「需鉴权…Network Error」。创建路径与 content 路径分离；vidgen 公网 CDN 仍不带中转 Key。
 + [修复] 精确短名 `seedance2` / `seedance2.5` 走 OpenAI Video：`POST /v1/videos` + 轮询 `/videos/{id}`，完成无 URL 时可回退 content 下载；纯文生 `model/prompt/seconds(number)/size(像素)`；有参考图/视频/音频时仍完整发送 `content[]` + `metadata.content`（不静默丢素材），并附带 `images`/`videos`/`audios` 兼容字段。其它 `doubao-seedance-*` 仍走 `/video/generations`，Agent Plan 不变；渠道显示名（如「Veo」）不改变上游分组，`under group default` 需中转授权对应分组。`seedance2.5` 按同路径试发，以 Network 真实响应为准。
 + [修复] Seedance 中转时长：OpenAI2API/New API 不接受智能 `-1`，中转只提供固定秒数并把旧 `-1` 归一为 5；时长框可直接输入，滚轮不改值。Agent Plan 仍保留智能时长。
 + [修复] 画布/素材 `POST /api/blobs` 同账号同 `storageKey` 客户端并发合并与会话成功缓存；服务端完整幂等命中不计新上传限额，降低重复同步 429。

@@ -683,12 +683,49 @@ function uniqueModelOptions(models: string[]) {
     return Array.from(new Set((models || []).map((model) => model.trim()).filter(Boolean)));
 }
 
+/**
+ * 拼接 AI 接口 URL。
+ * - 相对 OpenAI 风格路径（如 `/videos`、`/video/generations`、`/models`）挂在 `/v1`（或已有 `/api/v3` / `/api/plan/v3`）下。
+ * - 已带版本/厂商根路径（`/v1/...`、`/kling/...`、`/api/...`、`/agnesapi`、`/media`）挂在主机根，**禁止**再拼成 `/v1/kling/...`。
+ */
 export function buildApiUrl(baseUrl: string, path: string) {
     let normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
     normalizedBaseUrl = normalizeArkPlanBaseUrl(normalizedBaseUrl);
+    const requestPath = !path ? "" : path.startsWith("/") ? path : `/${path}`;
+    const lowerPath = requestPath.toLowerCase();
+
+    // 主机根绝对路径：不强制 /v1 前缀；若 base 已以 /v1 等结尾则剥掉，避免双前缀
+    if (isHostRootApiPath(lowerPath)) {
+        normalizedBaseUrl = stripTrailingApiVersion(normalizedBaseUrl);
+        return `${normalizedBaseUrl}${requestPath}`;
+    }
+
     const lowerBaseUrl = normalizedBaseUrl.toLowerCase();
-    const apiBaseUrl = lowerBaseUrl.endsWith("/v1") || lowerBaseUrl.endsWith("/api/v3") || lowerBaseUrl.endsWith("/api/plan/v3") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`;
-    return `${apiBaseUrl}${path}`;
+    const apiBaseUrl =
+        lowerBaseUrl.endsWith("/v1") || lowerBaseUrl.endsWith("/api/v3") || lowerBaseUrl.endsWith("/api/plan/v3")
+            ? normalizedBaseUrl
+            : `${normalizedBaseUrl}/v1`;
+    return `${apiBaseUrl}${requestPath}`;
+}
+
+/** 已是主机根下的绝对 API 路径（含厂商原生口），不要再 prepend `/v1`。 */
+function isHostRootApiPath(lowerPath: string) {
+    if (!lowerPath) return false;
+    if (lowerPath === "/v1" || lowerPath.startsWith("/v1/")) return true;
+    if (lowerPath.startsWith("/kling/")) return true;
+    if (lowerPath === "/agnesapi" || lowerPath.startsWith("/agnesapi?")) return true;
+    if (lowerPath === "/media" || lowerPath.startsWith("/media?")) return true;
+    // 已写完整 /api/... 的路径（含火山 plan）；相对 contents/... 仍走 base 上的 /api/plan/v3
+    if (lowerPath.startsWith("/api/")) return true;
+    return false;
+}
+
+function stripTrailingApiVersion(baseUrl: string) {
+    const lower = baseUrl.toLowerCase();
+    if (lower.endsWith("/v1")) return baseUrl.slice(0, -3);
+    if (lower.endsWith("/api/v3")) return baseUrl.slice(0, -7);
+    if (lower.endsWith("/api/plan/v3")) return baseUrl.slice(0, -12);
+    return baseUrl;
 }
 
 export function isAiProxyBaseUrl(baseUrl: string) {

@@ -19,7 +19,7 @@ export type VideoHostKind =
   | "private-new-api"
   | "generic";
 
-export type VideoModelFamily = "grok" | "seedance" | "sora-veo" | "agnes" | "other";
+export type VideoModelFamily = "grok" | "seedance" | "sora-veo" | "agnes" | "kling" | "other";
 
 export type VideoHostProfile = {
   kind: VideoHostKind;
@@ -109,7 +109,14 @@ const OPENAI2API_PROFILE: VideoHostProfile = {
     "/video/generations?request_id={id}",
     "/video/generations?id={id}",
   ],
-  grokContentPaths: ["/video/generations/{id}/content"],
+  // New API 成片代理固定 GET /v1/videos/{task_id}/content（TokenOrUserAuth，不走 platform 48）。
+  // 创建/轮询仍只用 /video/generations；content 下载与创建路径分离。
+  grokContentPaths: [
+    "/videos/{id}/content",
+    "/videos/{id}/download",
+    "/videos/{id}/file",
+    "/video/generations/{id}/content",
+  ],
   seedanceRelayCreatePath: "/video/generations",
   // 本机发完整多图；出片仍依赖该站 Grok 渠道类型 + 上游 multi-ref
   grokMultiImageCapability: "supported",
@@ -156,11 +163,16 @@ const PRIVATE_NEW_API_PROFILE: VideoHostProfile = {
   kind: "private-new-api",
   label: "内网 New API",
   compressLikeRelay: true,
-  // 实测 /videos/generations 404；/videos → platform 48
+  // 实测 /videos/generations 404；创建勿打 /videos（platform 48）；content 代理仍是 /videos/{id}/content
   grokCreatePaths: ["/video/generations"],
   allowGrokOpenAiVideosFallback: false,
   grokPollPaths: ["/video/generations/{id}", "/video/generations?task_id={id}", "/video/generations?request_id={id}", "/video/generations?id={id}"],
-  grokContentPaths: ["/video/generations/{id}/content"],
+  grokContentPaths: [
+    "/videos/{id}/content",
+    "/videos/{id}/download",
+    "/videos/{id}/file",
+    "/video/generations/{id}/content",
+  ],
   seedanceRelayCreatePath: "/video/generations",
   grokMultiImageCapability: "unknown",
 };
@@ -222,6 +234,7 @@ export function detectVideoModelFamily(model: string): VideoModelFamily {
   if (value.includes("seedance") || value.includes("doubao-seedance") || value.includes("seedance2")) return "seedance";
   if (value.includes("sora") || value.includes("veo")) return "sora-veo";
   if (value.includes("agnes")) return "agnes";
+  if (value.includes("kling")) return "kling";
   return "other";
 }
 
