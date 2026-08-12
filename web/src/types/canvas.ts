@@ -77,6 +77,19 @@ export type CanvasNodeMetadata = {
     sourceSheetNodeId?: string;
     /** 后续 keep/drop 筛选；当前切片可只写 null */
     sheetPick?: "keep" | "drop" | null;
+    /**
+     * 视频上游任务快照（create 成功后写入）。
+     * 超时/刷新中断后可「继续查询」复用 id，禁止整单重发；成功落盘后应清除。
+     */
+    videoTask?: {
+        id: string;
+        provider: "openai" | "seedance" | "agnes" | "grok" | "script";
+        model: string;
+        requestModel?: string;
+        createPath?: string;
+        requestedResolution?: string;
+        acceptedResolution?: string;
+    };
 };
 
 export type CanvasNodeData = {

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
++ [修复] 画布视频任务可恢复查询：create 成功后把上游 `videoTask` 写入节点 metadata；超时/刷新中断后错误态优先「继续查询」（只 poll，不重 POST），仍可选手动「重新生成」。Seedance 慢任务不再因客户端超时丢任务 id。
 + [修复] 可灵原生口被拼成 `/v1/kling/...`：`buildApiUrl` 对 `/kling/*` 等主机根路径不再强制 prepend `/v1`（base 已带 `/v1` 时会剥掉），文生 Network 应为 `…/kling/v1/videos/text2video`；此前原生口永远 404/405 只剩统一口回退，请求体 ~177B 的 `POST /v1/video/generations` 在渠道类型为 OpenAI/Sora 时仍会 405。`ai-proxy` 上游拼接同步避免 `/v1/kling`。
 + [修复] 可灵图生/文生仍 405：创建优先 JSON `POST /kling/v1/videos/text2video|image2video`，失败再回退 `/v1/video/generations`；统一口不再把同一张参考图重复塞进 `image`+`images`+`input_reference`（曾导致 ~14MB body）；参考图按中转预算压缩；405 错误文案标明需后台绑定 Kling 渠道类型。`ai-proxy` 白名单补 `/kling/v1/videos/*` 与 `/v1/video/generations/{id}`。
 + [新增] 可灵 / Kling 视频完整适配（openai2api / New API）：模型名含 `kling` 时走 JSON 可灵原生口 + 统一任务口回退，**禁止**落到 OpenAI `/videos` multipart。支持文生与图生（≤2 张：首帧 + 可选尾帧）、时长 5/10s、std/pro（清晰度 high≈pro）、16:9/9:16/1:1；不支持参考视频/音频。工作台/画布预检与设置卡已对齐；轮询复用 OpenAI 兼容路径 `createPath=/video/generations`。不改 Grok/Seedance/Sora/Veo/Agnes。

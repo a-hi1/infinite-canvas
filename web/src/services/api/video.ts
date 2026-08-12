@@ -169,6 +169,15 @@ export function videoPollBudget(task: Pick<VideoGenerationTask, "provider" | "mo
 
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], videoReferences: ReferenceVideo[] = [], audioReferences: ReferenceAudio[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {
     const task = await createVideoGenerationTask(config, prompt, references, videoReferences, audioReferences, options);
+    return awaitVideoGenerationTask(config, task, options);
+}
+
+/**
+ * 对已创建成功的上游任务继续轮询（不重新 POST）。
+ * 画布节点在 create 后写入 metadata.videoTask，超时/刷新中断后可「继续查询」复用此函数。
+ */
+export async function awaitVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationResult> {
+    if (task.readyResult?.url) return task.readyResult;
     const budget = videoPollBudget(task);
     for (let attempt = 0; attempt < budget.maxAttempts; attempt += 1) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
@@ -177,7 +186,10 @@ export async function requestVideoGeneration(config: AiConfig, prompt: string, r
         if (state.status === "failed") throw new Error(state.error);
         if (attempt === budget.maxAttempts - 1) {
             throw new Error(
-                `${budget.timeoutLabel}视频生成超时，请稍后重试` + (budget.longRunningHint ? "（中转排队较慢时可到历史记录里继续查询；上游任务可能仍在跑或已成功）" : ""),
+                `${budget.timeoutLabel}视频生成超时` +
+                    (budget.longRunningHint
+                        ? "（上游任务可能仍在跑或已成功。画布节点可点「继续查询」；视频工作台可到历史记录继续查）"
+                        : "，请稍后重试"),
             );
         }
         await delay(budget.delayMs, options?.signal);

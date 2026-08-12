@@ -45,7 +45,7 @@ type CanvasNodeProps = {
     onTitleChange?: (nodeId: string, title: string) => void;
     onToggleBatch?: (nodeId: string) => void;
     onSetBatchPrimary?: (node: CanvasNodeData) => void;
-    onRetry?: (node: CanvasNodeData) => void;
+    onRetry?: (node: CanvasNodeData, options?: { forceNew?: boolean }) => void;
     onGenerateImage?: (node: CanvasNodeData) => void;
     onViewImage?: (node: CanvasNodeData) => void;
     onContextMenu: (event: React.MouseEvent, nodeId: string) => void;
@@ -65,7 +65,7 @@ type NodeContentRendererProps = {
     onContentChange: (nodeId: string, content: string) => void;
     onStopEditing: () => void;
     mentionReferences: CanvasResourceReference[];
-    onRetry?: (node: CanvasNodeData) => void;
+    onRetry?: (node: CanvasNodeData, options?: { forceNew?: boolean }) => void;
     onGenerateImage?: (node: CanvasNodeData) => void;
     onToggleBatch?: () => void;
     onSetBatchPrimary?: () => void;
@@ -487,25 +487,60 @@ function LoadingContent({ theme }: Pick<NodeContentRendererProps, "theme">) {
 }
 
 function ErrorContent({ node, theme, onRetry }: Pick<NodeContentRendererProps, "node" | "theme" | "onRetry">) {
+    const canResumeVideoQuery = Boolean(node.type === CanvasNodeType.Video && node.metadata?.videoTask?.id);
     return (
         <div className="flex max-w-[260px] flex-col items-center gap-3 px-5 text-center">
             <div className="text-xs leading-5 text-red-300">{node.metadata?.errorDetails || "生成失败"}</div>
             <div className="flex flex-wrap items-center justify-center gap-2">
-                <button
-                    type="button"
-                    className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"
-                    style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
-                    onClick={(event) => {
-                        event.stopPropagation();
-                        onRetry?.(node);
-                    }}
-                    onMouseDown={(event) => event.stopPropagation()}
-                >
-                    <RefreshCw className="size-3.5" />
-                    重试
-                </button>
+                {canResumeVideoQuery ? (
+                    <>
+                        <button
+                            type="button"
+                            className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"
+                            style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                            title="不重新创建任务，继续轮询上游已提交的任务"
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                onRetry?.(node);
+                            }}
+                            onMouseDown={(event) => event.stopPropagation()}
+                        >
+                            <RefreshCw className="size-3.5" />
+                            继续查询
+                        </button>
+                        <button
+                            type="button"
+                            className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium opacity-80 transition hover:scale-[1.02] hover:opacity-100"
+                            style={{ background: "transparent", borderColor: theme.toolbar.border, color: theme.node.text }}
+                            title="放弃已提交任务，重新 POST 创建"
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                onRetry?.(node, { forceNew: true });
+                            }}
+                            onMouseDown={(event) => event.stopPropagation()}
+                        >
+                            重新生成
+                        </button>
+                    </>
+                ) : (
+                    <button
+                        type="button"
+                        className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"
+                        style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            onRetry?.(node);
+                        }}
+                        onMouseDown={(event) => event.stopPropagation()}
+                    >
+                        <RefreshCw className="size-3.5" />
+                        重试
+                    </button>
+                )}
             </div>
-            <div className="text-[10px] opacity-55">悬停节点可删除 / 副本 / 下载</div>
+            <div className="text-[10px] opacity-55">
+                {canResumeVideoQuery ? "上游可能已在跑：优先继续查询，勿盲目重发" : "悬停节点可删除 / 副本 / 下载"}
+            </div>
         </div>
     );
 }

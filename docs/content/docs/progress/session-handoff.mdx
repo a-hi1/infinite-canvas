@@ -204,6 +204,7 @@ docker compose -p ic3011 -f docker-compose.local.yml -f docker-compose.ic3011.ym
 - **Grok 完成态 URL**：官方形状 `video.url`；`status=done` 时 url 可能空串/晚写——优先读嵌套 `video.url`，完成无地址再等约 3 分钟并试 content 下载，禁止过早当失败。**相对路径**（如 `/v1/videos/{id}/content`）按渠道 Base 解析并鉴权下载。**绝对 content URL** 若由 New API `ServerAddress` 拼出且丢端口/错主机，按渠道 Base 重写后再带 Key 下载（修复「需鉴权…Network Error」）；公网 `vidgen` CDN 仍不带中转 Key
 - Sora/Veo：多路径 create/poll；图生禁止无参考文生回退；轮询预算约 15 分钟
 - **Seedance 轮询预算：** `provider=seedance`（含 seedance2/2.5 与 doubao 中转）约 **25 分钟**（300×5s）；中转图生常 8～15 分钟，旧 10 分钟预算易客户端先超时而上游已成功。Grok/Agnes 仍约 10 分钟。超时文案可提示历史继续查
+- **画布视频可恢复查询：** create 成功后节点 `metadata.videoTask` 落盘上游 id；超时/刷新 error 态优先「继续查询」（`awaitVideoGenerationTask` 只 poll），「重新生成」才重 POST；成功后清 videoTask
 - Seedance/Agnes 路径保留；平台视频仍无参考素材服务端路径
 - 参考图本地上限 6（平台积分图生图仍最多 4）
 - 能力卡：`web/src/lib/model-capability.ts` 只暴露真实可选值

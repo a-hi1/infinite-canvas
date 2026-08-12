@@ -6,6 +6,7 @@ import {
     buildGrokPayloadCandidates,
     buildKlingNativePayload,
     buildKlingRelayPayload,
+    awaitVideoGenerationTask,
     createVideoGenerationTask,
     grokCreatePathCandidates,
     grokEditPathCandidates,
@@ -1546,6 +1547,53 @@ describe("Kling / 可灵 relay", () => {
     it("rejects Kling reference video/audio before create", async () => {
         const videoReferences: ReferenceVideo[] = [{ id: "v1", url: "blob:video", name: "clip.mp4", type: "video/mp4", durationMs: 5000 }];
         await expect(createVideoGenerationTask(klingConfig(), "有参考视频", [], videoReferences, [])).rejects.toThrow(/暂不支持参考视频或参考音频/);
+        expect(axios.post).not.toHaveBeenCalled();
+    });
+});
+
+describe("awaitVideoGenerationTask resume (canvas recoverable query)", () => {
+    beforeEach(() => {
+        vi.mocked(axios.get).mockReset();
+        vi.mocked(axios.post).mockReset();
+    });
+
+    it("polls existing seedance task id without create POST", async () => {
+        vi.mocked(axios.get).mockResolvedValueOnce({
+            data: {
+                id: "seedance-task-resume-1",
+                status: "succeeded",
+                content: { video_url: "https://example.com/out.mp4" },
+            },
+        });
+        const result = await awaitVideoGenerationTask(
+            seedanceRelayConfig(),
+            {
+                id: "seedance-task-resume-1",
+                provider: "seedance",
+                model: "doubao-seedance-2-0-260128",
+                requestModel: "doubao-seedance-2-0-260128",
+                createPath: "/video/generations",
+            },
+        );
+        expect(result.url).toContain("out.mp4");
+        expect(axios.post).not.toHaveBeenCalled();
+        expect(axios.get).toHaveBeenCalled();
+        const polledUrl = String(vi.mocked(axios.get).mock.calls[0][0]);
+        expect(polledUrl).toContain("seedance-task-resume-1");
+    });
+
+    it("returns readyResult without network when already completed", async () => {
+        const result = await awaitVideoGenerationTask(
+            seedanceRelayConfig(),
+            {
+                id: "ready-1",
+                provider: "seedance",
+                model: "seedance2",
+                readyResult: { url: "https://cdn.example/ready.mp4", mimeType: "video/mp4" },
+            },
+        );
+        expect(result.url).toBe("https://cdn.example/ready.mp4");
+        expect(axios.get).not.toHaveBeenCalled();
         expect(axios.post).not.toHaveBeenCalled();
     });
 });

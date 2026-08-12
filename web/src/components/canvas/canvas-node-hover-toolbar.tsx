@@ -34,7 +34,7 @@ type CanvasNodeHoverToolbarProps = {
     onAngle: (node: CanvasNodeData) => void;
     onViewImage: (node: CanvasNodeData) => void;
     onReversePrompt: (node: CanvasNodeData) => void;
-    onRetry: (node: CanvasNodeData) => void;
+    onRetry: (node: CanvasNodeData, options?: { forceNew?: boolean }) => void;
     onDuplicate?: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
     onDelete: (node: CanvasNodeData) => void;
@@ -143,7 +143,26 @@ export function CanvasNodeHoverToolbar({
         { id: "delete", title: "移除节点", label: "删除", icon: <Trash2 className="size-4" />, onClick: () => onDelete(node), danger: true },
     ];
     const nodeToolbarTools: ToolbarTool[] = [
-        ...(canRetry ? [{ id: "retry", title: "重新生成", label: "重试", icon: <RefreshCw className="size-4" />, onClick: () => onRetry(node) }] : []),
+        ...(canRetry
+            ? node.type === CanvasNodeType.Video && node.metadata?.videoTask?.id
+                ? [
+                      {
+                          id: "retry",
+                          title: "继续查询上游已提交任务（不重新创建）",
+                          label: "继续查",
+                          icon: <RefreshCw className="size-4" />,
+                          onClick: () => onRetry(node),
+                      },
+                      {
+                          id: "retry-new",
+                          title: "重新 POST 创建任务",
+                          label: "重生成",
+                          icon: <RefreshCw className="size-4" />,
+                          onClick: () => onRetry(node, { forceNew: true }),
+                      },
+                  ]
+                : [{ id: "retry", title: "重新生成", label: "重试", icon: <RefreshCw className="size-4" />, onClick: () => onRetry(node) }]
+            : []),
         ...(onDuplicate ? [{ id: "duplicate", title: "复制为独立节点", label: "副本", icon: <CopyPlus className="size-4" />, onClick: () => onDuplicate(node) }] : []),
         ...(hasImage || hasVideo || isText ? [{ id: "saveAsset", title: "加入我的资产", label: "存资产", icon: <FolderPlus className="size-4" />, onClick: () => onSaveAsset(node) }] : []),
         ...(onShareWorkspace && (hasImage || hasVideo || isText) ? [{ id: "shareWorkspace", title: "发布到工作空间", label: "发布空间", icon: <Share2 className="size-4" />, onClick: () => onShareWorkspace(node) }] : []),
@@ -161,11 +180,11 @@ export function CanvasNodeHoverToolbar({
         ...(hasImage ? imageTools.map((tool) => ({ id: tool.id, title: tool.title, label: tool.label, icon: tool.icon, active: tool.active, onClick: tool.onClick })) : []),
     ];
     // Error retry is always forced visible even if user hid it in image quick-tool settings.
-    const alwaysVisibleToolIds = new Set(["retry"]);
+    const alwaysVisibleToolIds = new Set(["retry", "retry-new"]);
     const toolbarTools = hasImage
         ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => alwaysVisibleToolIds.has(tool.id) || quickImageToolIdSet.has(tool.id as ImageQuickToolId))
         : [...baseToolbarTools, ...nodeToolbarTools];
-    const selectableImageToolbarTools = [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => tool.id !== "retry") as ImageToolbarSettingsTool[];
+    const selectableImageToolbarTools = [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => tool.id !== "retry" && tool.id !== "retry-new") as ImageToolbarSettingsTool[];
 
     const closeImageToolSettings = () => {
         setImageToolSettingsOpen(false);
@@ -279,6 +298,12 @@ export function CanvasNodeInfoModal({ node, open, onClose }: { node: CanvasNodeD
                                 <div className="rounded-lg border p-3 text-red-400" style={{ borderColor: theme.node.stroke }}>
                                     {node.metadata.errorDetails}
                                 </div>
+                            ) : null}
+                            {node.type === CanvasNodeType.Video && node.metadata?.videoTask?.id ? (
+                                <InfoRow
+                                    label="上游任务"
+                                    value={`${node.metadata.videoTask.provider} · ${node.metadata.videoTask.id}${node.metadata.videoTask.createPath ? ` · ${node.metadata.videoTask.createPath}` : ""}`}
+                                />
                             ) : null}
                         </div>
                     ) : (
