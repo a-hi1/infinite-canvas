@@ -63,7 +63,7 @@ describe("model plugin OpenAI video compatibility", () => {
             method: "post",
             url: "http://openai2api.com:3000/v1/videos",
             headers: { Authorization: "Bearer test-only-key", "Content-Type": "application/json" },
-            data: { model: "seedance2", prompt: "cinematic test", seconds: 6, size: "1280x720" },
+            data: { model: "seedance2", prompt: "cinematic test", seconds: "6", size: "1280x720" },
         });
     });
 
@@ -149,7 +149,7 @@ return await poll(() => request({ method: "get", url: \"https://other.example/v1
             data: {
                 model: "seedance2",
                 prompt: "with refs",
-                seconds: 5,
+                seconds: "5",
                 size: "1280x720",
                 images: ["data:image/png;base64,aaa", "data:image/png;base64,bbb"],
                 first_frame: "data:image/png;base64,aaa",

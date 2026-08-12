@@ -69,7 +69,7 @@ OpenAI 兼容图像和文本能力继续复用现有接口：
 视频能力支持两类接口：
 
 - OpenAI 风格视频：`POST /v1/videos`、`GET /v1/videos/{id}`、`GET /v1/videos/{id}/content`。
-- **精确短名 `seedance2` / `seedance2.5`（OpenAI Video 路径）：** 创建路径固定为 `POST /v1/videos`，轮询 `GET /v1/videos/{id}`，完成无 URL 时可回退 `GET /v1/videos/{id}/content`。纯文生 body 为 `model/prompt/seconds/size`；有参考图/参考视频/参考音频时仍完整发送 `content[]` + `metadata.content`（不静默丢素材），并额外附带 `images` / `videos` / `audios` 等兼容字段。其它 `doubao-seedance-*` 仍走主机默认中转路径 `/v1/video/generations`；Agent Plan 仍走 `/contents/generations/tasks`。`seedance2.5` 按与 `seedance2` 相同路径试发（上游若改 endpoint，以 Network 真实状态码为准）。
+- **精确短名 `seedance2` / `seedance2.5`（OpenAI Video 路径）：** 创建路径固定为 `POST /v1/videos`，轮询 `GET /v1/videos/{id}`，完成无 URL 时可回退 `GET /v1/videos/{id}/content`。纯文生 body 为 `model/prompt/seconds/size`；**New API 要求 `seconds` 为字符串**（数字会 400 `invalid_json`），`duration`/`durationSeconds` 仍可为数字兼容字段。有参考图/参考视频/参考音频时仍完整发送 `content[]` + `metadata.content`（不静默丢素材），并额外附带 `images` / `videos` / `audios` 等兼容字段。其它 `doubao-seedance-*` 仍走主机默认中转路径 `/v1/video/generations`；Agent Plan 仍走 `/contents/generations/tasks`。`seedance2.5` 按与 `seedance2` 相同路径试发（上游若改 endpoint，以 Network 真实状态码为准）。
 - **自定义脚本与渠道隔离：** 脚本按真实的 `channelId::model` 绑定，渠道名称（例如「Veo」）只是本地显示名，不会改变中转站上游分组。OpenAI Video 模板支持纯文生与参考图；有参考视频/音频时内置 Seedance 路由优先，避免脚本静默忽略媒体。Base URL 带或不带 `/v1` 均不会重复拼接。
 - `openai2api.com:3000` 公开目录曾将 `seedance2` 标为 `veo-sora` + `openai-video`；`seedance2.5` 以中转当前可用名为准。若返回 `No available channel ... under group default`，说明 Key 落在 `default`；需中转站授权对应分组并确认渠道健康，本地改名不能完成授权。
 - 火山方舟 Agent Plan / Seedance 2.0：Base URL 使用 `https://ark.cn-beijing.volces.com/api/plan/v3`，创建任务为 `POST /contents/generations/tasks`，查询任务为 `GET /contents/generations/tasks/{id}`，成功结果读取 `content.video_url`。

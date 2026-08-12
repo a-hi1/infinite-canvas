@@ -364,10 +364,11 @@ const errorText = (items) => {
   const message = firstValue(items, ["message", "msg", "detail"]);
   return message ? String(message) : "";
 };
+// New API OpenAI Video：seconds 必须是 string，数字会 400 invalid_json。
 const body = {
   model,
   prompt,
-  seconds: Number(params.seconds),
+  seconds: String(params.seconds ?? ""),
   ...(params.size ? { size: params.size } : {}),
   ...(params.resolution ? { resolution: params.resolution } : {}),
   ...(params.ratio ? { ratio: params.ratio } : {}),

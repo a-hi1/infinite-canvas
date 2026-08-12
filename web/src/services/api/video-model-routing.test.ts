@@ -135,8 +135,9 @@ describe("native Seedance relay payload", () => {
         expect(payload).not.toHaveProperty("content");
         expect(payload).not.toHaveProperty("metadata");
         expect(payload.model).toBe("seedance2");
-        expect(payload.seconds).toBe(4);
-        expect(typeof payload.seconds).toBe("number");
+        // New API: seconds must be string; duration stays number for compat fields.
+        expect(payload.seconds).toBe("4");
+        expect(typeof payload.seconds).toBe("string");
         expect(payload.size).toBe("1920x1080");
         expect(payload.duration).toBe(4);
         expect(payload.durationSeconds).toBe(4);
@@ -150,17 +151,17 @@ describe("native Seedance relay payload", () => {
             "coastal clip",
         );
         expect(payload.model).toBe("seedance2.5");
-        expect(payload.seconds).toBe(5);
-        expect(typeof payload.seconds).toBe("number");
+        expect(payload.seconds).toBe("5");
+        expect(typeof payload.seconds).toBe("string");
         expect(payload.size).toBe("720x1280");
         expect(payload).not.toHaveProperty("content");
     });
 
-    it("keeps duration numeric for seedance2 OpenAI Video seconds", () => {
+    it("sends string seconds for seedance2 OpenAI Video (New API rejects number)", () => {
         const payload = seedanceRelayPayloadForTest({ ...defaultConfig, videoSeconds: "5" }, "seedance2", "test");
         expect(payload.duration).toBe(5);
-        expect(payload.seconds).toBe(5);
-        expect(typeof payload.seconds).toBe("number");
+        expect(payload.seconds).toBe("5");
+        expect(typeof payload.seconds).toBe("string");
         expect(payload.durationSeconds).toBe(5);
         expect(payload.size).toBeTruthy();
     });
@@ -168,7 +169,7 @@ describe("native Seedance relay payload", () => {
     it("maps unsupported smart duration to 5 seconds for seedance2 OpenAI Video", () => {
         const payload = seedanceRelayPayloadForTest({ ...defaultConfig, videoSeconds: "-1" }, "seedance2", "test");
         expect(payload.duration).toBe(5);
-        expect(payload.seconds).toBe(5);
+        expect(payload.seconds).toBe("5");
         expect(payload.durationSeconds).toBe(5);
     });
 
@@ -247,8 +248,8 @@ describe("native Seedance relay payload", () => {
         expect(String(payload.prompt)).toContain("视频参考");
         expect(payloadKeepsAllSeedanceRelayVideoReferences(payload, 1)).toBe(true);
         expect(payload.duration).toBe(4);
-        // seedance2 OpenAI Video uses numeric seconds; doubao-seedance relay keeps string seconds.
-        expect(payload.seconds).toBe(4);
+        // seedance2 / seedance2.5 OpenAI Video on New API: seconds is string (not number).
+        expect(payload.seconds).toBe("4");
         expect(payload.videos).toEqual(videos);
         expect(payload.reference_videos).toEqual(videos);
     });
@@ -272,7 +273,7 @@ describe("native Seedance relay payload", () => {
         expect(payload).toMatchObject({
             model: "seedance2",
             duration: 4,
-            seconds: 4,
+            seconds: "4",
             resolution: "1080p",
             ratio: "16:9",
             generate_audio: true,

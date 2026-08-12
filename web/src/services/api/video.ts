@@ -2106,12 +2106,14 @@ function buildSeedanceRelayPayload(config: AiConfig, model: string, prompt: stri
     const ratio = normalizeSeedanceRatio(config.size);
     const openAiVideo = isSeedanceOpenAiVideoModel(model);
     const pixelSize = seedancePixelSize(resolution, ratio);
-    // 对齐 openai2api 可用脚本 + Comfy：duration 数字（部分网关拒字符串）、seconds 字符串、durationSeconds 数字。
-    // seedance2(openai-video) 纯文生优先 OpenAI Video 精简体：model/prompt/seconds/size。
+    // openai2api New API（x-new-api-version）OpenAI Video：`seconds` 必须是 string，
+    // 数字会 400：cannot unmarshal number into Go struct field .Alias.seconds of type string。
+    // duration / durationSeconds 仍发 number（部分 Comfy/中转读数字时长）。
+    // seedance2 / seedance2.5 纯文生优先：model/prompt/seconds/size，并保留兼容字段。
     const base: Record<string, unknown> = openAiVideo
         ? {
               model: modelOptionName(model),
-              seconds: duration,
+              seconds: String(duration),
               ...(pixelSize ? { size: pixelSize } : {}),
               // 兼容部分中转仍读 duration / resolution / ratio / generate_audio
               duration,
